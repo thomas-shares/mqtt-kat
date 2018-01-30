@@ -14,13 +14,15 @@ import clojure.lang.PersistentArrayMap;
 
 public class MqttPublish extends GenericMessage {
 
-	public static IPersistentMap decode(byte info, byte[] remainAndPayload) throws IOException {
+	public static IPersistentMap decode(byte flags, byte[] remainAndPayload) throws IOException {
 		System.out.println("PUBLISH message...");
 		Map<Object, Object> m = new TreeMap<Object, Object>();
 		m.put(PACKET_TYPE, intern("PUBLISH"));
-		m.put(DUPLICATE, (info & 0x08) == 0x08);
-		m.put(MSG_QOS, qos((info & 0x06)));
-		m.put(RETAIN, (info & 0x01) == 0x01);
+		m.put(FLAGS, flags);
+
+		m.put(DUPLICATE, (flags & 0x08) == 0x08);
+		m.put(MSG_QOS, qos((flags & 0x06)));
+		m.put(RETAIN, (flags & 0x01) == 0x01);
 		String topic = decodeUTF8(remainAndPayload, 0);
 		m.put(TOPIC, topic);
 		m.put(PAYLOAD, Arrays.copyOfRange(remainAndPayload, topic.length() + 2, remainAndPayload.length));

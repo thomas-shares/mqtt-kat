@@ -8,7 +8,9 @@
   :global-vars {*warn-on-reflection* true}
 
   :dependencies
-  [[org.clojure/clojure "1.9.0"]]
+  [[org.clojure/clojure "1.9.0"]
+   [org.clojure/spec.alpha "0.1.143"]
+   [org.clojure/core.specs.alpha "0.1.24"]]
 
   :plugins
   [[lein-swank   "1.4.5"]

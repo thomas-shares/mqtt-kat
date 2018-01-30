@@ -5,26 +5,25 @@
 (defonce server (atom nil))
 
 (def handler-map {:CONNECT h/connect
-                   :CONNACK h/connack
-                   :PUBLISH h/publish
-                   :PUBACK  h/puback
-                   :PUBREC  h/pubrec
-                   :PUBREL  h/pubrel
-                   :PUBCOMP h/pubcomp
-                   :SUBSCRIBE h/subscribe
-                   :UNSCUBSCRIBE h/unsubscribe
-                   :PINGREQ h/pingreq
-                   :PINGRES h/pingresp
-                   :DISCONNECT h/disconnect
-                   :AUTHENTICATE h/authenticate})
+                  :CONNACK h/connack
+                  :PUBLISH h/publish
+                  :PUBACK  h/puback
+                  :PUBREC  h/pubrec
+                  :PUBREL  h/pubrel
+                  :PUBCOMP h/pubcomp
+                  :SUBSCRIBE h/subscribe
+                  :UNSCUBSCRIBE h/unsubscribe
+                  :PINGREQ h/pingreq
+                  :PINGRES h/pingresp
+                  :DISCONNECT h/disconnect
+                  :AUTHENTICATE h/authenticate})
 
 (defn handler-fn [msg]
   ;(println msg)
   (when-let [packet-type (:packet-type msg)]
     ((packet-type handler-map) msg)))
 
-(defn run-server
-  [ip port]
+(defn run-server [ip port]
   (let [s (MqttServer. ip port (MqttHandler. handler-fn 4))]
     (.start s)
     (with-meta

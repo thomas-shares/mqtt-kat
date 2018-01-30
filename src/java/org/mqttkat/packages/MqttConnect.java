@@ -3,6 +3,8 @@ package org.mqttkat.packages;
 import clojure.lang.IPersistentMap;
 import java.util.TreeMap;
 
+import org.mqttkat.server.MallFormedPacketException;
+
 import static org.mqttkat.server.MqttUtil.*;
 
 import clojure.lang.PersistentArrayMap;
@@ -13,8 +15,10 @@ import java.io.IOException;
 
 public class MqttConnect extends GenericMessage {
 
-	public static IPersistentMap decodeConnect(byte info, byte[] data) throws IOException {
+	public static IPersistentMap decodeConnect(byte flags, byte[] data) throws IOException {
 		System.out.println("decode connect...");
+
+		
 		int offset = 0;
 		String protocolName = decodeUTF8(data, offset);
 		offset = protocolName.length() + 2;
@@ -71,6 +75,7 @@ public class MqttConnect extends GenericMessage {
 
 		Map<Object, Object> m = new TreeMap<Object, Object>();
 		m.put(PACKET_TYPE, intern("CONNECT"));
+		m.put(FLAGS, flags);
 		m.put(PROTOCOL_NAME, protocolName);
 		m.put(CLIENT_ID, clientID);
 		m.put(PROTOCOL_VERSION, clientVersion);

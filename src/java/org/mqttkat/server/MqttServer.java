@@ -106,7 +106,9 @@ public class MqttServer implements Runnable {
 		int read = 0;
 		byte[] remainAndPayload = new byte[buf.limit()];
 		byte type = 0;
-		byte info = 0;
+		byte flags = 0;
+		int msgLength = 0;
+
 		while ((read = ch.read(buf)) > 0) {
 			buf.flip();
 			// byte[] bytes = new byte[buf.limit()];
@@ -118,14 +120,13 @@ public class MqttServer implements Runnable {
 
 			System.out.println("byte 0: "  + Integer.toBinaryString( (int) bytes[0]));
 			type = (byte) ((bytes[0] & 0xff) >> 4);
-			info = (byte) (bytes[0] &= 0x0f);
+			flags = (byte) (bytes[0] &= 0x0f);
 
 			System.out.println("type: " + Integer.toBinaryString( (int)type));
-			System.out.println("info : " + info);
+			System.out.println("flags : " + flags);
 			// long remLen = readMBI(in).getValue();
 
 			byte digit;
-			int msgLength = 0;
 			int multiplier = 1;
 			int count = 0;
 
@@ -150,37 +151,42 @@ public class MqttServer implements Runnable {
 		}
 
 		IPersistentMap incoming = null;
-		if (type == GenericMessage.MESSAGE_CONNECT) {
-			incoming =  MqttConnect.decodeConnect(info, remainAndPayload);
-		} else if (type == GenericMessage.MESSAGE_PUBLISH) {
-			incoming = MqttPublish.decode(info, remainAndPayload);
-		}else if (type == GenericMessage.MESSAGE_PUBACK) {
-			incoming = MqttPubAck.decode(info, remainAndPayload);
-		}else if (type == GenericMessage.MESSAGE_PUBREC) {
-			incoming = MqttPubRec.decode(info, remainAndPayload);
-		}else if (type == GenericMessage.MESSAGE_PUBREL) {
-			incoming = MqttPubRel.decode(info, remainAndPayload);
-		}else if (type == GenericMessage.MESSAGE_PUBCOMP) {
-			incoming = MqttPubComp.decode(info, remainAndPayload);
-		}else if (type == GenericMessage.MESSAGE_SUBSCRIBE) {
-			incoming = MqttSubscribe.decode(info, remainAndPayload);
-		}else if (type == GenericMessage.MESSAGE_SUBACK) {
-			incoming = MqttSubAck.decode(info, remainAndPayload);
-		}else if (type == GenericMessage.MESSAGE_UNSUBSCRIBE) {
-			incoming = MqttUnsubscribe.decode(info, remainAndPayload);
-		}else if (type == GenericMessage.MESSAGE_UNSUBACK) {
-			incoming = MqttUnSubAck.decode(info, remainAndPayload);
-		} else if (type == GenericMessage.MESSAGE_PINGREQ) {
-			incoming = MqttPingReq.decodePingReq();
-		} else if (type == GenericMessage.MESSAGE_PINGRESP) {
-			incoming = MqttPingResp.decode();
-		} else if (type == GenericMessage.MESSAGE_DISCONNECT) {
-			incoming = MqttDisconnect.decode(info, remainAndPayload);
-		} else if ( type ==  GenericMessage.MESSAGE_AUTHENTICATION) {
-			incoming = MqttAuthenticate.decode(info, remainAndPayload);
+		try {
+			if (type == GenericMessage.MESSAGE_CONNECT) {	
+					incoming =  MqttConnect.decodeConnect(flags, remainAndPayload);
+			} else if (type == GenericMessage.MESSAGE_PUBLISH) {
+				incoming = MqttPublish.decode(flags, remainAndPayload);
+			}else if (type == GenericMessage.MESSAGE_PUBACK) {
+				incoming = MqttPubAck.decode(flags, remainAndPayload);
+			}else if (type == GenericMessage.MESSAGE_PUBREC) {
+				incoming = MqttPubRec.decode(flags, remainAndPayload);
+			}else if (type == GenericMessage.MESSAGE_PUBREL) {
+				incoming = MqttPubRel.decode(flags, remainAndPayload);
+			}else if (type == GenericMessage.MESSAGE_PUBCOMP) {
+				incoming = MqttPubComp.decode(flags, remainAndPayload);
+			}else if (type == GenericMessage.MESSAGE_SUBSCRIBE) {
+				incoming = MqttSubscribe.decode(flags, remainAndPayload, msgLength);
+			}else if (type == GenericMessage.MESSAGE_UNSUBSCRIBE) {
+				incoming = MqttUnsubscribe.decode(flags, remainAndPayload);
+			} else if (type == GenericMessage.MESSAGE_PINGREQ) {
+				incoming = MqttPingReq.decodePingReq(flags);
+			} else if (type == GenericMessage.MESSAGE_DISCONNECT) {
+				incoming = MqttDisconnect.decode(flags, remainAndPayload);
+			} else if ( type ==  GenericMessage.MESSAGE_AUTHENTICATION) {
+				incoming = MqttAuthenticate.decode(flags, remainAndPayload);
+			} else {
+				System.out.println("FAIL!!!!!! INVALID packet send: " + type);
+				throw new MallFormedPacketException("type  set to zero (0): " + type);
+			}
+
+		} catch (MallFormedPacketException e) {
+			e.printStackTrace();
+			//TODO close connection...
 		}
 
-		handler.handle(incoming, new RespCallback(key, this));
+		if( incoming != null ) {
+			handler.handle(incoming, new RespCallback(key, this));
+		}
 	}
 
 	public void start() throws IOException {

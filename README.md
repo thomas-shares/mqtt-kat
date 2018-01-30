@@ -38,6 +38,8 @@ https://github.com/http-kit/http-kit
 
 https://github.com/eclipse/paho.mqtt.java
 
+https://lispcast.com/3-things-java-can-steal-from-clojure/
+
 ## Usage
 
 I call `(start)` function in the repl and then use an MQTT client to send packets to it and wait for it to crash.
