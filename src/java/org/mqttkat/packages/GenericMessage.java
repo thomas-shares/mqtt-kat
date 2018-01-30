@@ -24,8 +24,10 @@ public abstract class GenericMessage {
 	// Generic
 	public static final Keyword PACKET_TYPE = intern("packet-type");
 	public static final Keyword FLAGS = intern("flags");
+	public static final Keyword CLIENT_ADDRESS =  intern("client-address");
 
 	//CONNECT
+	public static final Keyword CALL_BACK = intern("call-back");
 	public static final Keyword CLIENT_ID = intern("client-id");
 	public static final Keyword PROTOCOL_NAME = intern("protocol-name");
 	public static final Keyword PROTOCOL_VERSION = intern("protocol-version");
@@ -41,6 +43,7 @@ public abstract class GenericMessage {
 	public static final Keyword WILL_MSG = intern("will-message");
 	public static final Keyword USER_NAME = intern("user-name");
 	public static final Keyword PASSWORD = intern("password");
+
 	// CONNACK
 	public static final Keyword SESSION_PRESENT = intern("session-present");
 

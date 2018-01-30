@@ -150,10 +150,13 @@ public class MqttServer implements Runnable {
 			buf.clear();
 		}
 
+		String address = (new StringBuilder(ch.socket().getInetAddress().toString())).append(":")
+				.append(ch.socket().getPort()).toString();
+		
 		IPersistentMap incoming = null;
 		try {
 			if (type == GenericMessage.MESSAGE_CONNECT) {	
-					incoming =  MqttConnect.decodeConnect(flags, remainAndPayload);
+				incoming =  MqttConnect.decodeConnect(address, flags, remainAndPayload) ; //, new RespCallback(key, this));
 			} else if (type == GenericMessage.MESSAGE_PUBLISH) {
 				incoming = MqttPublish.decode(flags, remainAndPayload);
 			}else if (type == GenericMessage.MESSAGE_PUBACK) {

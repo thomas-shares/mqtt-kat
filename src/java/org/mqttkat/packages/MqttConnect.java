@@ -3,40 +3,37 @@ package org.mqttkat.packages;
 import clojure.lang.IPersistentMap;
 import java.util.TreeMap;
 
-import org.mqttkat.server.MallFormedPacketException;
-
+import org.mqttkat.server.RespCallback;
 import static org.mqttkat.server.MqttUtil.*;
-
 import clojure.lang.PersistentArrayMap;
 import java.util.Map;
 import static clojure.lang.Keyword.intern;
-
 import java.io.IOException;
 
 public class MqttConnect extends GenericMessage {
 
-	public static IPersistentMap decodeConnect(byte flags, byte[] data) throws IOException {
-		System.out.println("decode connect...");
+	public static IPersistentMap decodeConnect(String address, byte flags, byte[] remainAndPayload) throws IOException {
+		System.out.println("decode connect from :" + address);
 
 		
 		int offset = 0;
-		String protocolName = decodeUTF8(data, offset);
+		String protocolName = decodeUTF8(remainAndPayload, offset);
 		offset = protocolName.length() + 2;
 		//System.out.println("1 " + offset);
 		//System.out.println("protocolName: " + protocolName);
-		byte clientVersion = data[offset++];
+		byte clientVersion = remainAndPayload[offset++];
 		//System.out.println("2 " + offset);
 
 		//System.out.println("clientVersion: " + clientVersion);
-		byte connectFlags = data[offset++];
+		byte connectFlags = remainAndPayload[offset++];
 		//System.out.println("3 " + offset);
 
 		//offset++;
 		//System.out.println("connectFlags: " + connectFlags);
-		short keepAlive = (short)((data[offset++]<<8) | data[offset++]);
+		short keepAlive = (short)((remainAndPayload[offset++]<<8) | remainAndPayload[offset++]);
 		System.out.println("4 " + offset);
 
-		String clientID = decodeUTF8(data, offset);
+		String clientID = decodeUTF8(remainAndPayload, offset);
 		offset += clientID.length() + 2;
 		//System.out.println("5 " + offset);
 
@@ -47,9 +44,9 @@ public class MqttConnect extends GenericMessage {
 		String willTopic = "";
 		String willMessage = "";
 		if( willFlag ) {
-			willTopic = decodeUTF8(data, offset);
+			willTopic = decodeUTF8(remainAndPayload, offset);
 			offset += willTopic.length() + 2;
-			willMessage = decodeUTF8(data, offset);
+			willMessage = decodeUTF8(remainAndPayload, offset);
 			offset += willMessage.length() + 2;
 		}
 		//System.out.println("6 " + offset);
@@ -57,7 +54,7 @@ public class MqttConnect extends GenericMessage {
 
 		String userName = "";
 		if(userNameSet) {
-			userName = decodeUTF8(data, offset);
+			userName = decodeUTF8(remainAndPayload, offset);
 			offset += userName.length() + 2;
 		}
 		//System.out.println("7 " + offset + " username " + userName);
@@ -65,16 +62,18 @@ public class MqttConnect extends GenericMessage {
 
 		byte[] password = null;
 		if(passwordSet) {
-			short passwordLength = (short)((data[offset++]<<8) | data[offset++]);
+			short passwordLength = (short)((remainAndPayload[offset++]<<8) | remainAndPayload[offset++]);
 			password = new byte[passwordLength];
 			for(int i=0; i< passwordLength; i++) {
-				password[i] = data[offset + i];
+				password[i] = remainAndPayload[offset + i];
 			}
 		}
 		//System.out.println("8 " + offset + " password: " + password.toString());
 
 		Map<Object, Object> m = new TreeMap<Object, Object>();
 		m.put(PACKET_TYPE, intern("CONNECT"));
+		m.put(CALL_BACK, "");
+		m.put(CLIENT_ADDRESS, address);
 		m.put(FLAGS, flags);
 		m.put(PROTOCOL_NAME, protocolName);
 		m.put(CLIENT_ID, clientID);
@@ -96,5 +95,4 @@ public class MqttConnect extends GenericMessage {
 
 		return PersistentArrayMap.create(m);
 	}
-
 }

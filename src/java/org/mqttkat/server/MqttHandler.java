@@ -1,6 +1,7 @@
 package org.mqttkat.server;
 
 import clojure.lang.IPersistentMap;
+
 import clojure.lang.IFn;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -9,11 +10,12 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.Map;
 import static org.mqttkat.server.MqttEncode.MqttEncoder;
+import static org.mqttkat.packages.GenericMessage.CALL_BACK;
 
 class MqttExecutor implements Runnable{
   final IFn handler;
   final IPersistentMap incoming;
-  final RespCallback cb;
+  RespCallback cb;
 
   public MqttExecutor(IFn handler, RespCallback cb, IPersistentMap incoming) {
     this.handler = handler;
@@ -21,17 +23,24 @@ class MqttExecutor implements Runnable{
     this.cb = cb;
   }
 
-  public void run() {
+  public MqttExecutor(IFn handler, IPersistentMap incoming) {
+	    this.handler = handler;
+	    this.incoming = incoming;
+		this.cb  = null;}
+
+public void run() {
     try {
       //System.out.println("Running in executor..:" +  incoming);
       Map resp = (Map) handler.invoke(incoming);
       //String resp = (String) handler.invoke(incoming);
       //System.out.println("Invoked..." +  handler.invoke(incoming).getClass().getName());
       if( resp != null) {
+        //this.cb = (RespCallback) resp.get(CALL_BACK);
         cb.run(MqttEncoder(resp));
+
         //System.out.println("Callback runner called.. NOT NULL");
       } else {
-        System.out.println("Callback runner called.. NULL NOTHING TO SEND");
+        System.out.println("Handler return NUL, NOTHING TO SEND");
       }
     } catch (Throwable e) {
       e.printStackTrace();
@@ -66,4 +75,11 @@ public class MqttHandler implements IHandler {
       System.out.println("HANDLER!!!" +  incoming);
       execs.submit(new MqttExecutor(handler, cb, incoming));
     }
+
+	public void handle(IPersistentMap incoming) {
+		if( incoming ==  null ) {
+			return;
+		}
+		execs.submit(new MqttExecutor(handler, incoming));
+	}
 }

@@ -1,5 +1,7 @@
 (ns mqttkat.handlers)
 
+(def clients {})
+
 (defn connect [msg]
   (println "CONNECT: " msg)
   {:packet-type :CONNACK
