@@ -14,7 +14,7 @@ import clojure.lang.Keyword;
 
 public class MqttEncode {
 
-	public static ByteBuffer[] MqttEncoder(Map message) throws IOException {
+	public static ByteBuffer[] mqttEncoder(Map message) throws IOException {
 		if( message == null ) {
 			return null;
 		}
@@ -31,7 +31,11 @@ public class MqttEncode {
 				outboundMessage = MqttPingResp.encode(message);
 			} else if (strType.equals(":SUBACK")) {
 				outboundMessage = MqttSubAck.encode(message);
-			} else {
+			} else if( strType.equals(":DISCONNECT")) {
+				// TODO CLOSE CONNECTION.
+				return null;
+			}
+			else {
 				System.out.println("DIDN'T RECOGNISE MESSAGE TYPE!!!");
 				throw new IOException();
 			}

@@ -12,22 +12,18 @@ import java.util.Iterator;
 import java.nio.ByteBuffer;
 
 import clojure.lang.IPersistentMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
 
 import org.mqttkat.packages.GenericMessage;
 import org.mqttkat.packages.MqttAuthenticate;
 import org.mqttkat.packages.MqttConnect;
 import org.mqttkat.packages.MqttDisconnect;
 import org.mqttkat.packages.MqttPingReq;
-import org.mqttkat.packages.MqttPingResp;
 import org.mqttkat.packages.MqttPubAck;
 import org.mqttkat.packages.MqttPubComp;
 import org.mqttkat.packages.MqttPubRec;
 import org.mqttkat.packages.MqttPubRel;
 import org.mqttkat.packages.MqttPublish;
-import org.mqttkat.packages.MqttSubAck;
 import org.mqttkat.packages.MqttSubscribe;
-import org.mqttkat.packages.MqttUnSubAck;
 import org.mqttkat.packages.MqttUnsubscribe;
 
 class PendingKey {
@@ -57,12 +53,20 @@ public class MqttServer implements Runnable {
 		this.selector = Selector.open();
 		this.serverChannel = ServerSocketChannel.open();
 		this.handler = handler;
-		serverChannel.configureBlocking(false);
-		serverChannel.socket().bind(new InetSocketAddress(ip, port));
-		serverChannel.register(selector, OP_ACCEPT);
+		this.serverChannel.configureBlocking(false);
+		this.serverChannel.socket().bind(new InetSocketAddress(ip, port));
+		this.serverChannel.register(selector, OP_ACCEPT);
 		this.port = port;
 	}
 
+   private void closeKey(final SelectionKey key) {
+        try {
+            key.channel().close();
+        } catch (Exception ignore) {
+        }
+
+    }
+	
 	public void run() {
 		System.out.println("Server starting on port " + this.port);
 		try {
@@ -149,7 +153,13 @@ public class MqttServer implements Runnable {
 
 			buf.clear();
 		}
-
+		
+		//client has gone away...
+		if(read<0) {
+			System.out.println("Client has gone away...");
+			closeKey(key);
+		}
+		
 		String address = (new StringBuilder(ch.socket().getInetAddress().toString())).append(":")
 				.append(ch.socket().getPort()).toString();
 		
@@ -178,13 +188,14 @@ public class MqttServer implements Runnable {
 			} else if ( type ==  GenericMessage.MESSAGE_AUTHENTICATION) {
 				incoming = MqttAuthenticate.decode(flags, remainAndPayload);
 			} else {
-				System.out.println("FAIL!!!!!! INVALID packet send: " + type);
+				System.out.println("FAIL!!!!!! INVALID packet sent: " + type);
 				throw new MallFormedPacketException("type  set to zero (0): " + type);
 			}
 
 		} catch (MallFormedPacketException e) {
 			e.printStackTrace();
 			//TODO close connection...
+			closeKey(key);
 		}
 
 		if( incoming != null ) {
@@ -202,6 +213,30 @@ public class MqttServer implements Runnable {
 			serverChannel.close(); // stop accept any request
 		} catch (IOException ignore) {
 		}
+        handler.close(timeout);
+
+        // close socket, notify on-close handlers
+        if (selector.isOpen()) {
+//            Set<SelectionKey> keys = selector.keys();
+//            SelectionKey[] keys = t.toArray(new SelectionKey[t.size()]);
+            for (SelectionKey k : selector.keys()) {
+                /**
+                 * 1. t.toArray will fill null if given array is larger.
+                 * 2. compute t.size(), then try to fill the array, if in the mean time, another
+                 *    thread close one SelectionKey, will result a NPE
+                 *
+                 * https://github.com/http-kit/http-kit/issues/125
+                 */
+                if (k != null) {
+                    closeKey(k); // 0 => close by server
+                }
+            }
+
+            try {
+                selector.close();
+            } catch (IOException ignore) {
+            }
+        }
 	}
 
 	public int getPort() {
@@ -216,7 +251,7 @@ public class MqttServer implements Runnable {
 		 try {
 			 ch.write(buffers, 0, buffers.length);
 			 //pending.add(new PendingKey(key, PendingKey.OP_WRITE));
-       selector.wakeup();
+			 selector.wakeup();
 		 } catch (IOException e) {
        //pending.add(new PendingKey(key, CLOSE_AWAY));
        selector.wakeup();

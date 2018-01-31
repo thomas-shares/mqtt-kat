@@ -46,7 +46,8 @@
   (println "PINGRESP: " msg))
 
 (defn disconnect [msg]
-  (println "DISCONNECT: " msg))
+  (println "DISCONNECT: " msg)
+  {:packet-type :DISCONNECT})
 
 (defn authenticate [msg]
   (println "AUTHENTICATE: " msg))

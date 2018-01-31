@@ -9,8 +9,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.Map;
-import static org.mqttkat.server.MqttEncode.MqttEncoder;
-import static org.mqttkat.packages.GenericMessage.CALL_BACK;
+import static org.mqttkat.server.MqttEncode.mqttEncoder;
 
 class MqttExecutor implements Runnable{
   final IFn handler;
@@ -36,7 +35,8 @@ public void run() {
       //System.out.println("Invoked..." +  handler.invoke(incoming).getClass().getName());
       if( resp != null) {
         //this.cb = (RespCallback) resp.get(CALL_BACK);
-        cb.run(MqttEncoder(resp));
+        cb.run(mqttEncoder(resp));
+ 
 
         //System.out.println("Callback runner called.. NOT NULL");
       } else {
@@ -81,5 +81,21 @@ public class MqttHandler implements IHandler {
 			return;
 		}
 		execs.submit(new MqttExecutor(handler, incoming));
+	}
+
+	public void close(int timeoutMs) {
+	  if (timeoutMs > 0) {
+	        execs.shutdown();
+	        try {
+	            if (!execs.awaitTermination(timeoutMs, TimeUnit.MILLISECONDS)) {
+	                execs.shutdownNow();
+	            }
+	        } catch (InterruptedException ie) {
+	            execs.shutdownNow();
+	            Thread.currentThread().interrupt();
+	        }
+	    } else {
+	        execs.shutdownNow();
+	    }		
 	}
 }
