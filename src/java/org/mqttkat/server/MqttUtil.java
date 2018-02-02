@@ -4,6 +4,8 @@ import static clojure.lang.Keyword.intern;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.UnsupportedEncodingException;
+import java.nio.ByteBuffer;
 import java.util.Arrays;
 
 import clojure.lang.Keyword;
@@ -16,6 +18,15 @@ public abstract class MqttUtil {
 		String ret =  new String(Arrays.copyOfRange(input,offset + 2,offset + 2 + encodedLength), STRING_ENCODING);
 		//System.out.println("ret: " +  ret);
 		return ret;
+	}
+	
+	public static ByteBuffer encodeUTF8(String str) throws UnsupportedEncodingException {
+		byte[] encodedStr = str.getBytes("UTF-8");
+		//byte byte1 = (byte) ((encodedStr.length >>> 8) & 0xFF);
+		//byte byte2 =  (byte) ((encodedStr.length >>> 0) & 0xFF); 
+		ByteBuffer ret = ByteBuffer.allocate(encodedStr.length + 2);
+
+		return ret.put((byte) ((encodedStr.length >>> 8) & 0xFF)).put((byte) ((encodedStr.length >>> 0) & 0xFF)).put(encodedStr);
 	}
 
 	public static byte[] calculateLenght(long number) {

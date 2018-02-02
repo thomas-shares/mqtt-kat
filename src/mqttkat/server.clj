@@ -1,8 +1,8 @@
 (ns mqttkat.server
   (:require [mqttkat.handlers :as h])
+  (:use [mqttkat.s :only [server]])
   (:import [org.mqttkat.server MqttServer MqttHandler]))
 
-(defonce server (atom nil))
 
 (def handler-map {:CONNECT h/connect
                   :CONNACK h/connack
@@ -29,6 +29,8 @@
     (with-meta
       (fn stop-server [& {:keys [timeout] :or {timeout 100}}]
         (.stop s timeout))
+      ;(fn send-message [key msg]
+      ;  (.sendMessage s key msg))
       {:local-port (.getPort s)
        :server s})))
 

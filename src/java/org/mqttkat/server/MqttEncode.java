@@ -6,6 +6,7 @@ import java.util.Map;
 
 import org.mqttkat.packages.MqttConnAck;
 import org.mqttkat.packages.MqttPingResp;
+import org.mqttkat.packages.MqttPublish;
 import org.mqttkat.packages.MqttSubAck;
 
 import static org.mqttkat.packages.GenericMessage.*;
@@ -34,9 +35,12 @@ public class MqttEncode {
 			} else if( strType.equals(":DISCONNECT")) {
 				// TODO CLOSE CONNECTION.
 				return null;
+			} else if ( strType.equals(":PUBLISH")) {
+				outboundMessage = MqttPublish.encode(message);
 			}
 			else {
 				System.out.println("DIDN'T RECOGNISE MESSAGE TYPE!!!");
+				System.out.println(message.toString());
 				throw new IOException();
 			}
 		} else {

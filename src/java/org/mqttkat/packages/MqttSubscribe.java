@@ -6,6 +6,7 @@ import static org.mqttkat.server.MqttUtil.decodeUTF8;
 import static org.mqttkat.server.MqttUtil.qos;
 
 import java.io.IOException;
+import java.nio.channels.SelectionKey;
 import java.util.Map;
 import java.util.TreeMap;
 
@@ -16,7 +17,7 @@ import clojure.lang.IPersistentVector;
 
 public class MqttSubscribe extends GenericMessage{
 
-	public static IPersistentMap decode(byte flags, byte[] data, int msgLength) throws IOException {
+	public static IPersistentMap decode(SelectionKey key, byte flags, byte[] data, int msgLength) throws IOException {
 		System.out.println("SUBSCRIBE message...");
 
 		int offset = 0;
@@ -50,6 +51,7 @@ public class MqttSubscribe extends GenericMessage{
 		//PersistentArrayMap  map = PersistentArrayMap.create(arg0)
 
 		m.put(TOPICS, v);
+		m.put(CLIENT_KEY, key);
 		//m.put(PAYLOAD, Arrays.copyOfRange(remainAndPayload, topic.length() + 2, remainAndPayload.length));
 
 		return PersistentArrayMap.create(m);

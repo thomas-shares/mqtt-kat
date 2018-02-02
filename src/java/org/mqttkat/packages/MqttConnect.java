@@ -9,11 +9,12 @@ import clojure.lang.PersistentArrayMap;
 import java.util.Map;
 import static clojure.lang.Keyword.intern;
 import java.io.IOException;
+import java.nio.channels.SelectionKey;
 
 public class MqttConnect extends GenericMessage {
 
-	public static IPersistentMap decodeConnect(String address, byte flags, byte[] remainAndPayload) throws IOException {
-		System.out.println("decode connect from :" + address);
+	public static IPersistentMap decodeConnect(SelectionKey key, byte flags, byte[] remainAndPayload) throws IOException {
+		System.out.println("decode connect from...");
 
 		
 		int offset = 0;
@@ -52,7 +53,7 @@ public class MqttConnect extends GenericMessage {
 		//System.out.println("6 " + offset);
 
 
-		String userName = "";
+		String userName = null;
 		if(userNameSet) {
 			userName = decodeUTF8(remainAndPayload, offset);
 			offset += userName.length() + 2;
@@ -73,7 +74,7 @@ public class MqttConnect extends GenericMessage {
 		Map<Object, Object> m = new TreeMap<Object, Object>();
 		m.put(PACKET_TYPE, intern("CONNECT"));
 		m.put(CALL_BACK, "");
-		m.put(CLIENT_ADDRESS, address);
+		m.put(CLIENT_KEY, key);
 		m.put(FLAGS, flags);
 		m.put(PROTOCOL_NAME, protocolName);
 		m.put(CLIENT_ID, clientID);

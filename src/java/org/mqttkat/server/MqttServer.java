@@ -9,6 +9,7 @@ import java.nio.channels.SocketChannel;
 
 import java.io.IOException;
 import java.util.Iterator;
+import java.util.Map;
 import java.nio.ByteBuffer;
 
 import clojure.lang.IPersistentMap;
@@ -166,7 +167,7 @@ public class MqttServer implements Runnable {
 		IPersistentMap incoming = null;
 		try {
 			if (type == GenericMessage.MESSAGE_CONNECT) {	
-				incoming =  MqttConnect.decodeConnect(address, flags, remainAndPayload) ; //, new RespCallback(key, this));
+				incoming =  MqttConnect.decodeConnect(key, flags, remainAndPayload) ; //, new RespCallback(key, this));
 			} else if (type == GenericMessage.MESSAGE_PUBLISH) {
 				incoming = MqttPublish.decode(flags, remainAndPayload);
 			}else if (type == GenericMessage.MESSAGE_PUBACK) {
@@ -178,7 +179,7 @@ public class MqttServer implements Runnable {
 			}else if (type == GenericMessage.MESSAGE_PUBCOMP) {
 				incoming = MqttPubComp.decode(flags, remainAndPayload);
 			}else if (type == GenericMessage.MESSAGE_SUBSCRIBE) {
-				incoming = MqttSubscribe.decode(flags, remainAndPayload, msgLength);
+				incoming = MqttSubscribe.decode(key, flags, remainAndPayload, msgLength);
 			}else if (type == GenericMessage.MESSAGE_UNSUBSCRIBE) {
 				incoming = MqttUnsubscribe.decode(flags, remainAndPayload);
 			} else if (type == GenericMessage.MESSAGE_PINGREQ) {
@@ -253,10 +254,15 @@ public class MqttServer implements Runnable {
 			 //pending.add(new PendingKey(key, PendingKey.OP_WRITE));
 			 selector.wakeup();
 		 } catch (IOException e) {
-       //pending.add(new PendingKey(key, CLOSE_AWAY));
-       selector.wakeup();
-    }
- }
+         //pending.add(new PendingKey(key, CLOSE_AWAY));
+         selector.wakeup();
+		 }
+	  }
+	
+	public void sendMessage( final SelectionKey key, Map message) throws IOException {
+		tryWrite(key, MqttEncode.mqttEncoder(message));
+		
+	}
 
 
 }
