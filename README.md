@@ -6,13 +6,22 @@ The idea is to see if a MQTT Broker could be as scalable as http-kit and handle 
 
 ## What does it do at the moment?
 
-Not much. At time of writing the code can accept a connection of a MQTT Client and receive several packets from it and return an appropriate packet in some case. But it certainly doesn't do any more with it. So if a `CONNECT` package is received a `CONNACK` is send back regardless. And while mqtt-kat may accept a `SUBSCRIBE` packet and respond to it as per the spec, at the moment no packets are forward on a `PUBLISH` and most values are hardcoded at the moment as well. So things might work a first time for instance.
+Well... with the latest push it can actually forward a `PUBLISH`ed message to multiple clients that have `SUBSCRIBE`d to a particular topic. I have tested this with three subscribers concurrently. At the moment there is no support for wildcards in subscriptions. While those message are accepted and acknowledged nothing is done with them.
 
 ## Are there any bugs?
 
 Yes
 
-Loads. Too many to mention actually.
+Loads. Too many to mention actually. But here are a few I know of:
+
+* Two or more clients with the same client-id can connect simultaneously.
+* When a message is published and there are no subscribers for that topic we get an NPE.
+* Disconnecting clients in error cases is not fully implemented.
+* Declining `CONNECT` packages is needed.
+* `UNSUBSCRIBE` is not handled.
+* `SUBACK` is hardcoded
+* Nothing is done for pings, no time out and subsequent disconnect.
+* Only QOS 0 is assumed at the moment, no code in place for other QOS's
 
 ## What about the name?
 

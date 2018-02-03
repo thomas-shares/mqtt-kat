@@ -259,10 +259,16 @@ public class MqttServer implements Runnable {
 		 }
 	  }
 	
-	public void sendMessage( final SelectionKey key, Map message) throws IOException {
-		tryWrite(key, MqttEncode.mqttEncoder(message));
+	public void sendMessage( final clojure.lang.PersistentVector  keys, Map message) throws IOException {
+		ByteBuffer bufs[] = MqttEncode.mqttEncoder(message);
+		Iterator<?> it = keys.iterator();
 		
+		while(it.hasNext()) {
+			SelectionKey key = (SelectionKey) it.next();
+			tryWrite(key, bufs);
+			for(ByteBuffer buf : bufs) {
+				buf.rewind();
+			}
+		}
 	}
-
-
 }

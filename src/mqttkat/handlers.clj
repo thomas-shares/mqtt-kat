@@ -3,7 +3,9 @@
 
 (def clients (atom {}))
 
-
+;;  example
+;; {"topic" [key_of_client1, key_of_client1, ..]
+;;  "other_topic" [key_of_clien3]}
 (def subscribers (atom {}))
 
 (defn add-client [msg]
@@ -25,18 +27,19 @@
 (defn connack [msg]
   (println "CONNACK: " msg))
 
-(defn send-message [key msg]
+(defn send-message [keys msg]
   (println "sending message  from  clj")
+  (println (class  keys))
   (let [s (:server (meta @server))]
-    (.sendMessage s key msg)))
+    (.sendMessage s keys msg)))
 
 (defn publish [msg]
   (println "clj PUBLISH: " msg)
   (let [payload (:payload msg)
         topic (:topic msg)
-        key (get @subscribers topic)
-        _ (println key " " @subscribers)]
-    (send-message key {:packet-type :PUBLISH :payload payload :topic "test"})))
+        keys (get @subscribers topic)
+        _ (println "Keys: " keys)]
+    (send-message keys {:packet-type :PUBLISH :payload payload :topic topic})))
 
 (defn puback [msg]
   (println "PUBACK: " msg))
@@ -50,12 +53,18 @@
 (defn pubcomp  [msg]
   (println "PUBCOMP: " msg))
 
+(defn add-subscriber [subscribers topic key]
+  (if (contains? subscribers topic)
+    (update-in subscribers [topic] conj key)
+    (assoc subscribers topic [key])))
+
 (defn subscribe [msg]
   (println "SUBSCRIBE:" msg)
   (let [client-key (:client-key msg)
         topics (:topics msg)
         _ (println "topics: " topics " key:" client-key)]
-    (swap! subscribers assoc (:topic (first topics)) client-key)
+    ;(swap! subscribers assoc (:topic (first topics)) client-key)
+    (swap! subscribers add-subscriber (:topic (first topics)) client-key)
     (println "subscribers: " @subscribers))
   {:packet-type :SUBACK
    :packet-identifier  (:packet-identifier msg)
