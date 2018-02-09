@@ -22,6 +22,7 @@ Loads. Too many to mention actually. But here are a few I know of:
 * `SUBACK` is hardcoded
 * Nothing is done for pings, no time out and subsequent disconnect.
 * Only QOS 0 is assumed at the moment, no code in place for other QOS's
+*  Investigate if outbound messages can be send on their own thread executor.
 
 ## What about the name?
 

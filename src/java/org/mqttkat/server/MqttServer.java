@@ -165,42 +165,37 @@ public class MqttServer implements Runnable {
 				.append(ch.socket().getPort()).toString();
 		
 		IPersistentMap incoming = null;
-		try {
-			if (type == GenericMessage.MESSAGE_CONNECT) {	
-				incoming =  MqttConnect.decodeConnect(key, flags, remainAndPayload) ; //, new RespCallback(key, this));
-			} else if (type == GenericMessage.MESSAGE_PUBLISH) {
-				incoming = MqttPublish.decode(flags, remainAndPayload);
-			}else if (type == GenericMessage.MESSAGE_PUBACK) {
-				incoming = MqttPubAck.decode(flags, remainAndPayload);
-			}else if (type == GenericMessage.MESSAGE_PUBREC) {
-				incoming = MqttPubRec.decode(flags, remainAndPayload);
-			}else if (type == GenericMessage.MESSAGE_PUBREL) {
-				incoming = MqttPubRel.decode(flags, remainAndPayload);
-			}else if (type == GenericMessage.MESSAGE_PUBCOMP) {
-				incoming = MqttPubComp.decode(flags, remainAndPayload);
-			}else if (type == GenericMessage.MESSAGE_SUBSCRIBE) {
-				incoming = MqttSubscribe.decode(key, flags, remainAndPayload, msgLength);
-			}else if (type == GenericMessage.MESSAGE_UNSUBSCRIBE) {
-				incoming = MqttUnsubscribe.decode(flags, remainAndPayload);
-			} else if (type == GenericMessage.MESSAGE_PINGREQ) {
-				incoming = MqttPingReq.decodePingReq(flags);
-			} else if (type == GenericMessage.MESSAGE_DISCONNECT) {
-				incoming = MqttDisconnect.decode(flags, remainAndPayload);
-			} else if ( type ==  GenericMessage.MESSAGE_AUTHENTICATION) {
-				incoming = MqttAuthenticate.decode(flags, remainAndPayload);
-			} else {
-				System.out.println("FAIL!!!!!! INVALID packet sent: " + type);
-				throw new MallFormedPacketException("type  set to zero (0): " + type);
-			}
-
-		} catch (MallFormedPacketException e) {
-			e.printStackTrace();
-			//TODO close connection...
+		if (type == GenericMessage.MESSAGE_CONNECT) {	
+			incoming =  MqttConnect.decodeConnect(key, flags, remainAndPayload) ; //, new RespCallback(key, this));
+		} else if (type == GenericMessage.MESSAGE_PUBLISH) {
+			incoming = MqttPublish.decode(key, flags, remainAndPayload);
+		}else if (type == GenericMessage.MESSAGE_PUBACK) {
+			incoming = MqttPubAck.decode(key, flags, remainAndPayload);
+		}else if (type == GenericMessage.MESSAGE_PUBREC) {
+			incoming = MqttPubRec.decode(key, flags, remainAndPayload);
+		}else if (type == GenericMessage.MESSAGE_PUBREL) {
+			incoming = MqttPubRel.decode(key, flags, remainAndPayload);
+		}else if (type == GenericMessage.MESSAGE_PUBCOMP) {
+			incoming = MqttPubComp.decode(key, flags, remainAndPayload);
+		}else if (type == GenericMessage.MESSAGE_SUBSCRIBE) {
+			incoming = MqttSubscribe.decode(key, flags, remainAndPayload, msgLength);
+		}else if (type == GenericMessage.MESSAGE_UNSUBSCRIBE) {
+			incoming = MqttUnsubscribe.decode(key, flags, remainAndPayload);
+		} else if (type == GenericMessage.MESSAGE_PINGREQ) {
+			incoming = MqttPingReq.decodePingReq(key, flags);
+		} else if (type == GenericMessage.MESSAGE_DISCONNECT) {
+			incoming = MqttDisconnect.decode(key, flags, remainAndPayload);
+		} else if ( type ==  GenericMessage.MESSAGE_AUTHENTICATION) {
+			incoming = MqttAuthenticate.decode(key, flags, remainAndPayload);
+		} else {
+			System.out.println("FAIL!!!!!! INVALID packet sent: " + type);
 			closeKey(key);
 		}
+		
+		
 
 		if( incoming != null ) {
-			handler.handle(incoming, new RespCallback(key, this));
+			handler.handle(incoming);
 		}
 	}
 

@@ -3,6 +3,7 @@ package org.mqttkat.packages;
 import java.io.IOException;
 import java.io.UnsupportedEncodingException;
 import java.nio.ByteBuffer;
+import java.nio.channels.SelectionKey;
 import java.util.Arrays;
 import java.util.Map;
 import java.util.TreeMap;
@@ -17,11 +18,12 @@ import clojure.lang.PersistentArrayMap;
 
 public class MqttPublish extends GenericMessage {
 
-	public static IPersistentMap decode(byte flags, byte[] remainAndPayload) throws IOException {
+	public static IPersistentMap decode(SelectionKey key, byte flags, byte[] remainAndPayload) throws IOException {
 		System.out.println("PUBLISH message...");
 		Map<Object, Object> m = new TreeMap<Object, Object>();
 		m.put(PACKET_TYPE, intern("PUBLISH"));
 		m.put(FLAGS, flags);
+		m.put(CLIENT_KEY, key);
 
 		m.put(DUPLICATE, (flags & 0x08) == 0x08);
 		m.put(MSG_QOS, qos((flags & 0x06)));

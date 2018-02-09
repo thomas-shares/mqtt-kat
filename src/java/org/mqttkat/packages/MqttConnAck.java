@@ -1,6 +1,7 @@
 package org.mqttkat.packages;
 
 import java.nio.ByteBuffer;
+import java.nio.channels.SelectionKey;
 import java.util.Map;
 
 import org.mqttkat.server.MqttUtil;

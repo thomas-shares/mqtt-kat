@@ -3,7 +3,6 @@ package org.mqttkat.packages;
 import clojure.lang.IPersistentMap;
 import java.util.TreeMap;
 
-import org.mqttkat.server.RespCallback;
 import static org.mqttkat.server.MqttUtil.*;
 import clojure.lang.PersistentArrayMap;
 import java.util.Map;
@@ -73,7 +72,6 @@ public class MqttConnect extends GenericMessage {
 
 		Map<Object, Object> m = new TreeMap<Object, Object>();
 		m.put(PACKET_TYPE, intern("CONNECT"));
-		m.put(CALL_BACK, "");
 		m.put(CLIENT_KEY, key);
 		m.put(FLAGS, flags);
 		m.put(PROTOCOL_NAME, protocolName);
