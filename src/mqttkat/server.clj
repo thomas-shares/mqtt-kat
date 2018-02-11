@@ -2,6 +2,7 @@
   (:require [mqttkat.handlers :as h])
   (:use [mqttkat.s :only [server]])
   (:import [org.mqttkat.server MqttServer MqttHandler]))
+;  (:gen-class))
 
 
 (def handler-map {:CONNECT h/connect
@@ -41,3 +42,6 @@
   (when-not (nil? @server)
     (@server :timeout 100)
     (reset! server nil)))
+
+(defn -main [& args]
+  (start))

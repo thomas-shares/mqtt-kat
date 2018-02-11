@@ -8,28 +8,24 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ArrayBlockingQueue;
-import java.util.Map;
-import static org.mqttkat.server.MqttEncode.mqttEncoder;
 
 class MqttExecutor implements Runnable{
-  final IFn handler;
-  final IPersistentMap incoming;
+	final IFn handler;
+	final IPersistentMap incoming;
 
-  public MqttExecutor(IFn handler, IPersistentMap incoming) {
-    this.handler = handler;
-    this.incoming = incoming;
-  }
+	public MqttExecutor(IFn handler, IPersistentMap incoming) {
+		this.handler = handler;
+		this.incoming = incoming;
+	}
 
-
-
-public void run() {
-    try {
-    		handler.invoke(incoming);
-     } catch (Throwable e) {
-      e.printStackTrace();
-      System.out.println("Can't RUN!!! " + e.getMessage());
-    }
-  }
+	public void run() {
+	    try {
+	    		handler.invoke(incoming);
+	     } catch (Throwable e) {
+	    	 	e.printStackTrace();
+	    	 	System.out.println("Can't RUN!!! " + e.getMessage());
+	    }
+	}
 }
 
 

@@ -25,7 +25,7 @@ public class MqttPingResp extends GenericMessage {
 		return PersistentArrayMap.create(m);
 	}
 
-	public static ByteBuffer[] encode(Map message) {
+	public static ByteBuffer[] encode(Map<?, ?> message) {
 		byte[] bType = {(byte)(MESSAGE_PINGRESP << 4)};
 		byte[] bLength = {0};
 		ByteBuffer type = ByteBuffer.wrap(bType);

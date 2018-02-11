@@ -1,15 +1,12 @@
 package org.mqttkat.packages;
 
 import java.nio.ByteBuffer;
-import java.nio.channels.SelectionKey;
 import java.util.Map;
-
 import org.mqttkat.server.MqttUtil;
-
 
 public class MqttConnAck extends GenericMessage{
 
-	public static ByteBuffer[] encode(Map message) {
+	public static ByteBuffer[] encode(Map<?, ?> message) {
 		byte[] bType = {(MESSAGE_CONNACK << 4)};
 		byte[] bLength = MqttUtil.calculateLenght(2);
 		byte[] bPayload = new byte[2];
@@ -26,6 +23,4 @@ public class MqttConnAck extends GenericMessage{
 
 		return new ByteBuffer[]{type, length, payload};
 	}
-
-
 }

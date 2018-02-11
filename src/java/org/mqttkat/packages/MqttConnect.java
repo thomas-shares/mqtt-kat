@@ -13,7 +13,7 @@ import java.nio.channels.SelectionKey;
 public class MqttConnect extends GenericMessage {
 
 	public static IPersistentMap decodeConnect(SelectionKey key, byte flags, byte[] remainAndPayload) throws IOException {
-		System.out.println("decode connect from...");
+		//System.out.println("decode connect from...");
 
 		
 		int offset = 0;
@@ -31,7 +31,7 @@ public class MqttConnect extends GenericMessage {
 		//offset++;
 		//System.out.println("connectFlags: " + connectFlags);
 		short keepAlive = (short)((remainAndPayload[offset++]<<8) | remainAndPayload[offset++]);
-		System.out.println("4 " + offset);
+		//System.out.println("4 " + offset);
 
 		String clientID = decodeUTF8(remainAndPayload, offset);
 		offset += clientID.length() + 2;

@@ -16,7 +16,7 @@ public abstract class MqttUtil {
 	public static String decodeUTF8(byte[] input, int offset) throws IOException 	{
 		short encodedLength = (short)((input[offset]<<8) | input[1+offset]);
 		String ret =  new String(Arrays.copyOfRange(input,offset + 2,offset + 2 + encodedLength), STRING_ENCODING);
-		//System.out.println("ret: " +  ret);
+		//System.out.println("ret: " +  ret + " length: " + encodedLength);
 		return ret;
 	}
 	

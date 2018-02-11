@@ -26,3 +26,5 @@
   :java-source-paths ["src/java"]
   :test-paths ["test"]
   :jar-exclusions [#"^java.*"]) ; exclude the java directory in source path
+  ;:main mqttkat.server)
+  ;:aot [mqttkat.server])

@@ -13,17 +13,17 @@
         ;_ (println client-id)
         x (some #(and (= (:client-id (second %)) client-id ) %)  @clients)]
         ;_ (println "x: " x)]
-    x
+    x))
 
 (defn send-message [keys msg]
-  (println "sending message  from  clj")
+  ;;(println "sending message  from  clj")
   ;;(println (class  keys))
   (let [s (:server (meta @server))]
-    (.sendMessage s keys msg)))))
+    (.sendMessage s keys msg)))
 
 
 (defn connect [msg]
-  (println "CONNECT: " msg)
+  ;;(println "CONNECT: " msg)
   (add-client msg)
   (swap! clients assoc (:client-key msg) (dissoc msg  :packet-type))
   (send-message [(:client-key msg)]
@@ -39,8 +39,8 @@
   (println "clj PUBLISH: " msg)
   (let [payload (:payload msg)
         topic (:topic msg)
-        keys (get @subscribers topic)]
-        ;_ (println "Keys: " keys)]
+        keys (get @subscribers topic)
+        _ (println "Keys: " keys)]
     (when keys
       (send-message keys
         {:packet-type :PUBLISH
@@ -83,7 +83,7 @@
   (println "UNSCUBSCRIBE: " msg))
 
 (defn pingreq [msg]
-  (println "PINGREQ: " msg)
+  ;;(println "PINGREQ: " msg)
   (send-message [(:client-key msg)] {:packet-type :PINGRESP}))
 
 (defn pingresp [msg]

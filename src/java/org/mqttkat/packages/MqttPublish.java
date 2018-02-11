@@ -30,12 +30,13 @@ public class MqttPublish extends GenericMessage {
 		m.put(RETAIN, (flags & 0x01) == 0x01);
 		String topic = decodeUTF8(remainAndPayload, 0);
 		m.put(TOPIC, topic);
+		System.out.println("index: " + (topic.length() + 2) + " length: " + remainAndPayload.length + " topic: " + topic);
 		m.put(PAYLOAD, Arrays.copyOfRange(remainAndPayload, topic.length() + 2, remainAndPayload.length));
 
 		return PersistentArrayMap.create(m);
 	}
 
-	public static ByteBuffer[] encode(Map message) throws UnsupportedEncodingException {
+	public static ByteBuffer[] encode(Map<?, ?> message) throws UnsupportedEncodingException {
 		System.out.println("PUBLISHING MESSAGE TO CLIENT: " + message.toString());
 		byte[] bType = {(byte)(MESSAGE_PUBLISH << 4)};
 		//TODO read flags from map
@@ -53,5 +54,4 @@ public class MqttPublish extends GenericMessage {
 		ByteBuffer payload =  ByteBuffer.wrap(bPayload);
 
 		return new ByteBuffer[]{type, length, topic, payload};	}
-
 }

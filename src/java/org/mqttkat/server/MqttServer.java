@@ -27,19 +27,6 @@ import org.mqttkat.packages.MqttPublish;
 import org.mqttkat.packages.MqttSubscribe;
 import org.mqttkat.packages.MqttUnsubscribe;
 
-class PendingKey {
-    public final SelectionKey key;
-    // operation: can be register for write or close the selectionkey
-    public final int Op;
-
-    PendingKey(SelectionKey key, int op) {
-        this.key = key;
-        Op = op;
-    }
-
-    public static final int OP_WRITE = -1;
-}
-
 public class MqttServer implements Runnable {
 	static final String THREAD_NAME = "server-loop";
 
@@ -49,6 +36,7 @@ public class MqttServer implements Runnable {
 	private final IHandler handler;
 	private final int port;
 	private ByteBuffer buf = ByteBuffer.allocate(256);
+	private MqttSendExecutor executor;
 
 	public MqttServer(String ip, int port, IHandler handler) throws IOException {
 		this.selector = Selector.open();
@@ -58,6 +46,7 @@ public class MqttServer implements Runnable {
 		this.serverChannel.socket().bind(new InetSocketAddress(ip, port));
 		this.serverChannel.register(selector, OP_ACCEPT);
 		this.port = port;
+		this.executor = new MqttSendExecutor(selector, 4);
 	}
 
    private void closeKey(final SelectionKey key) {
@@ -65,7 +54,6 @@ public class MqttServer implements Runnable {
             key.channel().close();
         } catch (Exception ignore) {
         }
-
     }
 	
 	public void run() {
@@ -123,13 +111,39 @@ public class MqttServer implements Runnable {
 			// sb.append(new String(bytes));
 			// byte first = bytes[0];
 
-			System.out.println("byte 0: "  + Integer.toBinaryString( (int) bytes[0]));
+			//System.out.println("byte 0: "  + Integer.toBinaryString( (int) bytes[0]));
 			type = (byte) ((bytes[0] & 0xff) >> 4);
 			flags = (byte) (bytes[0] &= 0x0f);
 
-			System.out.println("type: " + Integer.toBinaryString( (int)type));
-			System.out.println("flags : " + flags);
+			//System.out.println("type: " + Integer.toBinaryString( (int)type));
+			//System.out.println("flags : " + flags);
 			// long remLen = readMBI(in).getValue();
+			
+			if (type == GenericMessage.MESSAGE_CONNECT) {
+				System.out.println("CONNECT");
+			} else if (type == GenericMessage.MESSAGE_PUBLISH) {
+				System.out.println("PUBLISH");
+			} else if (type == GenericMessage.MESSAGE_PUBACK) {
+				System.out.println("PUBACK");
+			} else if (type == GenericMessage.MESSAGE_PUBREC) {
+				System.out.println("PUBREC");
+			} else if (type == GenericMessage.MESSAGE_PUBREL) {
+				System.out.println("PUBREL");
+			} else if (type == GenericMessage.MESSAGE_PUBCOMP) {
+				System.out.println("PUBCOMP");
+			} else if (type == GenericMessage.MESSAGE_SUBSCRIBE) {
+				System.out.println("SUBSCRIBE");
+			} else if (type == GenericMessage.MESSAGE_UNSUBSCRIBE) {
+				System.out.println("UNSUBSCRIBE");
+			} else if (type == GenericMessage.MESSAGE_PINGREQ) {
+				System.out.println("PINGREQ");
+			} else if (type == GenericMessage.MESSAGE_DISCONNECT) {
+				System.out.println("DISCONNECT");
+			} else if ( type ==  GenericMessage.MESSAGE_AUTHENTICATION) {	
+				System.out.println("AUTHENTICATE");
+			} else {
+				System.out.println("FAIL!!!!!! INVALID packet sent: " + type);
+			}
 
 			byte digit;
 			int multiplier = 1;
@@ -144,7 +158,7 @@ public class MqttServer implements Runnable {
 			} while ((digit & 0x80) != 0);
 
 			//System.out.println("count: " + count);
-			//System.out.println("Lenght: " + msgLength);
+			System.out.println("Lenght: " + msgLength);
 
 			buf.get(remainAndPayload, 0, msgLength);
 			for(int i=0; i < msgLength ;i++ ){
@@ -153,6 +167,7 @@ public class MqttServer implements Runnable {
 			System.out.print("\n");
 
 			buf.clear();
+			//msgLength = 0;
 		}
 		
 		//client has gone away...
@@ -166,33 +181,32 @@ public class MqttServer implements Runnable {
 		
 		IPersistentMap incoming = null;
 		if (type == GenericMessage.MESSAGE_CONNECT) {	
-			incoming =  MqttConnect.decodeConnect(key, flags, remainAndPayload) ; //, new RespCallback(key, this));
+			incoming =  MqttConnect.decodeConnect(key, flags, remainAndPayload);
 		} else if (type == GenericMessage.MESSAGE_PUBLISH) {
 			incoming = MqttPublish.decode(key, flags, remainAndPayload);
-		}else if (type == GenericMessage.MESSAGE_PUBACK) {
+		} else if (type == GenericMessage.MESSAGE_PUBACK) {
 			incoming = MqttPubAck.decode(key, flags, remainAndPayload);
-		}else if (type == GenericMessage.MESSAGE_PUBREC) {
+		} else if (type == GenericMessage.MESSAGE_PUBREC) {
 			incoming = MqttPubRec.decode(key, flags, remainAndPayload);
-		}else if (type == GenericMessage.MESSAGE_PUBREL) {
+		} else if (type == GenericMessage.MESSAGE_PUBREL) {
 			incoming = MqttPubRel.decode(key, flags, remainAndPayload);
-		}else if (type == GenericMessage.MESSAGE_PUBCOMP) {
+		} else if (type == GenericMessage.MESSAGE_PUBCOMP) {
 			incoming = MqttPubComp.decode(key, flags, remainAndPayload);
-		}else if (type == GenericMessage.MESSAGE_SUBSCRIBE) {
+		} else if (type == GenericMessage.MESSAGE_SUBSCRIBE) {
 			incoming = MqttSubscribe.decode(key, flags, remainAndPayload, msgLength);
-		}else if (type == GenericMessage.MESSAGE_UNSUBSCRIBE) {
+		} else if (type == GenericMessage.MESSAGE_UNSUBSCRIBE) {
 			incoming = MqttUnsubscribe.decode(key, flags, remainAndPayload);
 		} else if (type == GenericMessage.MESSAGE_PINGREQ) {
 			incoming = MqttPingReq.decodePingReq(key, flags);
 		} else if (type == GenericMessage.MESSAGE_DISCONNECT) {
 			incoming = MqttDisconnect.decode(key, flags, remainAndPayload);
+			closeKey(key);
 		} else if ( type ==  GenericMessage.MESSAGE_AUTHENTICATION) {
 			incoming = MqttAuthenticate.decode(key, flags, remainAndPayload);
 		} else {
 			System.out.println("FAIL!!!!!! INVALID packet sent: " + type);
 			closeKey(key);
 		}
-		
-		
 
 		if( incoming != null ) {
 			handler.handle(incoming);
@@ -241,29 +255,27 @@ public class MqttServer implements Runnable {
 
 
 	public void tryWrite(final SelectionKey key, ByteBuffer... buffers) {
-		 //tryWrite(key, false, buffers);
 		 SocketChannel ch = (SocketChannel) key.channel();
-		 //System.out.println("tryWrite.." );
 		 try {
 			 ch.write(buffers, 0, buffers.length);
-			 //pending.add(new PendingKey(key, PendingKey.OP_WRITE));
 			 selector.wakeup();
 		 } catch (IOException e) {
-         //pending.add(new PendingKey(key, CLOSE_AWAY));
-         selector.wakeup();
 		 }
 	  }
 	
-	public void sendMessage( final clojure.lang.PersistentVector  keys, Map message) throws IOException {
+	public void sendMessage( final clojure.lang.PersistentVector keys, final Map<?, ?> message) throws IOException {
 		ByteBuffer bufs[] = MqttEncode.mqttEncoder(message);
-		Iterator<?> it = keys.iterator();
+		int length = bufs.length;
 		
-		while(it.hasNext()) {
+		Iterator<?> it = keys.iterator();
+
+		while(it.hasNext() ) {
 			SelectionKey key = (SelectionKey) it.next();
-			tryWrite(key, bufs);
-			for(ByteBuffer buf : bufs) {
-				buf.rewind();
+			ByteBuffer[] copyBufs = new ByteBuffer[length] ;
+			for(int i = 0 ; i < length; i++) {
+				copyBufs[i] = bufs[i].duplicate();
 			}
+			executor.submit(copyBufs, key);
 		}
 	}
 }
