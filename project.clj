@@ -25,6 +25,6 @@
   :javac-options ["-source" "1.8" "-target" "1.8" "-g"]
   :java-source-paths ["src/java"]
   :test-paths ["test"]
-  :jar-exclusions [#"^java.*"]) ; exclude the java directory in source path
-  ;:main mqttkat.server)
-  ;:aot [mqttkat.server])
+  :jar-exclusions [#"^java.*"] ; exclude the java directory in source path
+  :main mqttkat.server
+  :aot [mqttkat.server])

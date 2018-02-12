@@ -97,7 +97,7 @@ public class MqttServer implements Runnable {
 
 		buf.clear();
 		int read = 0;
-		byte[] remainAndPayload = new byte[buf.limit()];
+		byte[] remainAndPayload = null;
 		byte type = 0;
 		byte flags = 0;
 		int msgLength = 0;
@@ -160,6 +160,7 @@ public class MqttServer implements Runnable {
 			//System.out.println("count: " + count);
 			System.out.println("Lenght: " + msgLength);
 
+			remainAndPayload = new byte[msgLength];
 			buf.get(remainAndPayload, 0, msgLength);
 			for(int i=0; i < msgLength ;i++ ){
 				System.out.print(" " + remainAndPayload[i]);

@@ -15,14 +15,12 @@ Yes!
 Loads. Too many to mention actually. But here are a few I know of:
 
 * Two or more clients with the same client-id can connect simultaneously.
-* When a message is published and there are no subscribers for that topic we get an NPE.
 * Disconnecting clients in error cases is not fully implemented.
 * Declining `CONNECT` packages is needed.
 * `UNSUBSCRIBE` is not handled.
 * `SUBACK` is hardcoded
 * Nothing is done for pings, no time out and subsequent disconnect.
 * Only QOS 0 is assumed at the moment, no code in place for other QOS's
-*  Investigate if outbound messages can be send on their own thread executor.
 
 ## What about the name?
 
