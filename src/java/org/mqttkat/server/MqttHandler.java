@@ -43,7 +43,7 @@ public class MqttHandler implements IHandler {
     public MqttHandler(IFn handler, int thread) {
       this.handler = handler;
       PrefixThreadFactory factory = new PrefixThreadFactory("prefix");
-      BlockingQueue<Runnable> queue = new ArrayBlockingQueue<Runnable>(10);
+      BlockingQueue<Runnable> queue = new ArrayBlockingQueue<Runnable>(32);
       this.execs = new ThreadPoolExecutor(thread, thread, 0, TimeUnit.MILLISECONDS, queue, factory);
     }
 

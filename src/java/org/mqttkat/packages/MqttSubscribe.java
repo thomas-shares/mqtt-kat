@@ -18,7 +18,7 @@ import clojure.lang.IPersistentVector;
 public class MqttSubscribe extends GenericMessage{
 
 	public static IPersistentMap decode(SelectionKey key, byte flags, byte[] data, int msgLength) throws IOException {
-		System.out.println("SUBSCRIBE message...");
+		//System.out.println("SUBSCRIBE message...");
 
 		int offset = 0;
 		Map<Object, Object> m = new TreeMap<Object, Object>();
@@ -33,18 +33,18 @@ public class MqttSubscribe extends GenericMessage{
 		while(offset < msgLength) {
 		    Map<Object, Object> topicMap = new TreeMap<Object, Object>();
 			String topic = decodeUTF8(data, offset);
-			System.out.println("topic: " + topic);
+			//System.out.println("topic: " + topic);
 			topicMap.put(TOPIC, topic);
 			offset += topic.length() + 2;
-			System.out.println(offset);
+			//System.out.println(offset);
 			topicMap.put(MSG_QOS, qos(data[offset++]));
-			System.out.println(offset + " " +  msgLength + " " + v.toString() + " " + topicMap.toString());
+			//System.out.println(offset + " " +  msgLength + " " + v.toString() + " " + topicMap.toString());
 
 			v = v.cons(PersistentArrayMap.create(topicMap));
-			System.out.println(v.toString());
+			//System.out.println(v.toString());
 
 		}
-		System.out.println("uit de loop: " +  offset + " " + msgLength + " " + v.toString());
+		//System.out.println("uit de loop: " +  offset + " " + msgLength + " " + v.toString());
 	    //IPersistentVector v = PersistentVector.create(1, 2, 3);
 
 		

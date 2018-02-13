@@ -36,11 +36,11 @@
 
 
 (defn publish [msg]
-  (println "clj PUBLISH: " msg)
+  ;(println "clj PUBLISH: " msg)
   (let [payload (:payload msg)
         topic (:topic msg)
-        keys (get @subscribers topic)
-        _ (println "Keys: " keys)]
+        keys (get @subscribers topic)]
+        ;_ (println "Keys: " keys)]
     (when keys
       (send-message keys
         {:packet-type :PUBLISH
@@ -65,13 +65,13 @@
     (assoc subscribers topic [key])))
 
 (defn subscribe [msg]
-  (println "SUBSCRIBE:" msg)
+  ;(println "SUBSCRIBE:" msg)
   (let [client-key (:client-key msg)
-        topics (:topics msg)
-        _ (println "topics: " topics " key:" client-key)]
+        topics (:topics msg)]
+        ;;_ (println "topics: " topics " key:" client-key)]
     ;(swap! subscribers assoc (:topic (first topics)) client-key)
     (swap! subscribers add-subscriber (:topic (first topics)) client-key)
-    (println "subscribers: " @subscribers)
+    ;(println "subscribers: " @subscribers)
     (send-message [client-key] {:packet-type :SUBACK
                                 :packet-identifier  (:packet-identifier msg)
                                 :payload [0]})))
@@ -90,7 +90,7 @@
   (println "PINGRESP: " msg))
 
 (defn disconnect [msg]
-  (println "DISCONNECT: " msg)
+  ;;(println "DISCONNECT: " msg)
   (send-message [(:client-key msg)] {:packet-type :DISCONNECT}))
 
 (defn authenticate [msg]

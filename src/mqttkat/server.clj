@@ -1,8 +1,8 @@
 (ns mqttkat.server
   (:require [mqttkat.handlers :as h])
   (:use [mqttkat.s :only [server]])
-  (:import [org.mqttkat.server MqttServer MqttHandler]))
-;  (:gen-class))
+  (:import [org.mqttkat.server MqttServer MqttHandler])
+  (:gen-class))
 
 
 (def handler-map {:CONNECT h/connect
@@ -25,7 +25,7 @@
     ((packet-type handler-map) msg)))
 
 (defn run-server [ip port]
-  (let [s (MqttServer. ip port (MqttHandler. handler-fn 4))]
+  (let [s (MqttServer. ip port (MqttHandler. handler-fn 16))]
     (.start s)
     (with-meta
       (fn stop-server [& {:keys [timeout] :or {timeout 100}}]

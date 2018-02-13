@@ -46,7 +46,7 @@ public class MqttServer implements Runnable {
 		this.serverChannel.socket().bind(new InetSocketAddress(ip, port));
 		this.serverChannel.register(selector, OP_ACCEPT);
 		this.port = port;
-		this.executor = new MqttSendExecutor(selector, 4);
+		this.executor = new MqttSendExecutor(selector, 16);
 	}
 
    private void closeKey(final SelectionKey key) {
@@ -101,7 +101,7 @@ public class MqttServer implements Runnable {
 		byte type = 0;
 		byte flags = 0;
 		int msgLength = 0;
-
+		int msgLengthExtra = 0;
 		while ((read = ch.read(buf)) > 0) {
 			buf.flip();
 			// byte[] bytes = new byte[buf.limit()];
@@ -118,7 +118,7 @@ public class MqttServer implements Runnable {
 			//System.out.println("type: " + Integer.toBinaryString( (int)type));
 			//System.out.println("flags : " + flags);
 			// long remLen = readMBI(in).getValue();
-			
+		/*	
 			if (type == GenericMessage.MESSAGE_CONNECT) {
 				System.out.println("CONNECT");
 			} else if (type == GenericMessage.MESSAGE_PUBLISH) {
@@ -144,7 +144,7 @@ public class MqttServer implements Runnable {
 			} else {
 				System.out.println("FAIL!!!!!! INVALID packet sent: " + type);
 			}
-
+*/
 			byte digit;
 			int multiplier = 1;
 			int count = 0;
@@ -158,17 +158,21 @@ public class MqttServer implements Runnable {
 			} while ((digit & 0x80) != 0);
 
 			//System.out.println("count: " + count);
-			System.out.println("Lenght: " + msgLength);
+			//System.out.println("msgLenght: " + msgLength);
 
 			remainAndPayload = new byte[msgLength];
+			//System.out.println( "limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity() + " remainLength: " +  remainAndPayload.length);
 			buf.get(remainAndPayload, 0, msgLength);
+			//System.out.println( "limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity());
+
 			for(int i=0; i < msgLength ;i++ ){
-				System.out.print(" " + remainAndPayload[i]);
+				//System.out.print(" " + remainAndPayload[i]);
 			}
-			System.out.print("\n");
+			//System.out.print("\n");
 
 			buf.clear();
-			//msgLength = 0;
+			msgLengthExtra = msgLength;
+			msgLength = 0;
 		}
 		
 		//client has gone away...
@@ -194,7 +198,7 @@ public class MqttServer implements Runnable {
 		} else if (type == GenericMessage.MESSAGE_PUBCOMP) {
 			incoming = MqttPubComp.decode(key, flags, remainAndPayload);
 		} else if (type == GenericMessage.MESSAGE_SUBSCRIBE) {
-			incoming = MqttSubscribe.decode(key, flags, remainAndPayload, msgLength);
+			incoming = MqttSubscribe.decode(key, flags, remainAndPayload, msgLengthExtra);
 		} else if (type == GenericMessage.MESSAGE_UNSUBSCRIBE) {
 			incoming = MqttUnsubscribe.decode(key, flags, remainAndPayload);
 		} else if (type == GenericMessage.MESSAGE_PINGREQ) {
