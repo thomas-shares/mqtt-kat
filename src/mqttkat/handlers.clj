@@ -76,12 +76,12 @@
                                 :packet-identifier  (:packet-identifier msg)
                                 :payload [0]})))
 
-(defn suback [msg]
-  (println "SUBACK: " msg))
+(defn remove-subsciber [m [topic] key]
+  (update m topic (fn [v] (filterv #(not= key %) v))))
 
 (defn unsubscribe [msg]
-  (println "UNSCUBSCRIBE: " msg))
-
+  ;(println "UNSCUBSCRIBE: " msg)
+  (swap! subscribers remove-subsciber (:topics msg) (:client-key msg)))
 
 (defn pingreq [msg]
   ;;(println "PINGREQ: " msg)
@@ -97,7 +97,8 @@
 (defn disconnect [msg]
   ;(println "DISCONNECT: " msg)
   ;(println "count: " (count (get @subscribers "test")))
-  (swap! subscribers remove-client-subscriber  (:client-key msg)))
+  (swap! subscribers remove-client-subscriber  (:client-key msg))
+  (swap! clients dissoc (:client-key msg)))
   ;(println "subscribers: " @subscribers)
   ;(println "count: " (count (get @subscribers "test"))))
 

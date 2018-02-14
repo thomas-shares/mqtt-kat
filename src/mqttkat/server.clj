@@ -13,7 +13,7 @@
                   :PUBREL  h/pubrel
                   :PUBCOMP h/pubcomp
                   :SUBSCRIBE h/subscribe
-                  :UNSCUBSCRIBE h/unsubscribe
+                  :UNSUBSCRIBE h/unsubscribe
                   :PINGREQ h/pingreq
                   :PINGRES h/pingresp
                   :DISCONNECT h/disconnect

@@ -50,6 +50,11 @@ public class MqttServer implements Runnable {
 	}
 
    private void closeKey(final SelectionKey key) {
+		try {
+			IPersistentMap incoming = MqttDisconnect.decode(key, (byte)0x00, new byte[] {0x0});
+			handler.handle(incoming);
+		} catch (IOException ignore) {
+		}
         try {
             key.channel().close();
         } catch (Exception ignore) {
@@ -179,8 +184,6 @@ public class MqttServer implements Runnable {
 		if(read<0) {
 			System.out.println("Client has gone away...");
 			closeKey(key);
-			IPersistentMap incoming = MqttDisconnect.decode(key, (byte)0x00, new byte[] {0x0});
-			handler.handle(incoming);
 		}
 		
 		String address = (new StringBuilder(ch.socket().getInetAddress().toString())).append(":")
@@ -202,7 +205,7 @@ public class MqttServer implements Runnable {
 		} else if (type == GenericMessage.MESSAGE_SUBSCRIBE) {
 			incoming = MqttSubscribe.decode(key, flags, remainAndPayload, msgLengthExtra);
 		} else if (type == GenericMessage.MESSAGE_UNSUBSCRIBE) {
-			incoming = MqttUnsubscribe.decode(key, flags, remainAndPayload);
+			incoming = MqttUnsubscribe.decode(key, flags, remainAndPayload, msgLengthExtra);
 		} else if (type == GenericMessage.MESSAGE_PINGREQ) {
 			incoming = MqttPingReq.decodePingReq(key, flags);
 		} else if (type == GenericMessage.MESSAGE_DISCONNECT) {
