@@ -179,6 +179,8 @@ public class MqttServer implements Runnable {
 		if(read<0) {
 			System.out.println("Client has gone away...");
 			closeKey(key);
+			IPersistentMap incoming = MqttDisconnect.decode(key, (byte)0x00, new byte[] {0x0});
+			handler.handle(incoming);
 		}
 		
 		String address = (new StringBuilder(ch.socket().getInetAddress().toString())).append(":")

@@ -1,12 +1,12 @@
 (ns mqttkat.handlers
   (:use [mqttkat.s :only [server]]))
 
-(def clients (atom {}))
+(defonce clients (atom {}))
 
 ;;  example
 ;; {"topic" [key_of_client1, key_of_client1, ..]
 ;;  "other_topic" [key_of_clien3]}
-(def subscribers (atom {}))
+(defonce subscribers (atom {}))
 
 (defn add-client [msg]
   (let [client-id (:client-id msg)
@@ -82,6 +82,7 @@
 (defn unsubscribe [msg]
   (println "UNSCUBSCRIBE: " msg))
 
+
 (defn pingreq [msg]
   ;;(println "PINGREQ: " msg)
   (send-message [(:client-key msg)] {:packet-type :PINGRESP}))
@@ -89,9 +90,16 @@
 (defn pingresp [msg]
   (println "PINGRESP: " msg))
 
+
+(defn remove-client-subscriber [m val]
+  (into {} (map (fn [[k v]] (let [nv (filterv #(not= val %) v)] {k nv}))  m)))
+
 (defn disconnect [msg]
-  ;;(println "DISCONNECT: " msg)
-  (send-message [(:client-key msg)] {:packet-type :DISCONNECT}))
+  ;(println "DISCONNECT: " msg)
+  ;(println "count: " (count (get @subscribers "test")))
+  (swap! subscribers remove-client-subscriber  (:client-key msg)))
+  ;(println "subscribers: " @subscribers)
+  ;(println "count: " (count (get @subscribers "test"))))
 
 (defn authenticate [msg]
   (println "AUTHENTICATE: " msg))
