@@ -15,7 +15,7 @@ public class MqttConnect extends GenericMessage {
 	public static IPersistentMap decodeConnect(SelectionKey key, byte flags, byte[] remainAndPayload) throws IOException {
 		//System.out.println("decode connect from...");
 
-		
+
 		int offset = 0;
 		String protocolName = decodeUTF8(remainAndPayload, offset);
 		offset = protocolName.length() + 2;

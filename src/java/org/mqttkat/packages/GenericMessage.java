@@ -32,17 +32,18 @@ public abstract class GenericMessage {
 	public static final Keyword CLIENT_ID = intern("client-id");
 	public static final Keyword PROTOCOL_NAME = intern("protocol-name");
 	public static final Keyword PROTOCOL_VERSION = intern("protocol-version");
-	public static final Keyword USERNAME_SET = intern("username-set");
-	public static final Keyword PASSWORD_SET = intern("password-set");
-	public static final Keyword WILL_RETAIN = intern("will-retain");
-	public static final Keyword WILL_QOS = intern("will-qos");
-	public static final Keyword WILL_FLAG = intern("will-flag");
-	public static final Keyword CLEAN_START = intern("clean-start");
+	public static final Keyword USERNAME_SET = intern("connect-flags-username-flag");
+	public static final Keyword PASSWORD_SET = intern("connect-flags-password-flag");
+	public static final Keyword WILL_RETAIN = intern("connect-flags-will-retain");
+	// connect-flags-will-retain-qos
+	public static final Keyword WILL_QOS = intern("connect-flags-will-qos");
+	public static final Keyword WILL_FLAG = intern("connect-flags-will-flag");
+	public static final Keyword CLEAN_START = intern("connect-flags-clean-session");
 	public static final Keyword RESERVED = intern("reserved");
 	public static final Keyword KEEP_ALIVE = intern("keep-alive");
 	public static final Keyword WILL_TOPIC = intern("will-topic");
 	public static final Keyword WILL_MSG = intern("will-message");
-	public static final Keyword USER_NAME = intern("user-name");
+	public static final Keyword USER_NAME = intern("username");
 	public static final Keyword PASSWORD = intern("password");
 
 	// CONNACK
@@ -50,8 +51,8 @@ public abstract class GenericMessage {
 
 	//PUBLISH
 	public static final Keyword DUPLICATE = intern("duplicate");
-	public static final Keyword MSG_QOS = intern("message-qos");
-	public static final Keyword RETAIN = intern("retain");
+	public static final Keyword MSG_QOS = intern("publish-qos");
+	public static final Keyword RETAIN = intern("publish-retain");
 	public static final Keyword TOPIC = intern("topic");
 	public static final Keyword PAYLOAD = intern("payload");
 

@@ -1,14 +1,10 @@
 package org.mqttkat.server;
 
-import static clojure.lang.Keyword.intern;
-
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.UnsupportedEncodingException;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
-
-import clojure.lang.Keyword;
 
 public abstract class MqttUtil {
 	protected static final String STRING_ENCODING = "UTF-8";
@@ -47,18 +43,7 @@ public abstract class MqttUtil {
 		return bos.toByteArray();
 	}
 
-	public static Keyword qos(int qos) {
-		byte shiftedByte = (byte) (qos >> 3);
-		Keyword ret = null;
-		switch(shiftedByte) {
-			case 0: ret = intern("0");
-			break;
-			case 1: ret = intern("1");
-			break;
-			case 2: ret = intern("2");
-			break;
-			default: ret = intern("invalid");
-		}
-		return ret;
+	public static int qos(int qos) {
+		return (qos >> 1);
 	}
 }

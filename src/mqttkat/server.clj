@@ -4,6 +4,7 @@
   (:import [org.mqttkat.server MqttServer MqttHandler])
   (:gen-class))
 
+(set! *warn-on-reflection* true)
 
 (def handler-map {:CONNECT h/connect
                   :CONNACK h/connack
@@ -25,7 +26,7 @@
     ((packet-type handler-map) msg)))
 
 (defn run-server [ip port]
-  (let [s (MqttServer. ip port (MqttHandler. handler-fn 16))]
+  (let [s (MqttServer. ^String ip ^int port ( MqttHandler. ^clojure.lang.IFn handler-fn 16))]
     (.start s)
     (with-meta
       (fn stop-server [& {:keys [timeout] :or {timeout 100}}]

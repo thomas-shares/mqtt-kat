@@ -15,7 +15,7 @@ public class MqttSendExecutor {
 		
 	MqttSendExecutor(Selector selector, int thread) {
 		PrefixThreadFactory factory = new PrefixThreadFactory("senders-");
-	    BlockingQueue<Runnable> queue = new ArrayBlockingQueue<Runnable>(32);
+	    BlockingQueue<Runnable> queue = new ArrayBlockingQueue<Runnable>(8);
 	    this.execs = new ThreadPoolExecutor(thread, thread, 0, TimeUnit.MILLISECONDS, queue, factory);
 	    this.selector = selector;
 	}

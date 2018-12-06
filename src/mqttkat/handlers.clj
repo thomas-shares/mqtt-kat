@@ -1,5 +1,8 @@
 (ns mqttkat.handlers
-  (:use [mqttkat.s :only [server]]))
+  (:use [mqttkat.s :only [server]])
+  (:import [org.mqttkat.server MqttServer])
+  (:require [mqttkat.spec :as spec]
+            [clojure.spec.alpha :as s]))
 
 (defonce clients (atom {}))
 
@@ -19,11 +22,13 @@
   ;;(println "sending message  from  clj")
   ;;(println (class  keys))
   (let [s (:server (meta @server))]
-    (.sendMessage s keys msg)))
+    (.sendMessage ^MqttServer s keys msg)))
 
 
 (defn connect [msg]
-  ;;(println "CONNECT: " msg)
+  (println "CONNECT: " msg)
+  (println (str "valid connect: " (s/valid? :mqtt/connect msg)))
+  ;(s/explain :mqtt/connect msg)
   (add-client msg)
   (swap! clients assoc (:client-key msg) (dissoc msg  :packet-type))
   (send-message [(:client-key msg)]
@@ -36,7 +41,11 @@
 
 
 (defn publish [msg]
-  ;(println "clj PUBLISH: " msg)
+  (println "clj PUBLISH: " msg)
+  ;;(println (str (class (:payload msg))))
+  ;;(println (bytes? (:payload msg)))
+  (println (str "valid publish: " (s/valid? :mqtt/publish msg)))
+  ;;(s/explain :mqtt/publish msg)
   (let [payload (:payload msg)
         topic (:topic msg)
         keys (get @subscribers topic)]

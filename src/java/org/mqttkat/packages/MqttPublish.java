@@ -27,6 +27,7 @@ public class MqttPublish extends GenericMessage {
 
 		m.put(DUPLICATE, (flags & 0x08) == 0x08);
 		m.put(MSG_QOS, qos((flags & 0x06)));
+		System.out.println(flags & 0x06);
 		m.put(RETAIN, (flags & 0x01) == 0x01);
 		String topic = decodeUTF8(remainAndPayload, 0);
 		m.put(TOPIC, topic);
