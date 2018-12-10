@@ -8,7 +8,7 @@ import java.nio.channels.SelectionKey;
 import java.util.Map;
 import java.util.TreeMap;
 
-import org.mqttkat.server.MqttUtil;
+import org.mqttkat.MqttUtil;
 
 import clojure.lang.IPersistentMap;
 import clojure.lang.PersistentArrayMap;

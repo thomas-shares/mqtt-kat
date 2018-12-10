@@ -2,7 +2,7 @@ package org.mqttkat.packages;
 
 import java.nio.ByteBuffer;
 import java.util.Map;
-import org.mqttkat.server.MqttUtil;
+import org.mqttkat.MqttUtil;
 
 public class MqttConnAck extends GenericMessage{
 

@@ -8,10 +8,8 @@ import java.util.Arrays;
 import java.util.Map;
 import java.util.TreeMap;
 
-import org.mqttkat.server.MqttUtil;
-
 import static clojure.lang.Keyword.intern;
-import static org.mqttkat.server.MqttUtil.*;
+import static org.mqttkat.MqttUtil.*;
 
 import clojure.lang.IPersistentMap;
 import clojure.lang.PersistentArrayMap;
@@ -48,7 +46,7 @@ public class MqttPublish extends GenericMessage {
 		int topicSize =  topic.remaining();
 		byte[] bPayload = (byte[])message.get(PAYLOAD);
 				
-		byte[] bLength = MqttUtil.calculateLenght(topicSize + bPayload.length);
+		byte[] bLength = calculateLenght(topicSize + bPayload.length);
 
 		ByteBuffer type = ByteBuffer.wrap(bType);
 		ByteBuffer length = ByteBuffer.wrap(bLength);

@@ -3,7 +3,7 @@ package org.mqttkat.packages;
 import clojure.lang.IPersistentMap;
 import java.util.TreeMap;
 
-import static org.mqttkat.server.MqttUtil.*;
+import static org.mqttkat.MqttUtil.*;
 import clojure.lang.PersistentArrayMap;
 import java.util.Map;
 import static clojure.lang.Keyword.intern;
