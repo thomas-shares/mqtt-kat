@@ -1,4 +1,4 @@
-package org.mqttkat.server;
+package org.mqttkat;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;

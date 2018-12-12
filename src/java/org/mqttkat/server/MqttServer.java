@@ -14,6 +14,7 @@ import java.nio.ByteBuffer;
 
 import clojure.lang.IPersistentMap;
 
+import org.mqttkat.MqttSendExecutor;
 import org.mqttkat.packages.GenericMessage;
 import org.mqttkat.packages.MqttAuthenticate;
 import org.mqttkat.packages.MqttConnect;

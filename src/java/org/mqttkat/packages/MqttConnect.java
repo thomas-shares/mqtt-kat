@@ -3,12 +3,17 @@ package org.mqttkat.packages;
 import clojure.lang.IPersistentMap;
 import java.util.TreeMap;
 
+import org.mqttkat.MqttUtil;
+
 import static org.mqttkat.MqttUtil.*;
 import clojure.lang.PersistentArrayMap;
 import java.util.Map;
 import static clojure.lang.Keyword.intern;
 import java.io.IOException;
+import java.io.UnsupportedEncodingException;
+import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
+import static org.mqttkat.MqttUtil.log;
 
 public class MqttConnect extends GenericMessage {
 
@@ -93,5 +98,51 @@ public class MqttConnect extends GenericMessage {
 		m.put(PASSWORD, password);
 
 		return PersistentArrayMap.create(m);
+	}
+	
+	
+	public static ByteBuffer[] encode(Map<?, ?> message) throws UnsupportedEncodingException {
+		log("encode CONNECT");
+		byte[] bType = {(MESSAGE_CONNECT << 4)};
+		bType[0] =  (byte) (bType[0] & 0xf0);
+		System.out.println("type: " + bType[0]);
+
+		log(message.get(PROTOCOL_NAME).toString());
+		ByteBuffer protocolName = encodeUTF8((String)message.get(PROTOCOL_NAME));
+		protocolName.flip();
+		log(message.get(PROTOCOL_VERSION).toString());
+		//byte[] protocolLevel =  {(byte)message.get(PROTOCOL_VERSION)};
+		byte[] protocolLevel = {4};
+		System.out.println("level: " + protocolLevel[0]);
+
+		byte[] connectFlags = {0};
+		System.out.println(connectFlags[0]);
+
+		log(message.get(KEEP_ALIVE).toString());
+		Long keepAliveL = (Long) message.get(KEEP_ALIVE);
+		ByteBuffer keepAlive = ByteBuffer.allocate(2);
+		keepAlive.put((byte) ((keepAliveL >>> 8) & 0xFF)).put((byte) ((keepAliveL >>> 0) & 0xFF));
+		keepAlive.flip();
+
+		
+		log(message.get(CLIENT_ID).toString());
+		ByteBuffer clientId = encodeUTF8((String)message.get(CLIENT_ID));
+		byte[] bLength = MqttUtil.calculateLenght(10 + clientId.position());
+		clientId.flip();
+
+		System.out.println("length: " + bLength[0]);
+
+		
+		//bPayload[0] =  (byte) ((Boolean) message.get(SESSION_PRESENT) ? 1 : 0);
+		//bPayload[1] = 0x00;
+		//System.out.println(message.toString() + String.format("%x", bType[0]) + String.format("%x", bLength[0]) + String.format("%x%x", bPayload[0],bPayload[1]));
+
+		ByteBuffer type = ByteBuffer.wrap(bType);
+		ByteBuffer length = ByteBuffer.wrap(bLength);
+		ByteBuffer protocolLevelBuffer = ByteBuffer.wrap(protocolLevel);
+		ByteBuffer connectFlagsBuffer = ByteBuffer.wrap(connectFlags);
+		
+
+		return new ByteBuffer[]{type, length, protocolName, protocolLevelBuffer, connectFlagsBuffer,  keepAlive, clientId};
 	}
 }

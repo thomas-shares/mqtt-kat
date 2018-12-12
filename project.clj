@@ -8,16 +8,20 @@
   :global-vars {*warn-on-reflection* true}
 
   :dependencies
-  [[org.clojure/clojure "1.9.0"]
+  [[org.clojure/clojure "1.10.0-RC5"]
+   [org.clojure/core.async "0.4.490"]
    [org.clojure/spec.alpha "0.2.176"]
    [org.clojure/core.specs.alpha "0.2.44"]
-   [org.clojure/test.check "0.10.0-alpha3"]]
+   [org.clojure/test.check "0.10.0-alpha3"]
+   [proto-repl "0.3.1"]]
 
   :plugins
   [[lein-swank   "1.4.5"]
    [lein-pprint  "1.1.2"]
    [lein-ancient "0.6.10"]
    [lein-codox   "0.10.3"]]
+
+  :resource-paths ["resources/REBL-0.9.109.jar"]
 
   :jvm-opts
   ["-Dclojure.compiler.disable-locals-clearing=true"

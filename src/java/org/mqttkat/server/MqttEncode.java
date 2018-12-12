@@ -5,7 +5,9 @@ import java.nio.ByteBuffer;
 import java.util.Map;
 
 import org.mqttkat.packages.MqttConnAck;
+import org.mqttkat.packages.MqttConnect;
 import org.mqttkat.packages.MqttDisconnect;
+import org.mqttkat.packages.MqttPingReq;
 import org.mqttkat.packages.MqttPingResp;
 import org.mqttkat.packages.MqttPublish;
 import org.mqttkat.packages.MqttSubAck;
@@ -27,8 +29,12 @@ public class MqttEncode {
 		if(type instanceof Keyword) {
 			String strType = type.toString();
 			//System.out.println(strType);
-			if( strType.equals(":CONNACK")) {
+			if( strType.equals(":CONNECT")) {
+				outboundMessage = MqttConnect.encode(message);
+			} else if( strType.equals(":CONNACK")) {
 				outboundMessage = MqttConnAck.encode(message);
+			} else if( strType.equals(":PINGREQ")) {
+				outboundMessage = MqttPingReq.encode(message);
 			} else if( strType.equals(":PINGRESP")) {
 				outboundMessage = MqttPingResp.encode(message);
 			} else if (strType.equals(":SUBACK")) {
@@ -47,10 +53,6 @@ public class MqttEncode {
 			System.out.println("FAILURE!!!!! not a keyword!!!");
 		}
 		
-		//for(ByteBuffer buf : outboundMessage) {
-	//		buf.flip();
-//		}
-
 		return outboundMessage;
 	}
 }

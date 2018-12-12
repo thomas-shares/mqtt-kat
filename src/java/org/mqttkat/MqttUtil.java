@@ -46,4 +46,8 @@ public abstract class MqttUtil {
 	public static int qos(int qos) {
 		return (qos >> 1);
 	}
+	
+	public static void log(String str) {
+		System.out.println(str);
+	}
 }
