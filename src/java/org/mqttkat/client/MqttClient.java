@@ -6,10 +6,8 @@ import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.SocketChannel;
-import java.util.Map;
 
 import org.mqttkat.MqttSendExecutor;
-import org.mqttkat.server.MqttEncode;
 
 import static org.mqttkat.MqttUtil.log;
 
@@ -19,7 +17,7 @@ public class MqttClient implements Runnable {
 	private final String host;
     private volatile boolean running = true;
     private InetSocketAddress mqttAddr;
-    private SocketChannel mqttClient;
+    private SocketChannel socketChannel;
     private final Selector selector;
 	private MqttSendExecutor executor;
 
@@ -31,15 +29,15 @@ public class MqttClient implements Runnable {
 
 		log("Creating client...");
 		InetSocketAddress mqttAddr = new InetSocketAddress(host, port);
-		mqttClient = SocketChannel.open(mqttAddr);
+		socketChannel = SocketChannel.open(mqttAddr);
 	    selector = Selector.open();
 		this.executor = new MqttSendExecutor(selector, threadPoolSize);
 
-	    Thread t = new Thread(this, "mqtt-client");
-	    t.setDaemon(true);
-	    t.start();
+	    //Thread t = new Thread(this, "mqtt-client");
+	    //t.setDaemon(true);
+	    //t.start();
 	}
-	
+	/*
 	public void sendMessage(final Map<?, ?> message) throws IOException {
 		log("sending message...");
 		ByteBuffer bufs[] = MqttEncode.mqttEncoder(message);
@@ -48,6 +46,15 @@ public class MqttClient implements Runnable {
 		}
 		mqttClient.write(bufs);
 		//executor.submit(bufs, key);
+	}*/
+	
+	public void sendMessage(ByteBuffer bufs[]) throws IOException {
+		for(int i = 0; i< bufs.length ; i++) {
+			log(bufs[i].toString());
+		}
+		executor.submit(bufs, key);
+
+		//socketChannel.write(bufs);
 	}
 
 	public void run() {
