@@ -1,4 +1,4 @@
-package org.mqttkat.server;
+package org.mqttkat;
 
 import clojure.lang.IPersistentMap;
 
@@ -6,6 +6,9 @@ import clojure.lang.IFn;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+
+import org.mqttkat.server.PrefixThreadFactory;
+
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ArrayBlockingQueue;
 

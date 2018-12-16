@@ -1,7 +1,8 @@
 (ns mqttkat.server
   (:require [mqttkat.handlers :as h])
   (:use [mqttkat.s :only [server]])
-  (:import [org.mqttkat.server MqttServer MqttHandler])
+  (:import [org.mqttkat.server MqttServer]
+           [org.mqttkat MqttHandler])
   (:gen-class))
 
 (set! *warn-on-reflection* true)

@@ -2,7 +2,6 @@ package org.mqttkat.packages;
 
 import static clojure.lang.Keyword.intern;
 import static org.mqttkat.MqttUtil.decodeUTF8;
-import static org.mqttkat.MqttUtil.qos;
 
 import java.io.IOException;
 import java.nio.channels.SelectionKey;

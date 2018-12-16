@@ -1,4 +1,4 @@
-package org.mqttkat.server;
+package org.mqttkat;
 
 import clojure.lang.IPersistentMap;
 
