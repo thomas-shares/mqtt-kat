@@ -165,10 +165,10 @@ public class MqttClient implements Runnable {
 		}
 
 		// Handle the response
-		this.handleResponse(socketChannel, this.readBuffer.array(), numRead);
+		this.handleResponse(this.readBuffer.array(), numRead);
 	}
 
-	private void handleResponse(SocketChannel socketChannel, byte[] data, int numRead) throws IOException {
+	private void handleResponse( byte[] data, int numRead) throws IOException {
 		// Make a correctly sized copy of the data before handing it
 		// to the client
 		byte[] rspData = new byte[numRead];
@@ -176,16 +176,20 @@ public class MqttClient implements Runnable {
 
 		
 		for(byte i :rspData) {
-			System.out.println(i + " ");
+			System.out.print(i + " ");
 		}
 		System.out.println("\n");
 		
 				
 		byte type = 0;
-				
-		type = (byte) ((rspData[0] & 0xff) >> 4);
+		byte flags = 0;
 		
-		if (type == GenericMessage.MESSAGE_CONNACK) {
+		type = (byte) ((rspData[0] & 0xff) >> 4);
+		flags = (byte) (rspData[0] &= 0x0f);
+
+		if (type == GenericMessage.MESSAGE_CONNECT) {
+			System.out.println("CONNECT");
+		} else if (type == GenericMessage.MESSAGE_CONNACK) {
 			System.out.println("CONNACK");
 		} else if (type == GenericMessage.MESSAGE_PUBLISH) {
 			System.out.println("PUBLISH");
@@ -203,6 +207,8 @@ public class MqttClient implements Runnable {
 			System.out.println("UNSUBSCRIBE");
 		} else if (type == GenericMessage.MESSAGE_PINGREQ) {
 			System.out.println("PINGREQ");
+		} else if ( type == GenericMessage.MESSAGE_PINGRESP) {
+			System.out.println("PINGRESP");
 		} else if (type == GenericMessage.MESSAGE_DISCONNECT) {
 			System.out.println("DISCONNECT");
 		} else if ( type ==  GenericMessage.MESSAGE_AUTHENTICATION) {	

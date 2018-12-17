@@ -72,4 +72,9 @@ public class MqttHandler implements IHandler {
 	        execs.shutdownNow();
 	    }		
 	}
+
+	public void connect(IPersistentMap connect) {
+		// TODO Auto-generated method stub
+		
+	}
 }

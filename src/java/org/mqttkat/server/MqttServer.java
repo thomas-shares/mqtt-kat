@@ -115,16 +115,11 @@ public class MqttServer implements Runnable {
 			// buf.get(bytes);
 			byte[] bytes = new byte[1];
 			buf.get(bytes, 0, 1);
-			// sb.append(new String(bytes));
-			// byte first = bytes[0];
 
 			//System.out.println("byte 0: "  + Integer.toBinaryString( (int) bytes[0]));
 			type = (byte) ((bytes[0] & 0xff) >> 4);
 			flags = (byte) (bytes[0] &= 0x0f);
 
-			//System.out.println("type: " + Integer.toBinaryString( (int)type));
-			//System.out.println("flags : " + flags);
-			// long remLen = readMBI(in).getValue();
 		/*	
 			if (type == GenericMessage.MESSAGE_CONNECT) {
 				System.out.println("CONNECT");
