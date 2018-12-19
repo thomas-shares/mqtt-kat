@@ -25,7 +25,7 @@ public abstract class MqttUtil {
 		return ret.put((byte) ((encodedStr.length >>> 8) & 0xFF)).put((byte) ((encodedStr.length >>> 0) & 0xFF)).put(encodedStr);
 	}
 
-	public static byte[] calculateLenght(long number) {
+	public static ByteBuffer calculateLenght(long number) {
 		int numBytes = 0;
 		long no = number;
 		ByteArrayOutputStream bos = new ByteArrayOutputStream();
@@ -40,7 +40,7 @@ public abstract class MqttUtil {
 			numBytes++;
 		} while ( (no > 0) && (numBytes<4) );
 
-		return bos.toByteArray();
+		return ByteBuffer.wrap(bos.toByteArray());
 	}
 
 	public static int qos(int qos) {

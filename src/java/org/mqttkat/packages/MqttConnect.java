@@ -7,6 +7,9 @@ import org.mqttkat.MqttUtil;
 
 import static org.mqttkat.MqttUtil.*;
 import clojure.lang.PersistentArrayMap;
+
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import static clojure.lang.Keyword.intern;
 import java.io.IOException;
@@ -103,46 +106,84 @@ public class MqttConnect extends GenericMessage {
 	
 	public static ByteBuffer[] encode(Map<?, ?> message) throws UnsupportedEncodingException {
 		log("encode CONNECT");
+		int lengthCounter = 0;
+
 		byte[] bType = {(MESSAGE_CONNECT << 4)};
 		bType[0] =  (byte) (bType[0] & 0xf0);
 		System.out.println("type: " + bType[0]);
 
-		log(message.get(PROTOCOL_NAME).toString());
+		log("protocal name: " + message.get(PROTOCOL_NAME).toString());
 		ByteBuffer protocolName = encodeUTF8((String)message.get(PROTOCOL_NAME));
 		protocolName.flip();
-		log(message.get(PROTOCOL_VERSION).toString());
-		//byte[] protocolLevel =  {(byte)message.get(PROTOCOL_VERSION)};
-		byte[] protocolLevel = {4};
-		System.out.println("level: " + protocolLevel[0]);
+		log("protocolLevel: " + message.get(PROTOCOL_VERSION).toString());
+		byte[] protocolLevel = {(Byte) message.get(PROTOCOL_VERSION)};
 
+		
 		byte[] connectFlags = {0};
-		System.out.println(connectFlags[0]);
+		connectFlags[0] = (byte) (message.containsKey(CLEAN_START) == true ? 0x02 | connectFlags[0]: connectFlags[0]);
+		log("connect flags: " + connectFlags[0]);
 
-		log(message.get(KEEP_ALIVE).toString());
+		log("keep alive: " + message.get(KEEP_ALIVE).toString());
 		Long keepAliveL = (Long) message.get(KEEP_ALIVE);
 		ByteBuffer keepAlive = ByteBuffer.allocate(2);
 		keepAlive.put((byte) ((keepAliveL >>> 8) & 0xFF)).put((byte) ((keepAliveL >>> 0) & 0xFF));
 		keepAlive.flip();
 
-		
-		log(message.get(CLIENT_ID).toString());
+		lengthCounter = 10;
+		log("client id:  " + message.get(CLIENT_ID).toString());
 		ByteBuffer clientId = encodeUTF8((String)message.get(CLIENT_ID));
-		byte[] bLength = MqttUtil.calculateLenght(10 + clientId.position());
+		lengthCounter += clientId.position();
 		clientId.flip();
-
-		System.out.println("length: " + bLength[0]);
-
 		
+	
 		//bPayload[0] =  (byte) ((Boolean) message.get(SESSION_PRESENT) ? 1 : 0);
 		//bPayload[1] = 0x00;
 		//System.out.println(message.toString() + String.format("%x", bType[0]) + String.format("%x", bLength[0]) + String.format("%x%x", bPayload[0],bPayload[1]));
 
 		ByteBuffer type = ByteBuffer.wrap(bType);
-		ByteBuffer length = ByteBuffer.wrap(bLength);
+		byte[] lengthByte = {0};
+		ByteBuffer lengthBuffer =  ByteBuffer.wrap(lengthByte);
 		ByteBuffer protocolLevelBuffer = ByteBuffer.wrap(protocolLevel);
 		ByteBuffer connectFlagsBuffer = ByteBuffer.wrap(connectFlags);
 		
+		List<ByteBuffer> buffers = new ArrayList<ByteBuffer>(7);
+		buffers.add(0, type);
+		buffers.add(1, lengthBuffer );
+		buffers.add(2, protocolName);
+		buffers.add(3, protocolLevelBuffer);
+		buffers.add(4, connectFlagsBuffer);
+		buffers.add(5, keepAlive);
+		buffers.add(6, clientId);
+		//ByteBuffer[] buffers = {type, length, protocolName, protocolLevelBuffer, connectFlagsBuffer,  keepAlive, clientId};
 
-		return new ByteBuffer[]{type, length, protocolName, protocolLevelBuffer, connectFlagsBuffer,  keepAlive, clientId};
+		if(message.containsKey(USER_NAME)) {
+			log("set username: " +  message.get(USER_NAME));
+			connectFlags[0] = (byte) (0x80 | connectFlags[0]);
+			ByteBuffer userName = encodeUTF8((String)message.get(USER_NAME));
+			lengthCounter += userName.position();
+			userName.flip();
+			buffers.add(userName);
+		}
+		
+		if(message.containsKey(USER_NAME) && message.containsKey(PASSWORD)){
+			log("password set " + message.get(PASSWORD));
+			connectFlags[0] = (byte) (0x40 | connectFlags[0]);
+			ByteBuffer password = encodeUTF8((String)message.get(PASSWORD));
+			lengthCounter += password.position();
+			password.flip();
+			buffers.add(password);
+
+		}
+		
+		
+		
+
+		log("connect flags: " + connectFlags[0]);
+        buffers.set(1, MqttUtil.calculateLenght(lengthCounter));
+		log("length: " + lengthCounter);
+
+		
+		ByteBuffer[] ret = new ByteBuffer[buffers.size()];
+		return buffers.toArray(ret);
 	}
 }

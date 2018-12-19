@@ -44,12 +44,17 @@ public class MqttPublish extends GenericMessage {
 		ByteBuffer topic = encodeUTF8((String)message.get(TOPIC));
 		topic.flip();
 		int topicSize =  topic.remaining();
-		byte[] bPayload = (byte[])message.get(PAYLOAD);
+		
+		Object obj = message.get(PAYLOAD);
+		byte[] bPayload = null;
+		if( obj instanceof String) {
+			bPayload = ((String) obj).getBytes();
+		} else {
+			bPayload = (byte[])obj;
+		}
 				
-		byte[] bLength = calculateLenght(topicSize + bPayload.length);
-
+		ByteBuffer length = calculateLenght(topicSize + bPayload.length);
 		ByteBuffer type = ByteBuffer.wrap(bType);
-		ByteBuffer length = ByteBuffer.wrap(bLength);
 		ByteBuffer payload =  ByteBuffer.wrap(bPayload);
 
 		return new ByteBuffer[]{type, length, topic, payload};	}

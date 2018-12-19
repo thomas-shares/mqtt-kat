@@ -43,7 +43,7 @@ public abstract class GenericMessage {
 	public static final Keyword KEEP_ALIVE = intern("keep-alive");
 	public static final Keyword WILL_TOPIC = intern("will-topic");
 	public static final Keyword WILL_MSG = intern("will-message");
-	public static final Keyword USER_NAME = intern("username");
+	public static final Keyword USER_NAME = intern("user-name");
 	public static final Keyword PASSWORD = intern("password");
 
 	// CONNACK

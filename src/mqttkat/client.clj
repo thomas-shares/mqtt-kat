@@ -1,7 +1,7 @@
 (ns mqttkat.client
   (:import [org.mqttkat.client MqttClient]
            [org.mqttkat MqttHandler]
-           [org.mqttkat.packages MqttConnect MqttPingReq MqttPublish]))
+           [org.mqttkat.packages MqttConnect MqttPingReq MqttPublish MqttDisconnect]))
 
 
 (set! *warn-on-reflection* true)
@@ -22,8 +22,11 @@
    (let [bufs (MqttConnect/encode {:packet-type :CONNECT
                                    :client-id "test"
                                    :protocol-name "MQTT"
-                                   :protocol-version (int 4)
-                                   :keep-alive 600})]
+                                   :protocol-version (byte 4)
+                                   :keep-alive 600
+                                   :connect-flags-clean-session true
+                                   :user-name "user-name"
+                                   :password "secret"})]
      (.sendMessage ^MqttClient @client-atom bufs))))
 
 (defn publish
@@ -35,4 +38,8 @@
 
 (defn pingreq []
   (let [bufs (MqttPingReq/encode {:packet-type :PINGREQ})]
+    (.sendMessage ^MqttClient @client-atom bufs)))
+
+(defn disconnect []
+  (let [bufs (MqttDisconnect/encode {:packet-type :DISCONNECT})]
     (.sendMessage ^MqttClient @client-atom bufs)))

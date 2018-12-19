@@ -28,7 +28,6 @@ public class MqttSubAck extends GenericMessage {
 
 	public static ByteBuffer[] encode(Map<?, ?> message) {
 		byte[] bType = { (byte) (MESSAGE_SUBACK << 4) };
-		byte[] bLength = MqttUtil.calculateLenght(3);
 		short packetId = (Short) message.get(PACKET_IDENTIFIER);
 		//System.out.println("SUBACK packet id: " + packetId);
 		byte[] bPayload = new byte[3];
@@ -40,7 +39,7 @@ public class MqttSubAck extends GenericMessage {
 		//System.out.println("SUBACK packet id bytes: " + bPayload[0]  + bPayload[1]);
 
 		ByteBuffer type = ByteBuffer.wrap(bType);
-		ByteBuffer length = ByteBuffer.wrap(bLength);
+		ByteBuffer length = MqttUtil.calculateLenght(3);
 		ByteBuffer payload = ByteBuffer.wrap(bPayload);
 
 		return new ByteBuffer[] { type, length, payload };

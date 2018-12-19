@@ -24,7 +24,7 @@
 
 
 (s/def :mqtt/protocol-name #{"MQIsdp" "MQTT"})
-(s/def :mqtt/protocol-version #{3 4 5})
+(s/def :mqtt/protocol-version #{(byte 3) (byte 4) (byte 5)})
 (s/def :mqtt/connect-flags-username-flag boolean?)
 (s/def :mqtt/connect-flags-password-flag boolean?)
 (s/def :mqtt/connect-flags-will-retain boolean?)
