@@ -10,32 +10,35 @@
 ;(def ^:const byte-array-type (type (byte-array 0)))
 ;(defn bytes? [x] (= (type x) byte-array-type))
 
-(s/def :mqtt/packet-type #{:CONNECT :CONACK :PUBLISH :PUBACK :PUBREC :PUBREL :PUBCOMP :SUBSCRIBE :SUBACK :UNSUBSCRIBE :UNSUBACK :PINGREQ :PINGRESP :AUTHENTICATE})
-
 (def short-values (s/int-in 0 65534))
 (def qos #{0 1 2})
 
 (s/def :mqtt/payload bytes?)
   ;(s/with-gen #(instance? java.io.InputStream %) gen-input-stream))
 
-
 (s/def :mqtt/topic string?)
 (s/def :mqtt/packet-identifier short-values)
 
-
-(s/def :mqtt/protocol-name #{"MQIsdp" "MQTT"})
-(s/def :mqtt/protocol-version #{(byte 3) (byte 4) (byte 5)})
-(s/def :mqtt/connect-flags-username-flag boolean?)
-(s/def :mqtt/connect-flags-password-flag boolean?)
-(s/def :mqtt/connect-flags-will-retain boolean?)
-(s/def :mqtt/connect-flags-will-qos qos)
-(s/def :mqtt/connect-flags-will-flag boolean?)
-(s/def :mqtt/connect-flags-clean-session boolean?)
-
+(s/def :mqtt-connect/packet-type #{:CONNECT})
+(s/def :mqtt-3/protocol-name #{"MQIsdp"})
+(s/def :mqtt-3/protocol-version #{(byte 3)})
+(s/def :mqtt-4-5/protocol-name #{"MQTT"})
+(s/def :mqtt-4-5/protocol-version #{(byte 4) (byte 5)})
+(s/def :mqtt/clean-session boolean?)
 (s/def :mqtt/keep-alive short-values)
-(s/def :mqtt/flags #{0})
 (s/def :mqtt/username string?)
 (s/def :mqtt/password string?)
+(s/def :mqtt/will-topic string?)
+(s/def :mqtt/will-message string?)
+(s/def :mqtt/will-qos qos)
+(s/def :mqtt/will-retain boolean?)
+(s/def :mqtt/user-credentials (s/keys :req-un [:mqtt/username]
+                                      :opt-un [:mqtt/password]))
+(s/def :mqtt/will (s/keys :req-un [:mqtt/will-topic
+                                   :mqtt/will-message
+                                   :mqtt/will-qos
+                                   :mqtt/will-retain]))
+(s/def :mqtt/client-id (s/and string? #(<= (count %) 23)))
 
 ;(s/def ::name string?)
 ;(s/def ::password string?)
@@ -51,16 +54,24 @@
 ;                      :login-present? ::user-creds)
 
 (s/def :mqtt/connect
-  (s/keys :req-un [:mqtt/flags
-                   :mqtt/protocol-name
-                   :mqtt/protocol-version
-                   :mqtt/keep-alive
-                   :mqtt/connect-flags-will-qos
-                   :mqtt/connect-flags-will-flag
-                   :mqtt/connect-flags-will-retain
-                   :mqtt/connect-flags-username-flag
-                   :mqtt/connect-flags-password-flag
-                   :mqtt/connect-flags-clean-session]))
+  (s/or :3 (s/keys :req-un [:mqtt-connect/packet-type
+                            :mqtt-3/protocol-name
+                            :mqtt-3/protocol-version
+                            :mqtt/keep-alive
+                            :mqtt/clean-session
+                            :mqtt/client-id]
+                   :opt-un [:mqtt/user-credentials
+                            :mqtt/will])
+        :4-5 (s/keys :req-un [:mqtt-connect/packet-type
+                              :mqtt-4-5/protocol-name
+                              :mqtt-4-5/protocol-version
+                              :mqtt/keep-alive
+                              :mqtt/clean-session
+                              :mqtt/client-id]
+                     :opt-un [:mqtt/user-credentials
+                              :mqtt/will])))
+
+
 
 ;;publish
 (s/def :mqtt/publish-duplicate boolean?)
