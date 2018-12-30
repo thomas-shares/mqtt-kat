@@ -60,16 +60,16 @@
                             :mqtt/keep-alive
                             :mqtt/clean-session
                             :mqtt/client-id]
-                   :opt-un [:mqtt/user-credentials])
-                      ;      :mqtt/will])
+                   :opt-un [:mqtt/user-credentials
+                            :mqtt/will])
         :4-5 (s/keys :req-un [:mqtt-connect/packet-type
                               :mqtt-4-5/protocol-name
                               :mqtt-4-5/protocol-version
                               :mqtt/keep-alive
                               :mqtt/clean-session
                               :mqtt/client-id]
-                     :opt-un [:mqtt/user-credentials])))
-                        ;      :mqtt/will])))
+                     :opt-un [:mqtt/user-credentials
+                              :mqtt/will])))
 
 
 

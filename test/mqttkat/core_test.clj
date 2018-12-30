@@ -32,7 +32,7 @@
     (catch Exception e)))
 
 (use-fixtures :once mqtt-fixture)
-     
+
 (deftest connect-packet
   (let [;_ (server/run-server "0.0.0.0" 1883 handler)
         client (client/client  "localhost" 1883)

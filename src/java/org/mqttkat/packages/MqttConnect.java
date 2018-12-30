@@ -41,7 +41,7 @@ public class MqttConnect extends GenericMessage {
 
 		//offset++;
 		String s1 = String.format("%8s", Integer.toBinaryString(connectFlags & 0xFF)).replace(' ', '0');
-		//System.out.println("connectFlags: " + s1);
+		System.out.println("received connectFlags: " + s1);
 		Byte b1 = remainAndPayload[offset++];
 		Byte b2 = remainAndPayload[offset++];
 		//int a = Short.toUnsignedInt((short) (b1<<8));
@@ -62,6 +62,7 @@ public class MqttConnect extends GenericMessage {
 		Map<Keyword, Object> will = new TreeMap<Keyword, Object>();
 
 		if( willFlag ) {
+			//log("will set...");
 			willTopic = decodeUTF8(remainAndPayload, offset);
 			will.put(WILL_TOPIC, willTopic);
 			offset += willTopic.length() + 2;
@@ -70,6 +71,11 @@ public class MqttConnect extends GenericMessage {
 			offset += willMessage.length() + 2;
 			boolean willRetain = (connectFlags & 0x20) == 0x20;
 			will.put(WILL_RETAIN, willRetain);
+			
+			byte qos = (byte) ((connectFlags & 0x18) >> 3);
+			//log("qos: " +  qos);
+			will.put(WILL_QOS, qos);
+			
 		}
 		//System.out.println("6 " + offset);
 
@@ -182,12 +188,21 @@ public class MqttConnect extends GenericMessage {
 
 		if(message.containsKey(WILL)) {
 			Map<Keyword, ?> will =  (Map<Keyword, ?>) message.get(WILL); 
-			connectFlags[0] = (byte) (0x40 | connectFlags[0]);
+			connectFlags[0] = (byte) (0x04 | connectFlags[0]);
 			//log("set will qos: " + will.get(WILL_QOS));
 			Byte willQos = Byte.parseByte(((Long) will.get(WILL_QOS)).toString());
-			connectFlags[0] = (byte) ((willQos << 4) | connectFlags[0]);
+			connectFlags[0] = (byte) ((willQos << 3) | connectFlags[0]);
 			Boolean willRetain = (Boolean) will.get(WILL_RETAIN);
-			connectFlags[0] = willRetain ? (byte) (0x20 | connectFlags[0]) : connectFlags[0];	
+			connectFlags[0] = willRetain ? (byte) (0x20 | connectFlags[0]) : connectFlags[0];
+			ByteBuffer willTopic = encodeUTF8((String)will.get(WILL_TOPIC));
+			lengthCounter += willTopic.position();
+			willTopic.flip();
+			buffers.add(willTopic);
+
+			ByteBuffer willMessage = encodeUTF8((String)will.get(WILL_MSG));
+			lengthCounter += willMessage.position();
+			willMessage.flip();
+			buffers.add(willMessage);
 		}
 		
 		if(message.containsKey(USER_CREDENTIALS)) { 
@@ -212,7 +227,7 @@ public class MqttConnect extends GenericMessage {
 		String s1 = String.format("%8s", Integer.toBinaryString(connectFlags[0] & 0xFF)).replace(' ', '0');
 		log("connect flags: " + s1);
         buffers.set(1, calculateLenght(lengthCounter));
-		log("length: " + lengthCounter);
+		log("length: " + lengthCounter + " buffers.size: " +  buffers.size());
 		
 		ByteBuffer[] ret = new ByteBuffer[buffers.size()];
 		return buffers.toArray(ret);
