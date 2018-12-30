@@ -11,8 +11,8 @@ public abstract class MqttUtil {
 
 	public static String decodeUTF8(byte[] input, int offset) throws IOException 	{
 		short encodedLength = (short)((input[offset]<<8) | input[1+offset]);
-		String ret =  new String(Arrays.copyOfRange(input,offset + 2,offset + 2 + encodedLength), STRING_ENCODING);
-		//System.out.println("ret: " +  ret + " length: " + encodedLength);
+		String ret =  new String(Arrays.copyOfRange(input,(offset + 2),(offset + 2 + encodedLength)), STRING_ENCODING);
+		//System.out.println("ret: " +  ret + " length: " + encodedLength + " string length: " + ret.length());
 		return ret;
 	}
 	
@@ -21,7 +21,7 @@ public abstract class MqttUtil {
 		//byte byte1 = (byte) ((encodedStr.length >>> 8) & 0xFF);
 		//byte byte2 =  (byte) ((encodedStr.length >>> 0) & 0xFF); 
 		ByteBuffer ret = ByteBuffer.allocate(encodedStr.length + 2);
-
+		//log("string: " + str + " length: " + str.length());
 		return ret.put((byte) ((encodedStr.length >>> 8) & 0xFF)).put((byte) ((encodedStr.length >>> 0) & 0xFF)).put(encodedStr);
 	}
 

@@ -54,7 +54,7 @@ public class MqttClient implements Runnable {
 
 	public void sendMessage(ByteBuffer bufs[]) throws IOException {
 		for (int i = 0; i < bufs.length; i++) {
-			log(bufs[i].toString());
+			//log(bufs[i].toString());
 		}
 		// executor.submit(bufs);
 
@@ -67,7 +67,7 @@ public class MqttClient implements Runnable {
 				this.pendingData.put(socketChannel, queue);
 			}
 			queue.add(bufs);
-			System.out.println( "queue size: " + queue.size());
+			//System.out.println( "queue size: " + queue.size());
 		}
 		synchronized(this.pendingChanges) {
 			ChangeRequest changeRequest =  new ChangeRequest(socketChannel, ChangeRequest.REGISTER, SelectionKey.OP_WRITE);
@@ -76,7 +76,7 @@ public class MqttClient implements Runnable {
 				
 		// Finally, wake up our selecting thread so it can make the required changes
 		this.selector.wakeup();
-		System.out.println("woken up...");
+		//System.out.println("woken up...");
 	}
 
 	public void run() {
@@ -86,18 +86,18 @@ public class MqttClient implements Runnable {
 
 				synchronized (this.pendingChanges) {
 					Iterator<?> changes = this.pendingChanges.iterator();
-					System.out.println("changes..." + changes.hasNext());
+					//System.out.println("changes..." + changes.hasNext());
 					while (changes.hasNext()) {
 						ChangeRequest change = (ChangeRequest) changes.next();
 						switch (change.type) {
 						case ChangeRequest.CHANGEOPS:
-							System.out.println("OPS...");
+							//System.out.println("OPS...");
 
 							SelectionKey key = change.socket.keyFor(this.selector);
 							key.interestOps(change.ops);
 							break;
 						case ChangeRequest.REGISTER:
-							System.out.println("REGISTER...");
+							//System.out.println("REGISTER...");
 							change.socket.register(this.selector, change.ops);
 							break;
 						}
@@ -106,13 +106,13 @@ public class MqttClient implements Runnable {
 				}
 				// Wait for an event one of the registered channels
 				int x = this.selector.select();
-				System.out.println("selected..." + this.selector.selectedKeys().size() + "  " + x);
+				//System.out.println("selected..." + this.selector.selectedKeys().size() + "  " + x);
 				
 				// Iterate over the set of keys for which events are available
 				Iterator<SelectionKey> selectedKeys = this.selector.selectedKeys().iterator();
 				while (selectedKeys.hasNext()) {
 					SelectionKey key = (SelectionKey) selectedKeys.next();
-					System.out.println("key: " + key.toString());
+					//System.out.println("key: " + key.toString());
 
 					selectedKeys.remove();
 
@@ -124,10 +124,10 @@ public class MqttClient implements Runnable {
 					if (key.isConnectable()) {
 						this.finishConnection(key);
 					} else if (key.isReadable()) {
-						System.out.println("ready for read...");
+						//System.out.println("ready for read...");
 						this.read(key);
 					} else if (key.isWritable()) {
-						System.out.println("ready for write...");
+						//System.out.println("ready for write...");
 						this.write(key);
 					}
 				}
@@ -176,9 +176,9 @@ public class MqttClient implements Runnable {
 
 		
 		for(byte i :rspData) {
-			System.out.print(i + " ");
+			//System.out.print(i + " ");
 		}
-		System.out.println("\n");
+		//System.out.println("\n");
 		
 				
 		byte type = 0;
@@ -188,7 +188,7 @@ public class MqttClient implements Runnable {
 		flags = (byte) (rspData[0] &= 0x0f);
 
 		if (type == GenericMessage.MESSAGE_CONNECT) {
-			System.out.println("CONNECT");
+			//System.out.println("CONNECT");
 		} else if (type == GenericMessage.MESSAGE_CONNACK) {
 			System.out.println("CONNACK");
 		} else if (type == GenericMessage.MESSAGE_PUBLISH) {

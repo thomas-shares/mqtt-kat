@@ -8,7 +8,7 @@
   :global-vars {*warn-on-reflection* true}
 
   :dependencies
-  [[org.clojure/clojure "1.10.0-RC5"]
+  [[org.clojure/clojure "1.10.0"]
    [org.clojure/core.async "0.4.490"]
    [org.clojure/spec.alpha "0.2.176"]
    [org.clojure/core.specs.alpha "0.2.44"]

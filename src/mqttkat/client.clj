@@ -11,7 +11,7 @@
 (defn handler-fn [msg]
   (println msg))
 
-(defn- client [host port]
+(defn client [host port]
   (let [client (MqttClient. ^String host ^int port 2 ( MqttHandler. ^clojure.lang.IFn handler-fn 16))]
     (reset! client-atom client)))
 
@@ -23,10 +23,10 @@
                                    :client-id "test"
                                    :protocol-name "MQTT"
                                    :protocol-version (byte 4)
-                                   :keep-alive 600
-                                   :connect-flags-clean-session true
-                                   :user-name "user-name"
-                                   :password "secret"})]
+                                   :keep-alive 16532
+                                   :clean-session true
+                                   :user-credentials {:username "user-name"
+                                                      :password "secret"}})]
      (.sendMessage ^MqttClient @client-atom bufs))))
 
 (defn publish

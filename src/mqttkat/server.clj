@@ -26,8 +26,8 @@
   (when-let [packet-type (:packet-type msg)]
     ((packet-type handler-map) msg)))
 
-(defn run-server [ip port]
-  (let [s (MqttServer. ^String ip ^int port ( MqttHandler. ^clojure.lang.IFn handler-fn 16))]
+(defn run-server [ip port handler]
+  (let [s (MqttServer. ^String ip ^int port handler)]
     (.start s)
     (with-meta
       (fn stop-server [& {:keys [timeout] :or {timeout 100}}]
@@ -37,12 +37,14 @@
       {:local-port (.getPort s)
        :server s})))
 
-(defn start []
-  (reset! server (run-server "0.0.0.0" 1883)))
+(defn start
+  ([] (start "0.0.0.0" 1883 (MqttHandler. ^clojure.lang.IFn handler-fn 4)))
+  ([ip port handler]
+   (reset! server (run-server ip port handler))))
 
 (defn stop []
   (when-not (nil? @server)
-    (@server :timeout 100)
+    (@server :timeout 1000)
     (reset! server nil)))
 
 (defn -main [& args]

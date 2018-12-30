@@ -18,7 +18,7 @@ import clojure.lang.Keyword;
 
 public class MqttEncode {
 
-	public static ByteBuffer[] mqttEncoder(Map<?, ?> message) throws IOException {
+	public static ByteBuffer[] mqttEncoder(Map<Keyword, ?> message) throws IOException {
 		if( message == null ) {
 			return null;
 		}

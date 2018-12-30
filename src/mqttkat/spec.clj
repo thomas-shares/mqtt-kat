@@ -38,7 +38,7 @@
                                    :mqtt/will-message
                                    :mqtt/will-qos
                                    :mqtt/will-retain]))
-(s/def :mqtt/client-id (s/and string? #(<= (count %) 23)))
+(s/def :mqtt/client-id (s/and string? #(<= 1 (count %) 23)))
 
 ;(s/def ::name string?)
 ;(s/def ::password string?)
@@ -60,16 +60,16 @@
                             :mqtt/keep-alive
                             :mqtt/clean-session
                             :mqtt/client-id]
-                   :opt-un [:mqtt/user-credentials
-                            :mqtt/will])
+                   :opt-un [:mqtt/user-credentials])
+                      ;      :mqtt/will])
         :4-5 (s/keys :req-un [:mqtt-connect/packet-type
                               :mqtt-4-5/protocol-name
                               :mqtt-4-5/protocol-version
                               :mqtt/keep-alive
                               :mqtt/clean-session
                               :mqtt/client-id]
-                     :opt-un [:mqtt/user-credentials
-                              :mqtt/will])))
+                     :opt-un [:mqtt/user-credentials])))
+                        ;      :mqtt/will])))
 
 
 

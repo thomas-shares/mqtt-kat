@@ -13,6 +13,7 @@ import java.util.Map;
 import java.nio.ByteBuffer;
 
 import clojure.lang.IPersistentMap;
+import clojure.lang.Keyword;
 
 import org.mqttkat.IHandler;
 import org.mqttkat.MqttSendExecutor;
@@ -120,7 +121,7 @@ public class MqttServer implements Runnable {
 			type = (byte) ((bytes[0] & 0xff) >> 4);
 			flags = (byte) (bytes[0] &= 0x0f);
 
-		/*	
+			
 			if (type == GenericMessage.MESSAGE_CONNECT) {
 				System.out.println("CONNECT");
 			} else if (type == GenericMessage.MESSAGE_PUBLISH) {
@@ -146,7 +147,7 @@ public class MqttServer implements Runnable {
 			} else {
 				System.out.println("FAIL!!!!!! INVALID packet sent: " + type);
 			}
-*/
+
 			byte digit;
 			int multiplier = 1;
 			int count = 0;
@@ -270,7 +271,7 @@ public class MqttServer implements Runnable {
 		 }
 	  }
 	
-	public void sendMessage( final clojure.lang.PersistentVector keys, final Map<?, ?> message) throws IOException {
+	public void sendMessage( final clojure.lang.PersistentVector keys, final Map<Keyword, ?> message) throws IOException {
 		ByteBuffer bufs[] = MqttEncode.mqttEncoder(message);
 		int length = bufs.length;
 		
