@@ -21,13 +21,13 @@
 
 (s/def :mqtt-connect/packet-type #{:CONNECT})
 (s/def :mqtt-3/protocol-name #{"MQIsdp"})
-(s/def :mqtt-3/protocol-version #{(byte 3)})
+(s/def :mqtt-3/protocol-version #{3})
 (s/def :mqtt-4-5/protocol-name #{"MQTT"})
-(s/def :mqtt-4-5/protocol-version #{(byte 4) (byte 5)})
+(s/def :mqtt-4-5/protocol-version #{4 5})
 (s/def :mqtt/clean-session boolean?)
 (s/def :mqtt/keep-alive short-values)
 (s/def :mqtt/username string?)
-(s/def :mqtt/password string?)
+(s/def :mqtt/password bytes?)
 (s/def :mqtt/will-topic string?)
 (s/def :mqtt/will-message string?)
 (s/def :mqtt/will-qos qos)
@@ -39,19 +39,6 @@
                                    :mqtt/will-qos
                                    :mqtt/will-retain]))
 (s/def :mqtt/client-id (s/and string? #(<= 1 (count %) 23)))
-
-;(s/def ::name string?)
-;(s/def ::password string?)
-;(s/def ::login-present? boolean)
-;(s/def ::client-id string?)
-
-;(s/def ::connect_xxxx (s/keys :req [client-id] :opt []))
-;(s/def ::user-creds
-;  (s/and #(::login-present? %
-;               (s/keys :req [::name ::password ::login-present]))
-
-;(s/def ::pubsub (s/or :connect ::connect
-;                      :login-present? ::user-creds)
 
 (s/def :mqtt/connect
   (s/or :3 (s/keys :req-un [:mqtt-connect/packet-type
@@ -71,22 +58,46 @@
                      :opt-un [:mqtt/user-credentials
                               :mqtt/will])))
 
-
-
 ;;publish
 (s/def :mqtt/publish-duplicate boolean?)
 (s/def :mqtt/publish-qos qos)
+(s/def :mqtt-qos-0/publish-qos #{0})
+(s/def :mqtt-qos-gt0/publish-qos #{1 2})
 (s/def :mqtt/publish-retain boolean?)
+(s/def :mqtt-publish/packet-type #{:PUBLISH})
 
 (s/def :mqtt/publish
-  (s/keys :req-un [:mqtt/publish-qos
-                   :mqtt/publish-retain
-                   :mqtt/topic
-                   :mqtt/payload]
-          :opt-un [:mqtt/packet-identifier]))
+  (s/or :qos-0 (s/keys :req-un [:mqtt-publish/packet-type
+                                :mqtt-qos-0/publish-qos
+                                :mqtt/publish-retain
+                                :mqtt/topic
+                                :mqtt/payload])
+        :qos-gt0 (s/keys :req-un [:mqtt-publish/packet-type
+                                  :mqtt-qos-gt0/publish-qos
+                                  :mqtt/publish-retain
+                                  :mqtt/publish-duplicate
+                                  :mqtt/topic
+                                  :mqtt/payload
+                                  :mqtt/packet-identifier])))
 
-(s/def :mqtt/topic-filter string?)
-(s/def :mqtt/topics (s/and :mqtt/topic-filter qos))
+(s/def :mqtt/topic-filter (s/and string? #(<= 1 (count %))))
+(s/def :mqtt/qos qos)
+(s/def :mqtt/topic
+  (s/keys :req-un [:mqtt/topic-filter
+                   :mqtt/qos]))
+(s/def :mqtt/topics (s/coll-of :mqtt/topic))
 
+(s/def :mqtt-subscribe/packet-type #{:SUBSCRIBE})
 (s/def :mqtt/subscribe
-  (s/keys :req-un []))
+  (s/keys :req-un [:mqtt-subscribe/packet-type
+                   :mqtt/packet-identifier
+                   :mqtt/topics]))
+
+
+(s/def :mqtt-pingreq/packet-type #{:PINGREQ})
+(s/def :mqtt/pingreq
+  (s/keys :req-un [:mqtt-pingreq/packet-type]))
+
+(s/def :mqtt-pingresp/packet-type #{:PINGRESP})
+(s/def :mqtt/pingresp
+  (s/keys :req-un [:mqtt-pingresp/packet-type]))

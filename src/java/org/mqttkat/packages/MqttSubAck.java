@@ -11,6 +11,7 @@ import java.util.TreeMap;
 import org.mqttkat.MqttUtil;
 
 import clojure.lang.IPersistentMap;
+import clojure.lang.Keyword;
 import clojure.lang.PersistentArrayMap;
 
 public class MqttSubAck extends GenericMessage {
@@ -18,15 +19,14 @@ public class MqttSubAck extends GenericMessage {
 	public static IPersistentMap decode(SelectionKey key, byte flags, byte[] remainAndPayload) throws IOException {
 		//System.out.println("SUBACK message...");
 
-		Map<Object, Object> m = new TreeMap<Object, Object>();
+		Map<Keyword, Object> m = new TreeMap<Keyword, Object>();
 		m.put(PACKET_TYPE, intern("SUBACK"));
 		m.put(CLIENT_KEY, key);
 
-		m.put(FLAGS, flags);
 		return PersistentArrayMap.create(m);
 	}
 
-	public static ByteBuffer[] encode(Map<?, ?> message) {
+	public static ByteBuffer[] encode(Map<Keyword, ?> message) {
 		byte[] bType = { (byte) (MESSAGE_SUBACK << 4) };
 		short packetId = (Short) message.get(PACKET_IDENTIFIER);
 		//System.out.println("SUBACK packet id: " + packetId);

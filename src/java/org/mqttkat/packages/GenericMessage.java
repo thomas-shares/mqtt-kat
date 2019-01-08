@@ -23,7 +23,7 @@ public abstract class GenericMessage {
 
 	// Generic
 	public static final Keyword PACKET_TYPE = intern("packet-type");
-	public static final Keyword FLAGS = intern("flags");
+	//public static final Keyword FLAGS = intern("flags");
 	public static final Keyword CLIENT_KEY = intern("client-key");
 	public static final Keyword PACKET_IDENTIFIER = intern("packet-identifier");
 
@@ -51,14 +51,15 @@ public abstract class GenericMessage {
 	public static final Keyword SESSION_PRESENT = intern("session-present");
 
 	//PUBLISH
-	public static final Keyword DUPLICATE = intern("duplicate");
-	public static final Keyword MSG_QOS = intern("publish-qos");
+	public static final Keyword DUPLICATE = intern("publish-duplicate");
 	public static final Keyword RETAIN = intern("publish-retain");
 	public static final Keyword TOPIC = intern("topic");
 	public static final Keyword PAYLOAD = intern("payload");
 
 	//SUBSCRIBE
 	public static final Keyword TOPICS = intern("topics");
+	public static final Keyword TOPIC_FILTER = intern("topic-filter");
+	public static final Keyword QOS = intern("qos");
 
 
 

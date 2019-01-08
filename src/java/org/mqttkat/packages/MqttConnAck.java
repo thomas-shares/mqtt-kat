@@ -4,9 +4,11 @@ import java.nio.ByteBuffer;
 import java.util.Map;
 import org.mqttkat.MqttUtil;
 
+import clojure.lang.Keyword;
+
 public class MqttConnAck extends GenericMessage{
 
-	public static ByteBuffer[] encode(Map<?, ?> message) {
+	public static ByteBuffer[] encode(Map<Keyword, ?> message) {
 		byte[] bType = {(MESSAGE_CONNACK << 4)};
 		ByteBuffer length = MqttUtil.calculateLenght(2);
 		byte[] bPayload = new byte[2];

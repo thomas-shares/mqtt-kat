@@ -1,4 +1,6 @@
 (ns mqttkat.client
+  (:require [clojure.spec.gen.alpha :as gen]
+            [clojure.spec.alpha :as s])
   (:import [org.mqttkat.client MqttClient]
            [org.mqttkat MqttHandler]
            [org.mqttkat.packages MqttConnect MqttPingReq MqttPublish MqttDisconnect]))
@@ -19,14 +21,8 @@
   ([] (connect "localhost" 1883))
   ([host port]
    (client host port)
-   (let [bufs (MqttConnect/encode {:packet-type :CONNECT
-                                   :client-id "test"
-                                   :protocol-name "MQTT"
-                                   :protocol-version (byte 4)
-                                   :keep-alive 16532
-                                   :clean-session true
-                                   :user-credentials {:username "user-name"
-                                                      :password "secret"}})]
+   (let [map (gen/generate (s/gen :mqtt/connect))
+         bufs (MqttConnect/encode map)]
      (.sendMessage ^MqttClient @client-atom bufs))))
 
 (defn publish
@@ -43,3 +39,6 @@
 (defn disconnect []
   (let [bufs (MqttDisconnect/encode {:packet-type :DISCONNECT})]
     (.sendMessage ^MqttClient @client-atom bufs)))
+
+(defn close []
+  (.close ^MqttClient @client-atom))

@@ -1,6 +1,8 @@
 package org.mqttkat.server;
 
 import static java.nio.channels.SelectionKey.OP_ACCEPT;
+import static org.mqttkat.MqttUtil.log;
+
 import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
 import java.net.InetSocketAddress;
@@ -22,6 +24,7 @@ import org.mqttkat.packages.MqttAuthenticate;
 import org.mqttkat.packages.MqttConnect;
 import org.mqttkat.packages.MqttDisconnect;
 import org.mqttkat.packages.MqttPingReq;
+import org.mqttkat.packages.MqttPingResp;
 import org.mqttkat.packages.MqttPubAck;
 import org.mqttkat.packages.MqttPubComp;
 import org.mqttkat.packages.MqttPubRec;
@@ -38,7 +41,7 @@ public class MqttServer implements Runnable {
 	private Thread serverThread;
 	private final IHandler handler;
 	private final int port;
-	private ByteBuffer buf = ByteBuffer.allocate(256);
+	private ByteBuffer buf = ByteBuffer.allocate(1024);
 	private MqttSendExecutor executor;
 
 	public MqttServer(String ip, int port, IHandler handler) throws IOException {
@@ -150,18 +153,17 @@ public class MqttServer implements Runnable {
 
 			byte digit;
 			int multiplier = 1;
-			int count = 0;
 
 			do {
-				buf.get(bytes, count, count + 1);
-				digit = bytes[0]; // bytes[count];
-				count++;
+				//buf.get(bytes, 0, 1);
+				digit = buf.get(); // bytes[0];
+				String s1 = String.format("%8s", Integer.toBinaryString(digit & 0xFF)).replace(' ', '0');
+				//log("length byte: " + s1 );
 				msgLength += ((digit & 0x7F) * multiplier);
 				multiplier *= 128;
 			} while ((digit & 0x80) != 0);
 
-			//System.out.println("count: " + count);
-			System.out.println("msgLenght: " + msgLength);
+			//System.out.println("msgLenght: " + msgLength);
 
 			remainAndPayload = new byte[msgLength];
 			//System.out.println( "limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity() + " remainLength: " +  remainAndPayload.length);
@@ -205,7 +207,9 @@ public class MqttServer implements Runnable {
 		} else if (type == GenericMessage.MESSAGE_UNSUBSCRIBE) {
 			incoming = MqttUnsubscribe.decode(key, flags, remainAndPayload, msgLengthExtra);
 		} else if (type == GenericMessage.MESSAGE_PINGREQ) {
-			incoming = MqttPingReq.decodePingReq(key, flags);
+			incoming = MqttPingReq.decode(key, flags);
+		} else if (type == GenericMessage.MESSAGE_PINGRESP) {
+			incoming = MqttPingResp.decode(key, flags);
 		} else if (type == GenericMessage.MESSAGE_DISCONNECT) {
 			incoming = MqttDisconnect.decode(key, flags, remainAndPayload);
 			closeKey(key);

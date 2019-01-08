@@ -10,6 +10,7 @@ import java.util.TreeMap;
 
 import clojure.lang.IPersistentMap;
 import clojure.lang.IPersistentVector;
+import clojure.lang.Keyword;
 import clojure.lang.PersistentArrayMap;
 import clojure.lang.PersistentVector;
 
@@ -19,10 +20,9 @@ public class MqttUnsubscribe extends GenericMessage{
 		System.out.println("UNSUBSCRIBE message...");
 
 		int offset = 0;
-		Map<Object, Object> m = new TreeMap<Object, Object>();
+		Map<Keyword, Object> m = new TreeMap<Keyword, Object>();
 
 		m.put(PACKET_TYPE, intern("UNSUBSCRIBE"));
-		m.put(FLAGS, flags);
 
 		m.put(PACKET_IDENTIFIER, (short)((data[offset++]<<8) | data[offset++]));
 

@@ -13,7 +13,8 @@
    [org.clojure/spec.alpha "0.2.176"]
    [org.clojure/core.specs.alpha "0.2.44"]
    [org.clojure/test.check "0.10.0-alpha3"]
-   [proto-repl "0.3.1"]]
+   [proto-repl "0.3.1"]
+   [org.craigandera/causatum "0.3.0"]]
 
   :plugins
   [[lein-swank   "1.4.5"]

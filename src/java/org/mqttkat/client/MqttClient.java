@@ -61,6 +61,7 @@ public class MqttClient implements Runnable {
 		// socketChannel.write(bufs);
 		// And queue the data we want written
 		synchronized (this.pendingData) {
+			@SuppressWarnings("unchecked")
 			List<ByteBuffer[]> queue = (List<ByteBuffer[]>) this.pendingData.get(socketChannel);
 			if (queue == null) {
 				queue = new ArrayList<ByteBuffer[]>();
@@ -132,8 +133,8 @@ public class MqttClient implements Runnable {
 					}
 				}
 			}  catch (Exception e) {
-				System.out.println(e.getMessage());
-				e.printStackTrace();
+				//System.out.println(e.getMessage());
+			//	e.printStackTrace();
 			}
 		}
 	}
@@ -229,6 +230,7 @@ public class MqttClient implements Runnable {
 			while (!queue.isEmpty()) {
 				ByteBuffer[] bufs = (ByteBuffer[]) queue.get(0);
 				for(ByteBuffer buf : bufs) {
+					//log("buf: " + buf.toString());
 					socketChannel.write(buf);
 					if (buf.remaining() > 0) {
 						// ... or the socket's buffer fills up

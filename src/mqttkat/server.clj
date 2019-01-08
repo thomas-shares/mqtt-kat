@@ -31,6 +31,7 @@
     (.start s)
     (with-meta
       (fn stop-server [& {:keys [timeout] :or {timeout 100}}]
+        (println "meta stop...")
         (.stop s timeout))
       ;(fn send-message [key msg]
       ;  (.sendMessage s key msg))
@@ -44,6 +45,7 @@
 
 (defn stop []
   (when-not (nil? @server)
+    (println "Server stopping...")
     (@server :timeout 1000)
     (reset! server nil)))
 
