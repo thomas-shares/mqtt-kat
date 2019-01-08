@@ -30,7 +30,9 @@ import org.mqttkat.packages.MqttPubComp;
 import org.mqttkat.packages.MqttPubRec;
 import org.mqttkat.packages.MqttPubRel;
 import org.mqttkat.packages.MqttPublish;
+import org.mqttkat.packages.MqttSubAck;
 import org.mqttkat.packages.MqttSubscribe;
+import org.mqttkat.packages.MqttUnSubAck;
 import org.mqttkat.packages.MqttUnsubscribe;
 
 public class MqttServer implements Runnable {
@@ -163,10 +165,10 @@ public class MqttServer implements Runnable {
 				multiplier *= 128;
 			} while ((digit & 0x80) != 0);
 
-			//System.out.println("msgLenght: " + msgLength);
+			System.out.println("msgLenght: " + msgLength);
 
 			remainAndPayload = new byte[msgLength];
-			//System.out.println( "limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity() + " remainLength: " +  remainAndPayload.length);
+			System.out.println( "limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity() + " remainLength: " +  remainAndPayload.length);
 			buf.get(remainAndPayload, 0, msgLength);
 			//System.out.println( "limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity());
 
@@ -204,8 +206,12 @@ public class MqttServer implements Runnable {
 			incoming = MqttPubComp.decode(key, flags, remainAndPayload);
 		} else if (type == GenericMessage.MESSAGE_SUBSCRIBE) {
 			incoming = MqttSubscribe.decode(key, flags, remainAndPayload, msgLengthExtra);
+		} else if( type == GenericMessage.MESSAGE_SUBACK) {
+			incoming = MqttSubAck.decode(key, flags, remainAndPayload);
 		} else if (type == GenericMessage.MESSAGE_UNSUBSCRIBE) {
 			incoming = MqttUnsubscribe.decode(key, flags, remainAndPayload, msgLengthExtra);
+		} else if ( type == GenericMessage.MESSAGE_UNSUBACK ) {
+			incoming = MqttUnSubAck.decode(key, flags, remainAndPayload);
 		} else if (type == GenericMessage.MESSAGE_PINGREQ) {
 			incoming = MqttPingReq.decode(key, flags);
 		} else if (type == GenericMessage.MESSAGE_PINGRESP) {

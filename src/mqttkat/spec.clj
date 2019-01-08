@@ -85,14 +85,36 @@
 (s/def :mqtt/topic
   (s/keys :req-un [:mqtt/topic-filter
                    :mqtt/qos]))
-(s/def :mqtt/topics (s/coll-of :mqtt/topic))
+(s/def :mqtt-subscribe/topics (s/coll-of :mqtt/topic))
 
 (s/def :mqtt-subscribe/packet-type #{:SUBSCRIBE})
 (s/def :mqtt/subscribe
   (s/keys :req-un [:mqtt-subscribe/packet-type
                    :mqtt/packet-identifier
-                   :mqtt/topics]))
+                   :mqtt-subscribe/topics]))
 
+
+(s/def :mqtt-suback/packet-type #{:SUBACK})
+(s/def :mqtt/suback-fields #{0 1 2 128})
+
+(s/def :mqtt-suback/response (s/coll-of :mqtt/suback-fields))
+(s/def :mqtt/suback
+  (s/keys :req-un [:mqtt-suback/packet-type
+                   :mqtt/packet-identifier
+                   :mqtt-suback/response]))
+
+(s/def :mqtt-unsubscribe/packet-type #{:UNSUBSCRIBE})
+(s/def :mqtt-unsubscribe/topic (s/and string? #(<= 1 (count %))))
+(s/def :mqtt-unsubscribe/topics (s/coll-of :mqtt-unsubscribe/topic))
+(s/def :mqtt/unsubscribe
+  (s/keys :req-un [:mqtt-unsubscribe/packet-type
+                   :mqtt/packet-identifier
+                   :mqtt-unsubscribe/topics]))
+
+(s/def :mqtt-unsuback/packet-type #{:UNSUBACK})
+(s/def :mqtt/unsuback
+  (s/keys :req-un [:mqtt-unsuback/packet-type
+                   :mqtt/packet-identifier]))
 
 (s/def :mqtt-pingreq/packet-type #{:PINGREQ})
 (s/def :mqtt/pingreq

@@ -39,7 +39,7 @@ public class MqttSubscribe extends GenericMessage{
 	    IPersistentVector v = PersistentVector.create();
 
 		while(offset < msgLength) {
-		    Map<Object, Object> topicMap = new TreeMap<Object, Object>();
+		    Map<Keyword, Object> topicMap = new TreeMap<Keyword, Object>();
 			String topic = decodeUTF8(data, offset);
 			//System.out.println("topic: " + topic);
 			topicMap.put(TOPIC_FILTER, topic);

@@ -10,7 +10,9 @@
   (:import [org.mqttkat.server MqttServer]
            [org.mqttkat.client MqttClient]
            [org.mqttkat MqttHandler MqttUtil]
-           [org.mqttkat.packages MqttConnect MqttPingReq MqttPublish MqttDisconnect MqttPingResp MqttSubscribe]))
+           [org.mqttkat.packages MqttConnect MqttPingReq MqttPublish
+             MqttDisconnect MqttPingResp MqttSubscribe MqttSubAck
+             MqttUnsubscribe MqttUnSubAck]))
 
 
 (deftest subscription
@@ -78,11 +80,42 @@
 ;        _ (.close client)
 ;    (is (= map (dissoc received-map :client-key))))
 
-(deftest subscribe-packet
+
+;(deftest subscribe-packet
+;  (let [client (client/client "localhost" 1883)
+;        map (gen/generate (s/gen :mqtt/subscribe))
+;        _ (clojure.pprint/pprint map)
+;        bufs (MqttSubscribe/encode map)
+;        _ (.sendMessage ^MqttClient client bufs)
+;        received-map (async/<!! channel)
+;        _ (.close ^MqttClient client)
+;    (is (= map (dissoc received-map :client-key))))
+
+;(deftest suback-packet
+;  (let [client (client/client "localhost" 1883)
+;        map (gen/generate (s/gen :mqtt/suback))
+;        _ (clojure.pprint/pprint map)
+;        bufs (MqttSubAck/encode map)
+;        _ (.sendMessage ^MqttClient client bufs)
+;        received-map (async/<!! channel)
+;        _ (.close ^MqttClient client)
+;    (is (= map (dissoc received-map :client-key))))
+
+;(deftest unsubscribe-packet)
+;  (let [client (client/client "localhost" 1883)]))
+;        map (gen/generate (s/gen :mqtt/unsubscribe))]))
+;        _ (clojure.pprint/pprint map)]))
+;        bufs (MqttUnsubscribe/encode map)]))
+;        _ (.sendMessage ^MqttClient client bufs)]))
+;        received-map (async/<!! channel)]))
+;        _ (.close ^MqttClient client)]))
+;    (is (= map (dissoc received-map :client-key)))))
+
+(deftest unsuback-packet
   (let [client (client/client "localhost" 1883)
-        map (gen/generate (s/gen :mqtt/subscribe))
+        map (gen/generate (s/gen :mqtt/unsuback ))
         _ (clojure.pprint/pprint map)
-        bufs (MqttSubscribe/encode map)
+        bufs (MqttUnSubAck/encode map)
         _ (.sendMessage ^MqttClient client bufs)
         received-map (async/<!! channel)
         _ (.close ^MqttClient client)]
