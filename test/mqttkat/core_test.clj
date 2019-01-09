@@ -12,7 +12,7 @@
            [org.mqttkat MqttHandler MqttUtil]
            [org.mqttkat.packages MqttConnect MqttPingReq MqttPublish
              MqttDisconnect MqttPingResp MqttSubscribe MqttSubAck
-             MqttUnsubscribe MqttUnSubAck]))
+             MqttUnsubscribe MqttUnSubAck MqttDisconnect MqttConnAck]))
 
 
 (deftest subscription
@@ -111,11 +111,32 @@
 ;        _ (.close ^MqttClient client)]))
 ;    (is (= map (dissoc received-map :client-key)))))
 
-(deftest unsuback-packet
+;(deftest unsuback-packet
+;  (let [client (client/client "localhost" 1883)
+;        map (gen/generate (s/gen :mqtt/unsuback))
+;        _ (clojure.pprint/pprint map)
+;        bufs (MqttUnSubAck/encode map)
+;        _ (.sendMessage ^MqttClient client bufs)
+;        received-map (async/<!! channel)
+;        _ (.close ^MqttClient client)
+;    (is (= map (dissoc received-map :client-key))))
+
+
+;(deftest disconnect-packet
+;  (let [client (client/client "localhost" 1883)
+;        map (gen/generate (s/gen :mqtt/disconnect))
+;        _ (clojure.pprint/pprint map)
+;        bufs (MqttDisconnect/encode map)
+;        _ (.sendMessage ^MqttClient client bufs)
+;        received-map (async/<!! channel)
+;        _ (.close ^MqttClient client)
+;    (is (= map (dissoc received-map :client-key))))
+
+(deftest connack-packet
   (let [client (client/client "localhost" 1883)
-        map (gen/generate (s/gen :mqtt/unsuback ))
+        map (gen/generate (s/gen :mqtt/connack))
         _ (clojure.pprint/pprint map)
-        bufs (MqttUnSubAck/encode map)
+        bufs (MqttConnAck/encode map)
         _ (.sendMessage ^MqttClient client bufs)
         received-map (async/<!! channel)
         _ (.close ^MqttClient client)]

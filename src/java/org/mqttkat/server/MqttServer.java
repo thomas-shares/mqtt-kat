@@ -21,6 +21,7 @@ import org.mqttkat.IHandler;
 import org.mqttkat.MqttSendExecutor;
 import org.mqttkat.packages.GenericMessage;
 import org.mqttkat.packages.MqttAuthenticate;
+import org.mqttkat.packages.MqttConnAck;
 import org.mqttkat.packages.MqttConnect;
 import org.mqttkat.packages.MqttDisconnect;
 import org.mqttkat.packages.MqttPingReq;
@@ -194,6 +195,8 @@ public class MqttServer implements Runnable {
 		IPersistentMap incoming = null;
 		if (type == GenericMessage.MESSAGE_CONNECT) {	
 			incoming =  MqttConnect.decodeConnect(key, flags, remainAndPayload);
+		} else if ( type ==  GenericMessage.MESSAGE_CONNACK) {
+			incoming = MqttConnAck.decode(key, flags, remainAndPayload);
 		} else if (type == GenericMessage.MESSAGE_PUBLISH) {
 			incoming = MqttPublish.decode(key, flags, remainAndPayload);
 		} else if (type == GenericMessage.MESSAGE_PUBACK) {

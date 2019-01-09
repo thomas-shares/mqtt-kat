@@ -58,6 +58,14 @@
                      :opt-un [:mqtt/user-credentials
                               :mqtt/will])))
 
+(s/def :mqtt-connack/packet-type #{:CONNACK})
+(s/def :mqtt/session-present? boolean?)
+(s/def :mqtt/connect-return-code  #{0x00 0x01 0x02 0x03 0x04 0x05})
+(s/def :mqtt/connack
+  (s/keys :req-un [:mqtt-connack/packet-type
+                   :mqtt/session-present?
+                   :mqtt/connect-return-code]))
+
 ;;publish
 (s/def :mqtt/publish-duplicate boolean?)
 (s/def :mqtt/publish-qos qos)
@@ -123,3 +131,7 @@
 (s/def :mqtt-pingresp/packet-type #{:PINGRESP})
 (s/def :mqtt/pingresp
   (s/keys :req-un [:mqtt-pingresp/packet-type]))
+
+(s/def :mqtt-disconnect/packet-type #{:DISCONNECT})
+(s/def :mqtt/disconnect
+  (s/keys :req-un [:mqtt-disconnect/packet-type]))

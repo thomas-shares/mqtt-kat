@@ -188,7 +188,7 @@ public class MqttConnect extends GenericMessage {
 			Map<Keyword, ?> will =  (Map<Keyword, ?>) message.get(WILL); 
 			connectFlags[0] = (byte) (0x04 | connectFlags[0]);
 			//log("set will qos: " + will.get(WILL_QOS));
-			Byte willQos = Byte.parseByte(((Long) will.get(WILL_QOS)).toString());
+			Byte willQos = Byte.parseByte(will.get(WILL_QOS).toString());
 			connectFlags[0] = (byte) ((willQos << 3) | connectFlags[0]);
 			Boolean willRetain = (Boolean) will.get(WILL_RETAIN);
 			connectFlags[0] = willRetain ? (byte) (0x20 | connectFlags[0]) : connectFlags[0];

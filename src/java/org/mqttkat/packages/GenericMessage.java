@@ -48,7 +48,8 @@ public abstract class GenericMessage {
 	public static final Keyword PASSWORD = intern("password");
 
 	// CONNACK
-	public static final Keyword SESSION_PRESENT = intern("session-present");
+	public static final Keyword SESSION_PRESENT = intern("session-present?");
+	public static final Keyword CONNECT_RETURN_CODE = intern("connect-return-code");
 
 	//PUBLISH
 	public static final Keyword DUPLICATE = intern("publish-duplicate");
