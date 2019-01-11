@@ -54,7 +54,7 @@ public class MqttClient implements Runnable {
 
 	public void sendMessage(ByteBuffer bufs[]) throws IOException {
 		for (int i = 0; i < bufs.length; i++) {
-			//log(bufs[i].toString());
+			log(bufs[i].toString());
 		}
 		// executor.submit(bufs);
 
@@ -68,7 +68,7 @@ public class MqttClient implements Runnable {
 				this.pendingData.put(socketChannel, queue);
 			}
 			queue.add(bufs);
-			//System.out.println( "queue size: " + queue.size());
+			System.out.println( "queue size: " + queue.size());
 		}
 		synchronized(this.pendingChanges) {
 			ChangeRequest changeRequest =  new ChangeRequest(socketChannel, ChangeRequest.REGISTER, SelectionKey.OP_WRITE);
@@ -77,11 +77,11 @@ public class MqttClient implements Runnable {
 				
 		// Finally, wake up our selecting thread so it can make the required changes
 		this.selector.wakeup();
-		//System.out.println("woken up...");
+		System.out.println("woken up...");
 	}
 
 	public void run() {
-		System.out.println("started running...");
+		System.out.println("Client loop started running...");
 		while (running) {
 			try {
 
@@ -268,10 +268,18 @@ public class MqttClient implements Runnable {
 	}
 
 	public void close() throws IOException {
+		System.out.println("Client stopping...");
+/*		try {
+			Thread.sleep(1000);
+		} catch (InterruptedException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		}*/
 		running = false;
 		if (selector != null) {
 			selector.close();
 		}
+		System.out.println("Client stopped and waited for 1 sec");
 	}
 
 }

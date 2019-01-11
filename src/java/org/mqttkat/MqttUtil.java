@@ -6,7 +6,9 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.UnsupportedEncodingException;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 
 public abstract class MqttUtil {
 	protected static final String STRING_ENCODING = "UTF-8";
@@ -41,7 +43,26 @@ public abstract class MqttUtil {
 		return ret;
 	}
 
-	public static ByteBuffer calculateLenght(long number) {
+	public static byte[] encodeUTF8Bytes2(String str) throws UnsupportedEncodingException {
+		return str.getBytes("UTF-8");
+	}
+
+	
+	public static List<Byte> encodeUTF8List(String str) throws UnsupportedEncodingException {
+		byte[] encodedStr = str.getBytes("UTF-8");
+
+		List<Byte> ret = new ArrayList<Byte>();
+		ret.add(0, (byte) ((encodedStr.length >>> 8) & 0xFF));
+		ret.add(1, (byte) (encodedStr.length & 0xFF));
+
+		for(int i = 0; i < encodedStr.length; i++) {
+			ret.add(encodedStr[i]);
+		}
+		
+		return ret;
+	}
+
+	public static byte[] calculateLenght(long number) {
 		int numBytes = 0;
 		long no = number;
 		ByteArrayOutputStream bos = new ByteArrayOutputStream();
@@ -58,7 +79,7 @@ public abstract class MqttUtil {
 			numBytes++;
 		} while ( (no > 0) && (numBytes<4) );
 
-		return ByteBuffer.wrap(bos.toByteArray());
+		return bos.toByteArray();
 	}
 
 	public static int qos(int qos) {
@@ -70,9 +91,9 @@ public abstract class MqttUtil {
 	}
 	
 	public static Integer twoBytesToInt(byte b1, byte b2) {
-		log("hoog: " +  b1 + "  laag: " + b2);
+		//log("hoog: " +  b1 + "  laag: " + b2);
 		Integer ret = Short.toUnsignedInt((short) (b1<<8)) + Short.toUnsignedInt((short)(b2 & 0xFF));
-		log("ret: " +  ret);
+		//log("ret: " +  ret);
 		return ret;
 	}
 }

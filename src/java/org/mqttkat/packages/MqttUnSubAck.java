@@ -16,13 +16,12 @@ import clojure.lang.PersistentArrayMap;
 public class MqttUnSubAck extends GenericMessage {
 
 	public static IPersistentMap decode(SelectionKey key, byte flags, byte[] data) throws IOException {
-		System.out.println("UNSUBACK message...");
+		System.out.println("Server: UNSUBACK message recieved from client.");
 
 		Map<Keyword, Object> m = new TreeMap<Keyword, Object>();
 		m.put(PACKET_TYPE, intern("UNSUBACK"));
 		m.put(CLIENT_KEY, key);
 		m.put(PACKET_IDENTIFIER, twoBytesToInt( data[0], data[1]));
-
 
 		return PersistentArrayMap.create(m);
 	}
@@ -36,8 +35,6 @@ public class MqttUnSubAck extends GenericMessage {
 		payload.put((byte) ((packetIdentifierL >>> 8) & 0xFF)).put((byte) (packetIdentifierL & 0xFF));
 		payload.flip();
 		
-		ByteBuffer[] buffers = new ByteBuffer[1];
-		buffers[0] = payload;
-		return buffers;
+		return new ByteBuffer[] {payload};
 	}
 }

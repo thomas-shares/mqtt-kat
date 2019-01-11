@@ -26,7 +26,6 @@ public class MqttPublish extends GenericMessage {
 		m.put(PACKET_TYPE, intern("PUBLISH"));
 		m.put(CLIENT_KEY, key);
 
-		m.put(DUPLICATE, (flags & 0x08) == 0x08);
 		int qos = qos(flags & 0x06);
 		m.put(QOS, qos);
 		System.out.println(qos);
@@ -36,6 +35,7 @@ public class MqttPublish extends GenericMessage {
 		m.put(TOPIC, topic);
 		if(qos > 0 ) {
 			m.put(PACKET_IDENTIFIER, twoBytesToInt( remainAndPayload[offset++], remainAndPayload[offset++]));
+			m.put(DUPLICATE, (flags & 0x08) == 0x08);
 		}
 		//System.out.println("index: " + (topic.length() + 2) + " length: " + remainAndPayload.length + " topic: " + topic);
 		m.put(PAYLOAD, Arrays.copyOfRange(remainAndPayload, offset, remainAndPayload.length));
@@ -45,63 +45,57 @@ public class MqttPublish extends GenericMessage {
 
 	public static ByteBuffer[] encode(Map<Keyword, ?> message) throws UnsupportedEncodingException {
 		//System.out.println("PUBLISHING MESSAGE TO CLIENT: " + message.toString());
-		int runningLength = 0;
-		byte[] bType = {(byte)(MESSAGE_PUBLISH << 4)};
+		int length = 0;
+		
+		byte[] bytes = new byte[MESSAGE_LENGTH];
+		ByteBuffer buffer = ByteBuffer.allocate(MESSAGE_LENGTH);
+		byte firstByte = (byte) (MESSAGE_PUBLISH << 4);
+		
 		if((Boolean) message.get(RETAIN)) {
-			bType[0] = (byte) (0x01 | bType[0]);
+			firstByte = (byte) (0x01 | firstByte);
 		}
 		if(message.containsKey(DUPLICATE) && (Boolean) message.get(DUPLICATE)) {
-			bType[0] = (byte) (0x08 | bType[0]);
+			firstByte = (byte) (0x08 | firstByte);
 		}
 		
 		byte qos = Byte.parseByte(((Long) message.get(QOS)).toString());
-		bType[0] = (byte) ((qos << 1) | bType[0]);
-		List<ByteBuffer> buffers = new ArrayList<ByteBuffer>(2);
-		buffers.add(0, ByteBuffer.wrap(bType));
-		
-		byte[] lengthByte = {0};
-		buffers.add(1, ByteBuffer.wrap(lengthByte) );
+		firstByte = (byte) ((qos << 1) | firstByte);
 
-		ByteBuffer topic = encodeUTF8Buffer((String)message.get(TOPIC));
-		topic.flip();
-		runningLength += topic.remaining();
-		buffers.add(2, topic);
-	
-		Object obj = message.get(PAYLOAD);
-		byte[] bPayload = null;
-		if( obj instanceof String) {
-			bPayload = ((String) obj).getBytes();
-		} else {
-			bPayload = (byte[])obj;
-		}
-		runningLength += bPayload.length;
+		buffer.put(firstByte);
 		
-		ByteBuffer packetIndentifier = ByteBuffer.allocate(2);
+		byte[] topic = ((String) message.get(TOPIC)).getBytes("UTF-8");
+		bytes[length++] = (byte) ((topic.length >>> 8) & 0xFF);
+		bytes[length++] = (byte) (topic.length & 0xFF);
+		for(int i = 0; i < topic.length; i++) {
+			bytes[length++] = topic[i];
+		}
+		
 		if(qos > 0) {
 			Long packetIdentifierL = (Long) message.get(PACKET_IDENTIFIER);
-			String k1 = String.format("%8s", Integer.toBinaryString((byte) ((packetIdentifierL >>> 8) & 0xFF)  & 0xFF)).replace(' ', '0');
-			String k2 = String.format("%8s", Integer.toBinaryString((byte) (packetIdentifierL & 0xFF)  & 0xFF)).replace(' ', '0');
 
-			System.out.println("hoog: " +  k1 );
-			System.out.println("laag: " + k2);
-			packetIndentifier.put((byte) ((packetIdentifierL >>> 8) & 0xFF)).put((byte) ((packetIdentifierL >>> 0) & 0xFF));
-			packetIndentifier.flip();
-			runningLength += 2;
-			
-			buffers.add(packetIndentifier);
-			buffers.add(ByteBuffer.wrap(bPayload));
+			bytes[length++] = (byte) ((packetIdentifierL >>> 8) & 0xFF);
+			bytes[length++] = (byte) ((packetIdentifierL >>> 0) & 0xFF);
+		}
+
+		Object obj = message.get(PAYLOAD);
+		if( obj instanceof String) {
+			byte[] strBytes  = ((String) obj).getBytes();
+			for(int i = 0; i < strBytes.length; i++) {
+				bytes[length++] = strBytes[i];
+			}
 		} else {
-			buffers.add(ByteBuffer.wrap(bPayload));
-
+			byte[] payloadBytes = (byte[])obj;
+			for(int i = 0; i < payloadBytes.length; i++) {
+				bytes[length++] = payloadBytes[i];
+			}
 		}
-				
-		String s1 = String.format("%8s", Integer.toBinaryString(bType[0] & 0xFF)).replace(' ', '0');
-		log("first byte: " + s1 + " length: " + runningLength);
+		
 
-		buffers.set(1, calculateLenght(runningLength));
-		log("buffers.size: " + buffers.size());
-		//{type, length, topic, [packet-identifier], payload}
-		ByteBuffer[] ret = new ByteBuffer[buffers.size()];
-		return buffers.toArray(ret);
-		}
+
+		buffer.put(calculateLenght(length));
+		buffer.put(bytes, 0, length);
+		buffer.flip();
+		log("length: " + length);
+		return new ByteBuffer[]{buffer};
+	}
 }

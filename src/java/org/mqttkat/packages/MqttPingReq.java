@@ -2,8 +2,6 @@ package org.mqttkat.packages;
 
 import static clojure.lang.Keyword.intern;
 
-import java.io.IOException;
-import java.io.UnsupportedEncodingException;
 import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
 import java.util.Map;
@@ -15,22 +13,18 @@ import clojure.lang.PersistentArrayMap;
 
 public class MqttPingReq extends GenericMessage {
 
-	public static IPersistentMap decode(SelectionKey key, byte flags) throws IOException {
-
+	public static IPersistentMap decode(SelectionKey key, byte flags) {
 		Map<Keyword, Object> m = new TreeMap<Keyword, Object>();
 		m.put(PACKET_TYPE, intern("PINGREQ"));
 		m.put(CLIENT_KEY, key);
-
 		return PersistentArrayMap.create(m);
 	}
 
-	public static ByteBuffer[] encode(Map<Keyword, ?> message) throws UnsupportedEncodingException {
-		byte[] bType = {(byte)(MESSAGE_PINGREQ << 4)};
-		System.out.println( bType[0]);
-		byte[] bLength = {0};
-		ByteBuffer type = ByteBuffer.wrap(bType);
-		ByteBuffer length = ByteBuffer.wrap(bLength);
-
-		return new ByteBuffer[]{type, length};
+	public static ByteBuffer[] encode(Map<Keyword, ?> message) {
+		ByteBuffer buffer = ByteBuffer.allocate(2);
+		buffer.put((byte)(MESSAGE_PINGREQ << 4));
+		buffer.put((byte)0);
+		buffer.flip();
+		return new ByteBuffer[]{buffer};
 	}
 }

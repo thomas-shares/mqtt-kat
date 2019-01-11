@@ -16,7 +16,6 @@ import java.io.IOException;
 import java.io.UnsupportedEncodingException;
 import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
-import static org.mqttkat.MqttUtil.log;
 
 public class MqttConnect extends GenericMessage {
 
@@ -128,110 +127,95 @@ public class MqttConnect extends GenericMessage {
 	@SuppressWarnings({ "unchecked"})
 	public static ByteBuffer[] encode(Map<Keyword, ?> message) throws UnsupportedEncodingException {
 		log("encode CONNECT");
-		int lengthCounter = 0;
+		int length = 0;
 
-		byte[] bType = {(MESSAGE_CONNECT << 4)};
-		bType[0] =  (byte) (bType[0] & 0xf0);
-		//System.out.println("type: " + bType[0]);
+		byte[] bytes = new byte[MESSAGE_LENGTH];
+		ByteBuffer buffer = ByteBuffer.allocate(MESSAGE_LENGTH);
+		byte firstByte = (byte) (MESSAGE_CONNECT << 4);
+		buffer.put(firstByte);
 
-		//log("protocal name: " + message.get(PROTOCOL_NAME).toString());
-		ByteBuffer protocolName = encodeUTF8Buffer((String)message.get(PROTOCOL_NAME));
-		protocolName.flip();
-		//log("protocolLevel: " + message.get(PROTOCOL_VERSION).toString());
-		byte[] protocolLevel = {Byte.parseByte(((Long) message.get(PROTOCOL_VERSION)).toString())};
-
-		byte[] connectFlags = {0};
+		byte[] topic = ((String) message.get(PROTOCOL_NAME)).getBytes("UTF-8");
+		bytes[length++] = (byte) ((topic.length >>> 8) & 0xFF);
+		bytes[length++] = (byte) (topic.length & 0xFF);
+		for(int i = 0; i < topic.length; i++) {
+			bytes[length++] = topic[i];
+		}	
+	
 		boolean cleanSession = (Boolean) message.get(CLEAN_SESSION);
-		connectFlags[0] = (byte) (cleanSession == true ? 0x02 | connectFlags[0]: connectFlags[0]);
+		bytes[7] = (byte) (cleanSession == true ? 0x02 | bytes[7]: bytes[7]);
 		//log("connect flags: " + connectFlags[0]);
-
+		length++;
+		
+		Long keepAlive = (Long) message.get(KEEP_ALIVE);
+		bytes[length++] = (byte) ((keepAlive >>> 8) & 0xFF);
+		bytes[length++] = (byte) ((keepAlive >>> 0) & 0xFF);
 		//log("keep alive: " + message.get(KEEP_ALIVE).toString());
 		Long keepAliveL = (Long) message.get(KEEP_ALIVE);
-		ByteBuffer keepAlive = ByteBuffer.allocate(2);
-		//String k1 = String.format("%8s", Integer.toBinaryString((byte) ((keepAliveL >>> 8) & 0xFF)  & 0xFF)).replace(' ', '0');
-		//String k2 = String.format("%8s", Integer.toBinaryString((byte) (keepAliveL & 0xFF)  & 0xFF)).replace(' ', '0');
-
-		//System.out.println("hoog: " +  k1 );
-		//System.out.println("laag: " + k2);
-		keepAlive.put((byte) ((keepAliveL >>> 8) & 0xFF)).put((byte) (keepAliveL & 0xFF));
-		keepAlive.flip();
-
-		lengthCounter = 10;
-		if(message.get(PROTOCOL_NAME).equals("MQIsdp")) {
-			lengthCounter += 2;
-		}
-		//log("client id:  " + message.get(CLIENT_ID).toString());
-		ByteBuffer clientId = encodeUTF8Buffer((String)message.get(CLIENT_ID));
-		lengthCounter += clientId.position();
-		clientId.flip();
 		
-		//bPayload[0] =  (byte) ((Boolean) message.get(SESSION_PRESENT) ? 1 : 0);
-		//bPayload[1] = 0x00;
-		//System.out.println(message.toString() + String.format("%x", bType[0]) + String.format("%x", bLength[0]) + String.format("%x%x", bPayload[0],bPayload[1]));
-
-		ByteBuffer type = ByteBuffer.wrap(bType);
-		byte[] lengthByte = {0};
-		ByteBuffer lengthBuffer =  ByteBuffer.wrap(lengthByte);
-		ByteBuffer protocolLevelBuffer = ByteBuffer.wrap(protocolLevel);
-		ByteBuffer connectFlagsBuffer = ByteBuffer.wrap(connectFlags);
-		
-		List<ByteBuffer> buffers = new ArrayList<ByteBuffer>(7);
-		buffers.add(0, type);
-		buffers.add(1, lengthBuffer );
-		buffers.add(2, protocolName);
-		buffers.add(3, protocolLevelBuffer);
-		buffers.add(4, connectFlagsBuffer);
-		buffers.add(5, keepAlive);
-		buffers.add(6, clientId);
+		byte[] clientId = ((String) message.get(CLIENT_ID)).getBytes("UTF-8");
+		bytes[length++] = (byte) ((clientId.length >>> 8) & 0xFF);
+		bytes[length++] = (byte) (clientId.length & 0xFF);
+		for(int i = 0; i < clientId.length; i++) {
+			bytes[length++] = clientId[i];
+		}	
 		
 		if(message.containsKey(WILL)) {
 			Map<Keyword, ?> will =  (Map<Keyword, ?>) message.get(WILL); 
-			connectFlags[0] = (byte) (0x04 | connectFlags[0]);
+			bytes[7] = (byte) (0x04 | bytes[7]);
 			//log("set will qos: " + will.get(WILL_QOS));
 			Byte willQos = Byte.parseByte(will.get(WILL_QOS).toString());
-			connectFlags[0] = (byte) ((willQos << 3) | connectFlags[0]);
+			bytes[7] = (byte) ((willQos << 3) | bytes[7]);
 			Boolean willRetain = (Boolean) will.get(WILL_RETAIN);
-			connectFlags[0] = willRetain ? (byte) (0x20 | connectFlags[0]) : connectFlags[0];
-			ByteBuffer willTopic = encodeUTF8Buffer((String)will.get(WILL_TOPIC));
-			lengthCounter += willTopic.position();
-			willTopic.flip();
-			buffers.add(willTopic);
-
-			ByteBuffer willMessage = encodeUTF8Buffer((String)will.get(WILL_MSG));
-			lengthCounter += willMessage.position();
-			willMessage.flip();
-			buffers.add(willMessage);
+			bytes[7] = willRetain ? (byte) (0x20 |bytes[7]) : bytes[7];
+			
+			byte[] willTopic = ((String) message.get(WILL_TOPIC)).getBytes("UTF-8");
+			bytes[length++] = (byte) ((willTopic.length >>> 8) & 0xFF);
+			bytes[length++] = (byte) (willTopic.length & 0xFF);
+			for(int i = 0; i < willTopic.length; i++) {
+				bytes[length++] = willTopic[i];
+			}	
+			
+			byte[] willMessage = ((String) message.get(WILL_MSG)).getBytes("UTF-8");
+			bytes[length++] = (byte) ((willMessage.length >>> 8) & 0xFF);
+			bytes[length++] = (byte) (willMessage.length & 0xFF);
+			for(int i = 0; i < willMessage.length; i++) {
+				bytes[length++] = willMessage[i];
+			}	
 		}
 		
 		if(message.containsKey(USER_CREDENTIALS)) { 
 			Map<Keyword, ?> userCredentials =  (Map<Keyword, ?>) message.get(USER_CREDENTIALS); 
 			//log("set username: " + userCredentials.get(USER_NAME));
-			connectFlags[0] = (byte) (0x80 | connectFlags[0]);
-			ByteBuffer userName = encodeUTF8Buffer((String)userCredentials.get(USER_NAME));
-			lengthCounter += userName.position();
-			userName.flip();
-			buffers.add(userName);
+			bytes[7] = (byte) (0x80 | bytes[7]);
+			
+			byte[] userName = ((String) message.get(USER_NAME)).getBytes("UTF-8");
+			bytes[length++] = (byte) ((userName.length >>> 8) & 0xFF);
+			bytes[length++] = (byte) (userName.length & 0xFF);
+			for(int i = 0; i < userName.length; i++) {
+				bytes[length++] = userName[i];
+			}	
+			
+
 			
 			if(userCredentials.containsKey(PASSWORD)) {
 				//log("password set " + userCredentials.get(PASSWORD));
-				connectFlags[0] = (byte) (0x40 | connectFlags[0]);
+				bytes[7]= (byte) (0x40 | bytes[7]);
 				//ByteBuffer password = encodeUTF8((String)userCredentials.get(PASSWORD));
 				byte[] passwordArray = (byte[]) userCredentials.get(PASSWORD);
 				
-				ByteBuffer password = ByteBuffer.allocate(passwordArray.length + 2);
-				password.put((byte) ((passwordArray.length >>> 8) & 0xFF)).put((byte) ((passwordArray.length >>> 0) & 0xFF)).put(passwordArray);
-				log("password: " + passwordArray + " " + "length :" + passwordArray.length);
-				lengthCounter += password.position();
-				password.flip();
-				buffers.add(password);			
+				bytes[length++] = (byte) ((passwordArray.length >>> 8) & 0xFF);
+				bytes[length++] = (byte) ((passwordArray.length >>> 0) & 0xFF);
+				for(int i =0 ; i < passwordArray.length; i++) {
+					bytes[length++] = passwordArray[i];
+				}
 			}
 		}
-		String s1 = String.format("%8s", Integer.toBinaryString(connectFlags[0] & 0xFF)).replace(' ', '0');
+		String s1 = String.format("%8s", Integer.toBinaryString(bytes[7] & 0xFF)).replace(' ', '0');
 		log("connect flags: " + s1);
-        buffers.set(1, calculateLenght(lengthCounter));
-		log("length: " + lengthCounter + " buffers.size: " +  buffers.size());
-		
-		ByteBuffer[] ret = new ByteBuffer[buffers.size()];
-		return buffers.toArray(ret);
+		buffer.put(calculateLenght(length));
+		buffer.put(bytes, 0, length);
+		buffer.flip();
+		log("length: " + length);
+		return new ByteBuffer[]{buffer};
 	}
 }

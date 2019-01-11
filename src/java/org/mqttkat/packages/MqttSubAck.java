@@ -47,47 +47,32 @@ public class MqttSubAck extends GenericMessage {
 	}
 
 	public static ByteBuffer[] encode(Map<Keyword, ?> message) {
-		int lengthCounter = 0;
+		int length = 0;
+		byte[] bytes = new byte[MESSAGE_LENGTH];
+		
+		ByteBuffer buffer = ByteBuffer.allocate(MESSAGE_LENGTH);
+		buffer.put((byte) ((MESSAGE_SUBACK << 4) & 0xf2));
 
-		byte[] bType = {(byte) (MESSAGE_SUBACK << 4)};
-		bType[0] =  (byte) (bType[0] & 0xf2);
-		
-		byte[] lengthByte = {0};
-		
-		List<ByteBuffer> buffers = new ArrayList<ByteBuffer>(2);
-		buffers.add(0, ByteBuffer.wrap(bType));
-		buffers.add(1, ByteBuffer.wrap(lengthByte));
 		
 		Long packetIdentifierL = (Long) message.get(PACKET_IDENTIFIER);
-		String k1 = String.format("%8s", Integer.toBinaryString((byte) ((packetIdentifierL >>> 8) & 0xFF)  & 0xFF)).replace(' ', '0');
-		String k2 = String.format("%8s", Integer.toBinaryString((byte) (packetIdentifierL & 0xFF)  & 0xFF)).replace(' ', '0');
-		ByteBuffer packetIndentifier = ByteBuffer.allocate(2);
-
-		//System.out.println("hoog: " +  k1 );
-		//System.out.println("laag: " + k2);
-		packetIndentifier.put((byte) ((packetIdentifierL >>> 8) & 0xFF)).put((byte) ((packetIdentifierL >>> 0) & 0xFF));
-		packetIndentifier.flip();
-		buffers.add(packetIndentifier);
-		lengthCounter += 2;
+		bytes[length++] = (byte) ((packetIdentifierL >>> 8) & 0xFF);
+		bytes[length++] = (byte) ((packetIdentifierL >>> 0) & 0xFF);
 
 		PersistentVector vector = (PersistentVector) message.get(SUBACK_RESPONSE);
 		System.out.println("vector size: " + vector.size());
-		ByteBuffer payload = ByteBuffer.allocate(1024);
-
+	
 		Iterator<?> it =  vector.iterator();
 		while(it.hasNext()) {
 			//Byte answer = Byte.parseByte(((Long) it.next()).toString());
-			byte answer = ((Long) it.next()).byteValue();
-			payload.put(answer);
-			lengthCounter++;
+			bytes[length++] = ((Long) it.next()).byteValue();
+
 		}
 
-		payload.flip();
-		buffers.add(payload);
-		buffers.set(1, calculateLenght(lengthCounter));
+		buffer.put(calculateLenght(length));
+		buffer.put(bytes, 0, length);
 		//log("buffers.size: " + buffers.size());
-		log("length: " + lengthCounter);
-		ByteBuffer[] ret = new ByteBuffer[buffers.size()];
-		return buffers.toArray(ret);
+		buffer.flip();
+		log("length: " + length);
+		return new ByteBuffer[]{buffer};
 	}
 }

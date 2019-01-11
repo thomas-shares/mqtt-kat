@@ -25,11 +25,16 @@ public class MqttDisconnect extends GenericMessage {
 	}
 
 	public static ByteBuffer[] encode(Map<Keyword, ?> message) {
-		byte[] bType = {(byte)(MESSAGE_DISCONNECT << 4)};
-		byte[] bLength = {0};
-		ByteBuffer type = ByteBuffer.wrap(bType);
-		ByteBuffer length = ByteBuffer.wrap(bLength);
+		ByteBuffer buffer = ByteBuffer.allocate(2);
+		buffer.put((byte)(MESSAGE_DISCONNECT << 4));
+		buffer.put((byte)0);
+		buffer.flip();
+		//byte[] bType = {(byte)(MESSAGE_DISCONNECT << 4)};
+		//byte[] bLength = {0};
+		//ByteBuffer type = ByteBuffer.wrap(bType);
+		//ByteBuffer length = ByteBuffer.wrap(bLength);
 
-		return new ByteBuffer[]{type, length};
+		//return new ByteBuffer[]{type, length};
+		return new ByteBuffer[] {buffer};
 	}
 }

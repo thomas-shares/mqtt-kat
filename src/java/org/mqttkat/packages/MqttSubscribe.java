@@ -67,54 +67,42 @@ public class MqttSubscribe extends GenericMessage{
 	
 	public static ByteBuffer[] encode(Map<Keyword, ?> message) throws UnsupportedEncodingException  {
 		//log("encode SUBSCRIBE");
-		int lengthCounter = 0;
+		int length = 0;
 
+		byte[] bytes = new byte[MESSAGE_LENGTH];
+		ByteBuffer buffer = ByteBuffer.allocate(MESSAGE_LENGTH);
 		byte[] bType = {(byte) (MESSAGE_SUBSCRIBE << 4)};
-		bType[0] =  (byte) (bType[0] & 0xf2);
-		
-		byte[] lengthByte = {0};
-		
-		List<ByteBuffer> buffers = new ArrayList<ByteBuffer>(2);
-		buffers.add(0, ByteBuffer.wrap(bType));
-		buffers.add(1, ByteBuffer.wrap(lengthByte));
+		buffer.put((byte) (bType[0] & 0xf2));
 		
 		Long packetIdentifierL = (Long) message.get(PACKET_IDENTIFIER);
-		String k1 = String.format("%8s", Integer.toBinaryString((byte) ((packetIdentifierL >>> 8) & 0xFF)  & 0xFF)).replace(' ', '0');
-		String k2 = String.format("%8s", Integer.toBinaryString((byte) (packetIdentifierL & 0xFF)  & 0xFF)).replace(' ', '0');
-		ByteBuffer packetIndentifier = ByteBuffer.allocate(2);
-
-		//System.out.println("hoog: " +  k1 );
-		//System.out.println("laag: " + k2);
-		packetIndentifier.put((byte) ((packetIdentifierL >>> 8) & 0xFF)).put((byte) ((packetIdentifierL >>> 0) & 0xFF));
-		packetIndentifier.flip();
-		buffers.add(packetIndentifier);
-		lengthCounter += 2;
-
+		bytes[length++] = (byte) ((packetIdentifierL >>> 8) & 0xFF);
+		bytes[length++] = (byte) ((packetIdentifierL >>> 0) & 0xFF);
+	
 		PersistentVector vector = (PersistentVector) message.get(TOPICS);
 		//System.out.println("vector size: " + vector.size());
-		ByteBuffer payload = ByteBuffer.allocate(1024);
 
 		Iterator<?> it =  vector.iterator();
 		while(it.hasNext()) {
 			@SuppressWarnings("unchecked")
 			Map<Keyword, ?> topicMap = (Map<Keyword, ?>) it.next();
-			String topic = (String) topicMap.get(TOPIC_FILTER);
-			Byte qos = Byte.parseByte(((Long) topicMap.get(QOS)).toString());
-			//encodeUTF8Bytes(topic);
-			payload.put(encodeUTF8Bytes(topic));
-			payload.put(qos);
-			lengthCounter += topic.length() + 3;
-
+			
+			byte[] topic = ((String) topicMap.get(TOPIC_FILTER)).getBytes("UTF-8");
+			bytes[length++] = (byte) ((topic.length >>> 8) & 0xFF);
+			bytes[length++] = (byte) (topic.length & 0xFF);
+			for(int i = 0; i < topic.length; i++) {
+				bytes[length++] = topic[i];
+			}
+			
+			bytes[length++] = Byte.parseByte(((Long) topicMap.get(QOS)).toString());
 		}
 		//log("limit: " +  payload.limit());
 
-		payload.flip();
-		buffers.add(payload);
-		buffers.set(1, calculateLenght(lengthCounter));
+		buffer.put(calculateLenght(length));
+		buffer.put(bytes, 0, length);
 		//log("buffers.size: " + buffers.size());
-		log("length: " + lengthCounter);
-		ByteBuffer[] ret = new ByteBuffer[buffers.size()];
-		return buffers.toArray(ret);		
+		buffer.flip();
+		log("length: " + length);
+		return new ByteBuffer[]{buffer};		
 	}
 
 }

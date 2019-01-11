@@ -25,12 +25,11 @@ public class MqttPingResp extends GenericMessage {
 	}
 
 	public static ByteBuffer[] encode(Map<Keyword, ?> message) {
-		byte[] bType = {(byte)(MESSAGE_PINGRESP << 4)};
-		byte[] bLength = {0};
-		ByteBuffer type = ByteBuffer.wrap(bType);
-		ByteBuffer length = ByteBuffer.wrap(bLength);
-
-		return new ByteBuffer[]{type, length};
+		ByteBuffer buffer = ByteBuffer.allocate(2);
+		buffer.put((byte)(MESSAGE_PINGRESP << 4));
+		buffer.put((byte)0);
+		buffer.flip();
+		return new ByteBuffer[]{buffer};
 	}
 
 }

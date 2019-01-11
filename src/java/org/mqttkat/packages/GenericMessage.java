@@ -5,6 +5,8 @@ import static clojure.lang.Keyword.intern;
 import clojure.lang.Keyword;
 
 public abstract class GenericMessage {
+	public static final int MESSAGE_LENGTH = 1024;
+	
 	public static final byte MESSAGE_CONNECT = 1;
 	public static final byte MESSAGE_CONNACK = 2;
 	public static final byte MESSAGE_PUBLISH = 3;
@@ -40,7 +42,7 @@ public abstract class GenericMessage {
 	//public static final Keyword WILL_FLAG = intern("ll-flag");
 	public static final Keyword WILL_TOPIC = intern("will-topic");
 	public static final Keyword WILL_MSG = intern("will-message");
-	public static final Keyword CLEAN_SESSION = intern("clean-session");
+	public static final Keyword CLEAN_SESSION = intern("clean-session?");
 	//public static final Keyword RESERVED = intern("reserved");
 	public static final Keyword KEEP_ALIVE = intern("keep-alive");
 	public static final Keyword USER_CREDENTIALS = intern("user-credentials");
@@ -52,8 +54,8 @@ public abstract class GenericMessage {
 	public static final Keyword CONNECT_RETURN_CODE = intern("connect-return-code");
 
 	//PUBLISH
-	public static final Keyword DUPLICATE = intern("publish-duplicate");
-	public static final Keyword RETAIN = intern("publish-retain");
+	public static final Keyword DUPLICATE = intern("duplicate?");
+	public static final Keyword RETAIN = intern("retain?");
 	public static final Keyword TOPIC = intern("topic");
 	public static final Keyword PAYLOAD = intern("payload");
 

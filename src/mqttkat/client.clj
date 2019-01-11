@@ -26,18 +26,22 @@
      (.sendMessage ^MqttClient @client-atom bufs))))
 
 (defn publish
-  ([] (publish "test" "test-message" 0))
+  ([] (let [map (gen/generate (s/gen :mqtt/publish))
+            bufs (MqttPublish/encode map)]
+         (.sendMessage ^MqttClient @client-atom bufs)))
   ([topic msg qos]
    (let [bufs (MqttPublish/encode {:packet-type :PUBLISH :qos qos :topic topic :payload msg})]
      (.sendMessage ^MqttClient @client-atom bufs))))
 
 
 (defn pingreq []
-  (let [bufs (MqttPingReq/encode {:packet-type :PINGREQ})]
+  (let [map (gen/generate (s/gen :mqtt/pinreq))
+        bufs (MqttPingReq/encode map)]
     (.sendMessage ^MqttClient @client-atom bufs)))
 
 (defn disconnect []
-  (let [bufs (MqttDisconnect/encode {:packet-type :DISCONNECT})]
+  (let [map (gen/generate (s/gen :mqtt/disconnect))
+        bufs (MqttDisconnect/encode map)]
     (.sendMessage ^MqttClient @client-atom bufs)))
 
 (defn close []
