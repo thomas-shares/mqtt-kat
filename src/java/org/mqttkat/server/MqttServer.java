@@ -107,7 +107,7 @@ public class MqttServer implements Runnable {
 
 	private void handleRead(SelectionKey key) throws IOException {
 		SocketChannel ch = (SocketChannel) key.channel();
-		System.out.println("Server: starting to read client data...");
+
 		buf.clear();
 		int read = 0;
 		byte[] remainAndPayload = null;
@@ -126,7 +126,7 @@ public class MqttServer implements Runnable {
 			type = (byte) ((bytes[0] & 0xff) >> 4);
 			flags = (byte) (bytes[0] &= 0x0f);
 
-			
+			/*
 			if (type == GenericMessage.MESSAGE_CONNECT) {
 				System.out.println("Server: CONNECT");
 			} else if ( type == GenericMessage.MESSAGE_CONNACK) {
@@ -145,9 +145,7 @@ public class MqttServer implements Runnable {
 				System.out.println("SUBSCRIBE");
 			} else if( type == GenericMessage.MESSAGE_SUBACK) {
 				System.out.println("SUBACK");
-			}
-			
-			else if (type == GenericMessage.MESSAGE_UNSUBSCRIBE) {
+			} else if (type == GenericMessage.MESSAGE_UNSUBSCRIBE) {
 				System.out.println("UNSUBSCRIBE");
 			} else if (type == GenericMessage.MESSAGE_PINGREQ) {
 				System.out.println("PINGREQ");
@@ -164,25 +162,25 @@ public class MqttServer implements Runnable {
 				System.out.println("FAIL!!!!!! INVALID packet sent: " + type);
 			}
 
-			byte digit;
+*/			byte digit;
 			int multiplier = 1;
-			System.out.println( "limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity() );
+			//System.out.println( "limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity() );
 			
-			while( buf.limit() < 2) {
-				System.out.println("waiting for more data from client....");
-				try {
-					Thread.sleep(10);
-				} catch (InterruptedException e) {
-					// TODO Auto-generated catch block
-					e.printStackTrace();
-				}
-			}
+//			while( buf.limit() < 2) {
+//				System.out.println("waiting for more data from client....");
+//				try {
+//					Thread.sleep(10);
+//				} catch (InterruptedException e) {
+//					// TODO Auto-generated catch block
+//					e.printStackTrace();
+//				}
+//			}
 
 			do {
 				//buf.get(bytes, 0, 1);
 				digit = buf.get(); // bytes[0];
 				String s1 = String.format("%8s", Integer.toBinaryString(digit & 0xFF)).replace(' ', '0');
-				System.out.println("length byte: " + s1 );
+				//System.out.println("length byte: " + s1 );
 				msgLength += ((digit & 0x7F) * multiplier);
 				multiplier *= 128;
 			} while ((digit & 0x80) != 0);
@@ -190,19 +188,8 @@ public class MqttServer implements Runnable {
 			//System.out.println("msgLenght: " + msgLength);
 
 			remainAndPayload = new byte[msgLength];
-			
-			while( buf.limit() < remainAndPayload.length) {
-				//System.out.println("waiting for more data from client....");
-				System.out.println( "waiting... limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity() + " remainLength: " +  remainAndPayload.length);
 
-				try {
-					Thread.sleep(100);
-				} catch (InterruptedException e) {
-					// TODO Auto-generated catch block
-					e.printStackTrace();
-				}
-			}
-			System.out.println( "limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity() + " remainLength: " +  remainAndPayload.length);
+			//System.out.println( "limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity() + " remainLength: " +  remainAndPayload.length);
 			buf.get(remainAndPayload, 0, msgLength);
 			//System.out.println( "limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity());
 
@@ -273,7 +260,6 @@ public class MqttServer implements Runnable {
 	}
 
 	public void stop(int timeout) {
-		System.out.println("Server stopping...");
 		try {
 			serverChannel.close(); // stop accept any request
 		} catch (IOException ignore) {

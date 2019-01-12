@@ -37,7 +37,7 @@
                                    :mqtt/will-qos
                                    :mqtt/will-retain]))
 (s/def :mqtt/client-id (s/and string? #(<= 1 (count %) 23)))
-
+  
 (s/def :mqtt/connect
   (s/keys :req-un [:mqtt-connect/packet-type
                    :mqtt-4-5/protocol-name
@@ -58,7 +58,6 @@
 
 ;;publish
 (s/def :mqtt/duplicate? boolean?)
-;;(s/def :mqtt/qos qos)
 (s/def :mqtt-qos-0/qos #{0})
 (s/def :mqtt-qos-gt0/qos #{1 2})
 (s/def :mqtt/retain? boolean?)

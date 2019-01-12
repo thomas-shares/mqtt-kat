@@ -25,25 +25,19 @@ public abstract class GenericMessage {
 
 	// Generic
 	public static final Keyword PACKET_TYPE = intern("packet-type");
-	//public static final Keyword FLAGS = intern("flags");
 	public static final Keyword CLIENT_KEY = intern("client-key");
 	public static final Keyword PACKET_IDENTIFIER = intern("packet-identifier");
 
 	//CONNECT
-	//public static final Keyword CALL_BACK = intern("call-back");
 	public static final Keyword CLIENT_ID = intern("client-id");
 	public static final Keyword PROTOCOL_NAME = intern("protocol-name");
 	public static final Keyword PROTOCOL_VERSION = intern("protocol-version");
-	//public static final Keyword USERNAME_SET = intern("connect-flags-username-flag");
-	//public static final Keyword PASSWORD_SET = intern("connect-flags-password-flag");
 	public static final Keyword WILL = intern("will");
 	public static final Keyword WILL_RETAIN = intern("will-retain");
 	public static final Keyword WILL_QOS = intern("will-qos");
-	//public static final Keyword WILL_FLAG = intern("ll-flag");
 	public static final Keyword WILL_TOPIC = intern("will-topic");
 	public static final Keyword WILL_MSG = intern("will-message");
 	public static final Keyword CLEAN_SESSION = intern("clean-session?");
-	//public static final Keyword RESERVED = intern("reserved");
 	public static final Keyword KEEP_ALIVE = intern("keep-alive");
 	public static final Keyword USER_CREDENTIALS = intern("user-credentials");
 	public static final Keyword USER_NAME = intern("username");

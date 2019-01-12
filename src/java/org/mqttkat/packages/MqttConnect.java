@@ -128,78 +128,75 @@ public class MqttConnect extends GenericMessage {
 	public static ByteBuffer[] encode(Map<Keyword, ?> message) throws UnsupportedEncodingException {
 		log("encode CONNECT");
 		int length = 0;
-
 		byte[] bytes = new byte[MESSAGE_LENGTH];
 		ByteBuffer buffer = ByteBuffer.allocate(MESSAGE_LENGTH);
 		byte firstByte = (byte) (MESSAGE_CONNECT << 4);
 		buffer.put(firstByte);
 
-		byte[] topic = ((String) message.get(PROTOCOL_NAME)).getBytes("UTF-8");
-		bytes[length++] = (byte) ((topic.length >>> 8) & 0xFF);
-		bytes[length++] = (byte) (topic.length & 0xFF);
-		for(int i = 0; i < topic.length; i++) {
-			bytes[length++] = topic[i];
+		byte[] protocolName = ((String) message.get(PROTOCOL_NAME)).getBytes("UTF-8");
+		bytes[length++] = (byte) ((protocolName.length >>> 8) & 0xFF);
+		bytes[length++] = (byte) (protocolName.length & 0xFF);
+		for(int i = 0; i < protocolName.length; i++) {
+			bytes[length++] = protocolName[i];
 		}	
-	
+
 		boolean cleanSession = (Boolean) message.get(CLEAN_SESSION);
-		bytes[7] = (byte) (cleanSession == true ? 0x02 | bytes[7]: bytes[7]);
+		bytes[length] = (byte) (cleanSession == true ? 0x02 : 0);
 		//log("connect flags: " + connectFlags[0]);
 		length++;
-		
+	
 		Long keepAlive = (Long) message.get(KEEP_ALIVE);
 		bytes[length++] = (byte) ((keepAlive >>> 8) & 0xFF);
 		bytes[length++] = (byte) ((keepAlive >>> 0) & 0xFF);
-		//log("keep alive: " + message.get(KEEP_ALIVE).toString());
-		Long keepAliveL = (Long) message.get(KEEP_ALIVE);
-		
+	
 		byte[] clientId = ((String) message.get(CLIENT_ID)).getBytes("UTF-8");
 		bytes[length++] = (byte) ((clientId.length >>> 8) & 0xFF);
 		bytes[length++] = (byte) (clientId.length & 0xFF);
 		for(int i = 0; i < clientId.length; i++) {
 			bytes[length++] = clientId[i];
 		}	
-		
+	
 		if(message.containsKey(WILL)) {
 			Map<Keyword, ?> will =  (Map<Keyword, ?>) message.get(WILL); 
-			bytes[7] = (byte) (0x04 | bytes[7]);
+			bytes[6] = (byte) (0x04 | bytes[6]);
 			//log("set will qos: " + will.get(WILL_QOS));
 			Byte willQos = Byte.parseByte(will.get(WILL_QOS).toString());
-			bytes[7] = (byte) ((willQos << 3) | bytes[7]);
+			bytes[6] = (byte) ((willQos << 3) | bytes[6]);
 			Boolean willRetain = (Boolean) will.get(WILL_RETAIN);
-			bytes[7] = willRetain ? (byte) (0x20 |bytes[7]) : bytes[7];
-			
-			byte[] willTopic = ((String) message.get(WILL_TOPIC)).getBytes("UTF-8");
+			bytes[6] = willRetain ? (byte) (0x20 |bytes[6]) : bytes[6];
+			//log("will topic: " + ((String) will.get(WILL_TOPIC)) );
+			byte[] willTopic = ((String) will.get(WILL_TOPIC)).getBytes("UTF-8");
 			bytes[length++] = (byte) ((willTopic.length >>> 8) & 0xFF);
 			bytes[length++] = (byte) (willTopic.length & 0xFF);
 			for(int i = 0; i < willTopic.length; i++) {
 				bytes[length++] = willTopic[i];
 			}	
 			
-			byte[] willMessage = ((String) message.get(WILL_MSG)).getBytes("UTF-8");
+			byte[] willMessage = ((String) will.get(WILL_MSG)).getBytes("UTF-8");
 			bytes[length++] = (byte) ((willMessage.length >>> 8) & 0xFF);
 			bytes[length++] = (byte) (willMessage.length & 0xFF);
 			for(int i = 0; i < willMessage.length; i++) {
 				bytes[length++] = willMessage[i];
 			}	
 		}
-		
+		//log("length: " + length + " post will");
+	
 		if(message.containsKey(USER_CREDENTIALS)) { 
 			Map<Keyword, ?> userCredentials =  (Map<Keyword, ?>) message.get(USER_CREDENTIALS); 
-			//log("set username: " + userCredentials.get(USER_NAME));
-			bytes[7] = (byte) (0x80 | bytes[7]);
+			String userNameStr = (String) userCredentials.get(USER_NAME);
+			//log("set username: " + userNameStr);
+			bytes[6] = (byte) (0x80 | bytes[6]);
 			
-			byte[] userName = ((String) message.get(USER_NAME)).getBytes("UTF-8");
+			byte[] userName = userNameStr.getBytes("UTF-8");
 			bytes[length++] = (byte) ((userName.length >>> 8) & 0xFF);
 			bytes[length++] = (byte) (userName.length & 0xFF);
 			for(int i = 0; i < userName.length; i++) {
 				bytes[length++] = userName[i];
 			}	
 			
-
-			
 			if(userCredentials.containsKey(PASSWORD)) {
 				//log("password set " + userCredentials.get(PASSWORD));
-				bytes[7]= (byte) (0x40 | bytes[7]);
+				bytes[6]= (byte) (0x40 | bytes[6]);
 				//ByteBuffer password = encodeUTF8((String)userCredentials.get(PASSWORD));
 				byte[] passwordArray = (byte[]) userCredentials.get(PASSWORD);
 				
@@ -210,7 +207,7 @@ public class MqttConnect extends GenericMessage {
 				}
 			}
 		}
-		String s1 = String.format("%8s", Integer.toBinaryString(bytes[7] & 0xFF)).replace(' ', '0');
+		String s1 = String.format("%8s", Integer.toBinaryString(bytes[6] & 0xFF)).replace(' ', '0');
 		log("connect flags: " + s1);
 		buffer.put(calculateLenght(length));
 		buffer.put(bytes, 0, length);
