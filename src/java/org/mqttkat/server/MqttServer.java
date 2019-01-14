@@ -166,21 +166,8 @@ public class MqttServer implements Runnable {
 			int multiplier = 1;
 			//System.out.println( "limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity() );
 			
-//			while( buf.limit() < 2) {
-//				System.out.println("waiting for more data from client....");
-//				try {
-//					Thread.sleep(10);
-//				} catch (InterruptedException e) {
-//					// TODO Auto-generated catch block
-//					e.printStackTrace();
-//				}
-//			}
-
 			do {
-				//buf.get(bytes, 0, 1);
 				digit = buf.get(); // bytes[0];
-				String s1 = String.format("%8s", Integer.toBinaryString(digit & 0xFF)).replace(' ', '0');
-				//System.out.println("length byte: " + s1 );
 				msgLength += ((digit & 0x7F) * multiplier);
 				multiplier *= 128;
 			} while ((digit & 0x80) != 0);
@@ -193,10 +180,10 @@ public class MqttServer implements Runnable {
 			buf.get(remainAndPayload, 0, msgLength);
 			//System.out.println( "limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity());
 
-			for(int i=0; i < msgLength ;i++ ){
-				System.out.print(" " + remainAndPayload[i]);
-			}
-			System.out.print("\n");
+			//for(int i=0; i < msgLength ;i++ ){
+			//	System.out.print(" " + remainAndPayload[i]);
+			//}
+			//System.out.print("\n");
 
 			buf.clear();
 			msgLengthExtra = msgLength;

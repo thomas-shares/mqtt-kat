@@ -117,17 +117,15 @@
     (is (= map (dissoc received-map :client-key)))))
 
 (deftest unsuback-packet
-  (let [;client (client/client "localhost" 1883)
+  (let [client (client/client "localhost" 1883)
         map (gen/generate (s/gen :mqtt/unsuback))
         _ (clojure.pprint/pprint map)
         bufs (MqttUnSubAck/encode map)
         _ (.sendMessage ^MqttClient client bufs)
-        _ (println "ready to wait for unsuback message from channel...")
         received-map (async/<!! channel)
-        _ (println "client: read from channel...")]
-        ;_ (.close ^MqttClient client)]
-    (is (= map (dissoc received-map :client-key)))
-    (println "done unsuback compare")))
+        _ (println "client: read from channel...")
+        _ (.close ^MqttClient client)]
+    (is (= map (dissoc received-map :client-key)))))
 
 
 ;(deftest disconnect-packet
@@ -141,15 +139,11 @@
 ;    (is (= map (dissoc received-map :client-key)))))
 
 (deftest connack-packet
-  (let [_ (println "ready to connack....")
-        ;client (client/client "localhost" 1883)
+  (let [client (client/client "localhost" 1883)
         map (gen/generate (s/gen :mqtt/connack))
         _ (clojure.pprint/pprint map)
         bufs (MqttConnAck/encode map)
         _ (.sendMessage ^MqttClient client bufs)
-        _ (println "ready to wait for connack message from channel...")
         received-map (async/<!! channel)
-        _  (println "client: read from channel...")]
-        ;_ (.close ^MqttClient client)]
-    (is (= map (dissoc received-map :client-key)))
-    (println "done connack compare.")))
+        _ (.close ^MqttClient client)]
+    (is (= map (dissoc received-map :client-key)))))

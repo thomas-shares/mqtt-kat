@@ -9,8 +9,6 @@ import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.SocketChannel;
 import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collection;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedList;
@@ -18,7 +16,6 @@ import java.util.List;
 import java.util.Map;
 
 import org.mqttkat.IHandler;
-import org.mqttkat.MqttSendExecutor;
 import org.mqttkat.packages.GenericMessage;
 
 public class MqttClient implements Runnable {
@@ -26,7 +23,6 @@ public class MqttClient implements Runnable {
 	private InetSocketAddress mqttAddr;
 	private SocketChannel socketChannel;
 	private final Selector selector;
-	private MqttSendExecutor executor;
 	private final IHandler handler;
 	private Map<SocketChannel, List> pendingData = new HashMap<SocketChannel, List>();
 	// A list of PendingChange instances
@@ -53,9 +49,9 @@ public class MqttClient implements Runnable {
 	}
 
 	public void sendMessage(ByteBuffer bufs[]) throws IOException {
-		for (int i = 0; i < bufs.length; i++) {
-			log(bufs[i].toString());
-		}
+		//for (int i = 0; i < bufs.length; i++) {
+		//	log(bufs[i].toString());
+		//}
 		// executor.submit(bufs);
 
 		// socketChannel.write(bufs);
