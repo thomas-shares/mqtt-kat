@@ -30,7 +30,6 @@ public class MqttConnAck extends GenericMessage{
 		buffer.put((byte) ((Boolean) message.get(SESSION_PRESENT) ? 1 : 0));
 		buffer.put(Byte.parseByte(message.get(CONNECT_RETURN_CODE).toString()));
 		buffer.flip();
-		//System.out.println(message.get(SESSION_PRESENT));
 
 		return new ByteBuffer[]{buffer};
 	}

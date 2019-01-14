@@ -8,14 +8,9 @@ import static org.mqttkat.MqttUtil.twoBytesToInt;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
-import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Iterator;
-import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
-
-import org.mqttkat.MqttUtil;
 
 import clojure.lang.IPersistentMap;
 import clojure.lang.IPersistentVector;
@@ -59,7 +54,7 @@ public class MqttSubAck extends GenericMessage {
 		bytes[length++] = (byte) ((packetIdentifierL >>> 0) & 0xFF);
 
 		PersistentVector vector = (PersistentVector) message.get(SUBACK_RESPONSE);
-		System.out.println("vector size: " + vector.size());
+		//System.out.println("vector size: " + vector.size());
 	
 		Iterator<?> it =  vector.iterator();
 		while(it.hasNext()) {

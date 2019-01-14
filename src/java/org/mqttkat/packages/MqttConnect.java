@@ -8,8 +8,6 @@ import java.util.TreeMap;
 import static org.mqttkat.MqttUtil.*;
 import clojure.lang.PersistentArrayMap;
 
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Map;
 import static clojure.lang.Keyword.intern;
 import java.io.IOException;
@@ -26,14 +24,14 @@ public class MqttConnect extends GenericMessage {
 		int offset = 0;
 		String protocolName = decodeUTF8(remainAndPayload, offset);
 		offset = protocolName.length() + 2;
-		//System.out.println("1 " + offset);
+		System.out.println("1 " + offset + " protocol name: " +  protocolName);
 		//System.out.println("protocolName: " + protocolName);
 		byte clientVersion = remainAndPayload[offset++];
-		//System.out.println("2 " + offset);
+		System.out.println("2 " + offset);
 
 		//System.out.println("clientVersion: " + clientVersion);
 		byte connectFlags = remainAndPayload[offset++];
-		//System.out.println("3 " + offset);
+		System.out.println("3 " + offset + " connectflag: " + connectFlags);
 
 		//offset++;
 		String s1 = String.format("%8s", Integer.toBinaryString(connectFlags & 0xFF)).replace(' ', '0');
@@ -46,15 +44,17 @@ public class MqttConnect extends GenericMessage {
 		//System.out.println("4 " + offset + " keepAlive: " + keepAlive);
 		
 		int keepAlive = twoBytesToInt( remainAndPayload[offset++], remainAndPayload[offset++]);
+		System.out.println("4 " + offset + "  keep alive:" + keepAlive);
+
 		
 		String clientID = decodeUTF8(remainAndPayload, offset);
 		offset += clientID.length() + 2;
-		//System.out.println("5 " + offset + " ClientId:" + clientID);
+		System.out.println("5 " + offset + " ClientId:" + clientID);
 
 
-		boolean userNameSet = (connectFlags & 0x80) == 0x80;
-		boolean passwordSet = (connectFlags & 0x40) == 0x40;
-		boolean willFlag = (connectFlags & 0x04) == 0x04;
+		boolean userNameSet = (connectFlags & USERNAME_FLAG) == USERNAME_FLAG;
+		boolean passwordSet = (connectFlags & PASSWORD_FLAG) == PASSWORD_FLAG;
+		boolean willFlag = (connectFlags & WILL_FLAG) == WILL_FLAG;
 		String willTopic = "";
 		String willMessage = "";
 		Map<Keyword, Object> will = new TreeMap<Keyword, Object>();
@@ -67,7 +67,7 @@ public class MqttConnect extends GenericMessage {
 			willMessage = decodeUTF8(remainAndPayload, offset);
 			will.put(WILL_MSG, willMessage);
 			offset += willMessage.length() + 2;
-			boolean willRetain = (connectFlags & 0x20) == 0x20;
+			boolean willRetain = (connectFlags & WILLRETAIN_FLAG) == 0x20;
 			will.put(WILL_RETAIN, willRetain);
 			
 			byte qos = (byte) ((connectFlags & 0x18) >> 3);
@@ -109,7 +109,7 @@ public class MqttConnect extends GenericMessage {
 		m.put(PROTOCOL_NAME, protocolName);
 		m.put(CLIENT_ID, clientID);
 		m.put(PROTOCOL_VERSION, clientVersion);
-		m.put(CLEAN_SESSION, (connectFlags & 0x02) == 0x02);
+		m.put(CLEAN_SESSION, (connectFlags & CLEANSESSION_FLAG) == 0x02);
 		m.put(KEEP_ALIVE, keepAlive);
 
 		if(!will.isEmpty()) {
@@ -139,9 +139,13 @@ public class MqttConnect extends GenericMessage {
 		for(int i = 0; i < protocolName.length; i++) {
 			bytes[length++] = protocolName[i];
 		}	
+		//Protocol version
+		bytes[length++] = Byte.parseByte(((Long) message.get(PROTOCOL_VERSION)).toString());
+
+		int connectFlagOffset = protocolName.length == 4 ? 7 : 9;
 
 		boolean cleanSession = (Boolean) message.get(CLEAN_SESSION);
-		bytes[length] = (byte) (cleanSession == true ? 0x02 : 0);
+		bytes[connectFlagOffset] = (byte) (cleanSession == true ? CLEANSESSION_FLAG : 0);
 		//log("connect flags: " + connectFlags[0]);
 		length++;
 	
@@ -158,12 +162,12 @@ public class MqttConnect extends GenericMessage {
 	
 		if(message.containsKey(WILL)) {
 			Map<Keyword, ?> will =  (Map<Keyword, ?>) message.get(WILL); 
-			bytes[6] = (byte) (0x04 | bytes[6]);
+			bytes[connectFlagOffset] = (byte) (WILL_FLAG | bytes[connectFlagOffset]);
 			//log("set will qos: " + will.get(WILL_QOS));
 			Byte willQos = Byte.parseByte(will.get(WILL_QOS).toString());
-			bytes[6] = (byte) ((willQos << 3) | bytes[6]);
+			bytes[connectFlagOffset] = (byte) ((willQos << 3) | bytes[connectFlagOffset]);
 			Boolean willRetain = (Boolean) will.get(WILL_RETAIN);
-			bytes[6] = willRetain ? (byte) (0x20 |bytes[6]) : bytes[6];
+			bytes[connectFlagOffset] = willRetain ? (byte) (WILLRETAIN_FLAG |bytes[connectFlagOffset]) : bytes[connectFlagOffset];
 			//log("will topic: " + ((String) will.get(WILL_TOPIC)) );
 			byte[] willTopic = ((String) will.get(WILL_TOPIC)).getBytes("UTF-8");
 			bytes[length++] = (byte) ((willTopic.length >>> 8) & 0xFF);
@@ -185,7 +189,7 @@ public class MqttConnect extends GenericMessage {
 			Map<Keyword, ?> userCredentials =  (Map<Keyword, ?>) message.get(USER_CREDENTIALS); 
 			String userNameStr = (String) userCredentials.get(USER_NAME);
 			//log("set username: " + userNameStr);
-			bytes[6] = (byte) (0x80 | bytes[6]);
+			bytes[connectFlagOffset] = (byte) (USERNAME_FLAG | bytes[connectFlagOffset]);
 			
 			byte[] userName = userNameStr.getBytes("UTF-8");
 			bytes[length++] = (byte) ((userName.length >>> 8) & 0xFF);
@@ -196,7 +200,7 @@ public class MqttConnect extends GenericMessage {
 			
 			if(userCredentials.containsKey(PASSWORD)) {
 				//log("password set " + userCredentials.get(PASSWORD));
-				bytes[6]= (byte) (0x40 | bytes[6]);
+				bytes[connectFlagOffset]= (byte) (PASSWORD_FLAG | bytes[connectFlagOffset]);
 				//ByteBuffer password = encodeUTF8((String)userCredentials.get(PASSWORD));
 				byte[] passwordArray = (byte[]) userCredentials.get(PASSWORD);
 				
@@ -207,8 +211,8 @@ public class MqttConnect extends GenericMessage {
 				}
 			}
 		}
-		String s1 = String.format("%8s", Integer.toBinaryString(bytes[6] & 0xFF)).replace(' ', '0');
-		log("connect flags: " + s1);
+		String s1 = String.format("%8s", Integer.toBinaryString(bytes[connectFlagOffset] & 0xFF)).replace(' ', '0');
+		log("connect flags: " + s1 + "  offset" + connectFlagOffset);
 		buffer.put(calculateLenght(length));
 		buffer.put(bytes, 0, length);
 		buffer.flip();

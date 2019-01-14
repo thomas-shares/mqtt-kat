@@ -3,19 +3,14 @@ package org.mqttkat.packages;
 import static clojure.lang.Keyword.intern;
 import static org.mqttkat.MqttUtil.calculateLenght;
 import static org.mqttkat.MqttUtil.decodeUTF8;
-import static org.mqttkat.MqttUtil.encodeUTF8Buffer;
-import static org.mqttkat.MqttUtil.encodeUTF8Bytes;
 import static org.mqttkat.MqttUtil.log;
-import static org.mqttkat.MqttUtil.qos;
 import static org.mqttkat.MqttUtil.twoBytesToInt;
 
 import java.io.IOException;
 import java.io.UnsupportedEncodingException;
 import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
-import java.util.ArrayList;
 import java.util.Iterator;
-import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 

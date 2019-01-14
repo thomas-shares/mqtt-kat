@@ -37,7 +37,7 @@
                                    :mqtt/will-qos
                                    :mqtt/will-retain]))
 (s/def :mqtt/client-id (s/and string? #(<= 1 (count %) 23)))
-  
+ 
 (s/def :mqtt/connect
   (s/keys :req-un [:mqtt-connect/packet-type
                    :mqtt-4-5/protocol-name

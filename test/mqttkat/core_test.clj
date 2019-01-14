@@ -18,11 +18,10 @@
 ;(deftest subscription
 ;  (is (= {"test" [:key]} (add-subscriber {} "test" :key))))
 
-
 ;(deftest encode-bytes)
 ;    (is (= 0 (MqttUtil/calculateLenght 100))))
 
-(def channel (async/chan 10))
+(def channel (async/chan 1))
 
 
 (defn handler-fn [msg]

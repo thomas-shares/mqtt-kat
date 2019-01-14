@@ -33,15 +33,23 @@ public abstract class GenericMessage {
 	public static final Keyword PROTOCOL_NAME = intern("protocol-name");
 	public static final Keyword PROTOCOL_VERSION = intern("protocol-version");
 	public static final Keyword WILL = intern("will");
+	public static final byte WILL_FLAG = (byte) 0x04;
 	public static final Keyword WILL_RETAIN = intern("will-retain");
+	public static final byte WILLRETAIN_FLAG = (byte) 0x20;
 	public static final Keyword WILL_QOS = intern("will-qos");
+	public static final byte WILL_QOS_FLAGS = (byte) 0x18;
 	public static final Keyword WILL_TOPIC = intern("will-topic");
 	public static final Keyword WILL_MSG = intern("will-message");
 	public static final Keyword CLEAN_SESSION = intern("clean-session?");
+	public static final byte CLEANSESSION_FLAG = (byte) 0x02;
+
 	public static final Keyword KEEP_ALIVE = intern("keep-alive");
 	public static final Keyword USER_CREDENTIALS = intern("user-credentials");
 	public static final Keyword USER_NAME = intern("username");
+	public static final byte USERNAME_FLAG = (byte) 0x80;
 	public static final Keyword PASSWORD = intern("password");
+	public static final byte PASSWORD_FLAG = (byte) 0x40;
+
 
 	// CONNACK
 	public static final Keyword SESSION_PRESENT = intern("session-present?");

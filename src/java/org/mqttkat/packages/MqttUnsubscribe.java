@@ -3,7 +3,6 @@ package org.mqttkat.packages;
 import static clojure.lang.Keyword.intern;
 import static org.mqttkat.MqttUtil.calculateLenght;
 import static org.mqttkat.MqttUtil.decodeUTF8;
-import static org.mqttkat.MqttUtil.encodeUTF8Bytes2;
 import static org.mqttkat.MqttUtil.log;
 import static org.mqttkat.MqttUtil.twoBytesToInt;
 
@@ -11,11 +10,7 @@ import java.io.IOException;
 import java.io.UnsupportedEncodingException;
 import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
 import java.util.Iterator;
-import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 
@@ -74,9 +69,6 @@ public class MqttUnsubscribe extends GenericMessage{
 		
 		
 		Long packetIdentifierL = (Long) message.get(PACKET_IDENTIFIER);
-		//String k1 = String.format("%8s", Integer.toBinaryString((byte) ((packetIdentifierL >>> 8) & 0xFF)  & 0xFF)).replace(' ', '0');
-		//String k2 = String.format("%8s", Integer.toBinaryString((byte) (packetIdentifierL & 0xFF)  & 0xFF)).replace(' ', '0');
-
 		bytes[length++] = (byte) ((packetIdentifierL >>> 8) & 0xFF);
 		bytes[length++] = (byte) ((packetIdentifierL >>> 0) & 0xFF);
 

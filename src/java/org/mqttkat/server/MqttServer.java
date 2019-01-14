@@ -194,9 +194,9 @@ public class MqttServer implements Runnable {
 			//System.out.println( "limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity());
 
 			for(int i=0; i < msgLength ;i++ ){
-				//System.out.print(" " + remainAndPayload[i]);
+				System.out.print(" " + remainAndPayload[i]);
 			}
-			//System.out.print("\n");
+			System.out.print("\n");
 
 			buf.clear();
 			msgLengthExtra = msgLength;

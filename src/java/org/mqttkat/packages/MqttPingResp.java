@@ -15,8 +15,6 @@ import clojure.lang.PersistentArrayMap;
 public class MqttPingResp extends GenericMessage {
 
 	public static IPersistentMap decode(SelectionKey key, byte flags) throws IOException {
-		System.out.println("PINGRESP message........");
-
 		Map<Keyword, Object> m = new TreeMap<Keyword, Object>();
 		m.put(PACKET_TYPE, intern("PINGRESP"));
 		m.put(CLIENT_KEY, key);
