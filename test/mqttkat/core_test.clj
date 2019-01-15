@@ -63,8 +63,9 @@
         bufs (MqttPublish/encode map)
         _ (.sendMessage ^MqttClient client bufs)
         received-map (async/<!! channel)
+        new-map (dissoc received-map :client-key)
         _ (.close client)]
-    (is (= map (dissoc received-map :client-key)))))
+    (is (= (update map :payload #(seq (:payload %)))  (update new-map :payload #(seq (:payload %)))))))
 
 (deftest pingreq-packet
   (let [client (client/client2 "localhost" 1883)
