@@ -16,7 +16,7 @@ import clojure.lang.PersistentArrayMap;
 public class MqttUnSubAck extends GenericMessage {
 
 	public static IPersistentMap decode(SelectionKey key, byte flags, byte[] data) throws IOException {
-		System.out.println("Server: UNSUBACK message recieved from client.");
+		//System.out.println("Server: UNSUBACK message recieved from client.");
 
 		Map<Keyword, Object> m = new TreeMap<Keyword, Object>();
 		m.put(PACKET_TYPE, intern("UNSUBACK"));

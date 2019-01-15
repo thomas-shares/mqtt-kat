@@ -93,7 +93,7 @@ public class MqttPublish extends GenericMessage {
 		buffer.put(calculateLenght(length));
 		buffer.put(bytes, 0, length);
 		buffer.flip();
-		log("length: " + length);
+		//log("length: " + length);
 		return new ByteBuffer[]{buffer};
 	}
 }

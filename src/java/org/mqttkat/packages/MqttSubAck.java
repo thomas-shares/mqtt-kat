@@ -67,7 +67,7 @@ public class MqttSubAck extends GenericMessage {
 		buffer.put(bytes, 0, length);
 		//log("buffers.size: " + buffers.size());
 		buffer.flip();
-		log("length: " + length);
+		//log("length: " + length);
 		return new ByteBuffer[]{buffer};
 	}
 }

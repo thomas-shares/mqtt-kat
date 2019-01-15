@@ -13,8 +13,10 @@
 (def short-values (s/int-in 0 65534))
 ;;(def qos #{0 1 2})
 
-(s/def :mqtt/payload bytes?)
+;(s/def :mqtt/payload bytes?)
   ;(s/with-gen #(instance? java.io.InputStream %) gen-input-stream))
+
+(s/def :mqtt/payload string?)
 
 (s/def :mqtt/topic string?)
 (s/def :mqtt/packet-identifier short-values)
@@ -23,7 +25,7 @@
 (s/def :mqtt-3/protocol-name #{"MQIsdp"})
 (s/def :mqtt-3/protocol-version #{3})
 (s/def :mqtt-4-5/protocol-name #{"MQTT"})
-(s/def :mqtt-4-5/protocol-version #{4 5})
+(s/def :mqtt-4-5/protocol-version #{4})
 (s/def :mqtt/clean-session? boolean?)
 (s/def :mqtt/keep-alive short-values)
 (s/def :mqtt/username string?)
@@ -55,7 +57,7 @@
                               :mqtt/keep-alive
                               :mqtt/clean-session?
                               :mqtt/client-id]
-                     :opt-un [:mqtt/user-credentials
+                     :opt-un [;;:mqtt/user-credentials
                               :mqtt/will])))
 
 
@@ -75,6 +77,15 @@
 (s/def :mqtt-publish/packet-type #{:PUBLISH})
 
 (s/def :mqtt/publish
+  (s/keys :req-un [:mqtt-publish/packet-type
+                   :mqtt-qos-0/qos
+                   :mqtt/retain?
+                   :mqtt/topic
+                   :mqtt/payload]))
+
+
+
+(s/def :mqtt/publish-qos-gt0
   (s/or :qos-0 (s/keys :req-un [:mqtt-publish/packet-type
                                 :mqtt-qos-0/qos
                                 :mqtt/retain?
@@ -123,6 +134,22 @@
 (s/def :mqtt/unsuback
   (s/keys :req-un [:mqtt-unsuback/packet-type
                    :mqtt/packet-identifier]))
+
+(s/def :mqtt-puback/packet-type #{:PUBACK})
+(s/def :mqtt/puback
+  (s/keys :req-un [:mqtt-puback/packet-type
+                   :mqtt/packet-identifier]))
+
+(s/def :mqtt-pubrev/packet-type #{:PUBREC})
+(s/def :mqtt/pubrec
+  (s/keys :req-un [:mqtt-pubrec/packet-type
+                   :mqtt/packet-identifier]))
+
+(s/def :mqtt-pubcomp/packet-type #{:PUBCOMP})
+(s/def :mqtt/pubcomp
+  (s/keys :req-un [:mqtt-pubcomp/packet-type
+                   :mqtt/packet-identifier]))
+
 
 (s/def :mqtt-pingreq/packet-type #{:PINGREQ})
 (s/def :mqtt/pingreq

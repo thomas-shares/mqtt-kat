@@ -185,9 +185,9 @@ public class MqttClient implements Runnable {
 		flags = (byte) (rspData[0] &= 0x0f);
 
 		if (type == GenericMessage.MESSAGE_CONNECT) {
-			//System.out.println("CONNECT");
+			System.out.println("CONNECT");
 		} else if (type == GenericMessage.MESSAGE_CONNACK) {
-			System.out.println("CONNACK");
+			System.out.println("client receiced CONNACK");
 		} else if (type == GenericMessage.MESSAGE_PUBLISH) {
 			System.out.println("PUBLISH");
 		} else if (type == GenericMessage.MESSAGE_PUBACK) {
@@ -264,7 +264,7 @@ public class MqttClient implements Runnable {
 	}
 
 	public void close() throws IOException {
-		System.out.println("Client stopping...");
+		//System.out.println("Client stopping...");
 
 		running = false;
 		if (selector != null) {

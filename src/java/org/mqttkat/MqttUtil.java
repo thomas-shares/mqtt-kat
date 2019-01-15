@@ -1,7 +1,5 @@
 package org.mqttkat;
 
-import static org.mqttkat.MqttUtil.log;
-
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.UnsupportedEncodingException;
@@ -73,8 +71,6 @@ public abstract class MqttUtil {
 			if (no > 0) {
 				digit |= 0x80;
 			}
-			String s1 = String.format("%8s", Integer.toBinaryString(digit & 0xFF)).replace(' ', '0');
-			log("length byte: " + s1);
 			bos.write(digit);
 			numBytes++;
 		} while ( (no > 0) && (numBytes<4) );

@@ -16,7 +16,6 @@ public class MqttDisconnect extends GenericMessage {
 
 	public static IPersistentMap decode(SelectionKey key, byte flags, byte[] remainAndPayload) throws IOException {
 		//System.out.println("DISCONNECT message...");
-
 		Map<Keyword, Object> m = new TreeMap<Keyword, Object>();
 		m.put(PACKET_TYPE, intern("DISCONNECT"));
 		m.put(CLIENT_KEY, key);

@@ -24,18 +24,18 @@ public class MqttConnect extends GenericMessage {
 		int offset = 0;
 		String protocolName = decodeUTF8(remainAndPayload, offset);
 		offset = protocolName.length() + 2;
-		System.out.println("1 " + offset + " protocol name: " +  protocolName);
+		//System.out.println("1 " + offset + " protocol name: " +  protocolName);
 		//System.out.println("protocolName: " + protocolName);
 		byte clientVersion = remainAndPayload[offset++];
-		System.out.println("2 " + offset);
+		//System.out.println("2 " + offset);
 
 		//System.out.println("clientVersion: " + clientVersion);
 		byte connectFlags = remainAndPayload[offset++];
-		System.out.println("3 " + offset + " connectflag: " + connectFlags);
+		//System.out.println("3 " + offset + " connectflag: " + connectFlags);
 
 		//offset++;
-		String s1 = String.format("%8s", Integer.toBinaryString(connectFlags & 0xFF)).replace(' ', '0');
-		System.out.println("received connectFlags: " + s1);
+		//String s1 = String.format("%8s", Integer.toBinaryString(connectFlags & 0xFF)).replace(' ', '0');
+		//System.out.println("received connectFlags: " + s1);
 		//Byte b1 = remainAndPayload[offset++];
 		//Byte b2 = remainAndPayload[offset++];
 		//int a = Short.toUnsignedInt((short) (b1<<8));
@@ -49,7 +49,7 @@ public class MqttConnect extends GenericMessage {
 		
 		String clientID = decodeUTF8(remainAndPayload, offset);
 		offset += clientID.length() + 2;
-		System.out.println("5 " + offset + " ClientId:" + clientID);
+		//System.out.println("5 " + offset + " ClientId:" + clientID);
 
 
 		boolean userNameSet = (connectFlags & USERNAME_FLAG) == USERNAME_FLAG;
@@ -88,7 +88,7 @@ public class MqttConnect extends GenericMessage {
 
 			if(passwordSet) {
 				short passwordLength = (short)((remainAndPayload[offset++]<<8) | remainAndPayload[offset++]);
-				log("passwordlength: " + passwordLength);
+				//log("passwordlength: " + passwordLength);
 				password = new byte[passwordLength];
 				for(int i=0; i< passwordLength; i++) {
 					password[i] = remainAndPayload[offset + i];
@@ -126,7 +126,7 @@ public class MqttConnect extends GenericMessage {
 	
 	@SuppressWarnings({ "unchecked"})
 	public static ByteBuffer[] encode(Map<Keyword, ?> message) throws UnsupportedEncodingException {
-		log("encode CONNECT");
+		//log("encode CONNECT");
 		int length = 0;
 		byte[] bytes = new byte[MESSAGE_LENGTH];
 		ByteBuffer buffer = ByteBuffer.allocate(MESSAGE_LENGTH);
@@ -211,12 +211,12 @@ public class MqttConnect extends GenericMessage {
 				}
 			}
 		}
-		String s1 = String.format("%8s", Integer.toBinaryString(bytes[connectFlagOffset] & 0xFF)).replace(' ', '0');
-		log("connect flags: " + s1 + "  offset" + connectFlagOffset);
+		//String s1 = String.format("%8s", Integer.toBinaryString(bytes[connectFlagOffset] & 0xFF)).replace(' ', '0');
+		//log("connect flags: " + s1 + "  offset" + connectFlagOffset);
 		buffer.put(calculateLenght(length));
 		buffer.put(bytes, 0, length);
 		buffer.flip();
-		log("length: " + length);
+		//log("length: " + length);
 		return new ByteBuffer[]{buffer};
 	}
 }
