@@ -34,7 +34,6 @@ public class MqttUnSubAck extends GenericMessage {
 		Long packetIdentifierL = (Long) message.get(PACKET_IDENTIFIER);
 		payload.put((byte) ((packetIdentifierL >>> 8) & 0xFF)).put((byte) (packetIdentifierL & 0xFF));
 		payload.flip();
-		
-		return new ByteBuffer[] {payload};
+		return new ByteBuffer[]{payload};
 	}
 }

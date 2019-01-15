@@ -140,7 +140,7 @@
   (s/keys :req-un [:mqtt-puback/packet-type
                    :mqtt/packet-identifier]))
 
-(s/def :mqtt-pubrev/packet-type #{:PUBREC})
+(s/def :mqtt-pubrec/packet-type #{:PUBREC})
 (s/def :mqtt/pubrec
   (s/keys :req-un [:mqtt-pubrec/packet-type
                    :mqtt/packet-identifier]))
@@ -149,7 +149,6 @@
 (s/def :mqtt/pubcomp
   (s/keys :req-un [:mqtt-pubcomp/packet-type
                    :mqtt/packet-identifier]))
-
 
 (s/def :mqtt-pingreq/packet-type #{:PINGREQ})
 (s/def :mqtt/pingreq

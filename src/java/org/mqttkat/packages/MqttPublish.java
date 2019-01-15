@@ -87,8 +87,6 @@ public class MqttPublish extends GenericMessage {
 				bytes[length++] = payloadBytes[i];
 			}
 		}
-		
-
 
 		buffer.put(calculateLenght(length));
 		buffer.put(bytes, 0, length);

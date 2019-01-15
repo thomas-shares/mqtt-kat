@@ -35,7 +35,7 @@
 
 (defn mqtt-fixture [f]
   (server/start "0.0.0.0" 1883 handler)
-  (def client (client/client "localhost" 1883))
+  (def client (client/client2 "localhost" 1883))
 
   (f)
   (try
@@ -47,57 +47,58 @@
 (use-fixtures :once mqtt-fixture)
 
 (deftest connect-packet
-  (let [;client (client/client  "localhost" 1883)
+  (let [client (client/client2  "localhost" 1883)
         map (gen/generate (s/gen :mqtt/connect))
         _ (clojure.pprint/pprint map)
         bufs (MqttConnect/encode map)
         _ (.sendMessage ^MqttClient client bufs)
-        received-map (async/<!! channel)]
-        ;_ (.close client)]
+        received-map (async/<!! channel)
+        _ (.close client)]
     (is (= map (dissoc received-map :client-key)))))
 
 (deftest publish-packet
-  (let [;client (client/client "localhost" 1883)
-        map (gen/generate (s/gen :mqtt/publish))
+  (let [client (client/client2 "localhost" 1883)
+        map (gen/generate (s/gen :mqtt/publish-qos-gt0))
         _ (clojure.pprint/pprint map)
         bufs (MqttPublish/encode map)
         _ (.sendMessage ^MqttClient client bufs)
-        received-map (async/<!! channel)]
-        ;_ (.close client)]
+        received-map (async/<!! channel)
+        _ (.close client)]
     (is (= map (dissoc received-map :client-key)))))
 
 (deftest pingreq-packet
-  (let [;client (client/client "localhost" 1883)
+  (let [client (client/client2 "localhost" 1883)
         map (gen/generate (s/gen :mqtt/pingreq))
         _ (clojure.pprint/pprint map)
         bufs (MqttPingReq/encode map)
         _ (.sendMessage ^MqttClient client bufs)
-        received-map (async/<!! channel)]
-        ;_ (.close client)]
+        received-map (async/<!! channel)
+        _ (.close client)]
     (is (= map (dissoc received-map :client-key)))))
 
 (deftest pingresp-packet
-  (let [;client (client/client "localhost" 1883)
+  (let [client (client/client2 "localhost" 1883)
         map (gen/generate (s/gen :mqtt/pingresp))
         _ (clojure.pprint/pprint map)
         bufs (MqttPingResp/encode map)
         _ (.sendMessage ^MqttClient client bufs)
-        received-map (async/<!! channel)]
-        ;_ (.close client)]
+        received-map (async/<!! channel)
+        _ (.close client)]
     (is (= map (dissoc received-map :client-key)))))
 
 (deftest subscribe-packet
-  (let [client (client/client "localhost" 1883)
+  (let [client (client/client2 "localhost" 1883)
         map (gen/generate (s/gen :mqtt/subscribe))
         _ (clojure.pprint/pprint map)
         bufs (MqttSubscribe/encode map)
+        ;_ (println bufs)
         _ (.sendMessage ^MqttClient client bufs)
         received-map (async/<!! channel)
         _ (.close ^MqttClient client)]
     (is (= map (dissoc received-map :client-key)))))
 
 (deftest suback-packet
-  (let [client (client/client "localhost" 1883)
+  (let [client (client/client2 "localhost" 1883)
         map (gen/generate (s/gen :mqtt/suback))
         _ (clojure.pprint/pprint map)
         bufs (MqttSubAck/encode map)
@@ -107,7 +108,7 @@
     (is (= map (dissoc received-map :client-key)))))
 
 (deftest unsubscribe-packet
-  (let [client (client/client "localhost" 1883)
+  (let [client (client/client2 "localhost" 1883)
         map (gen/generate (s/gen :mqtt/unsubscribe))
         _ (clojure.pprint/pprint map)
         bufs (MqttUnsubscribe/encode map)
@@ -117,7 +118,7 @@
     (is (= map (dissoc received-map :client-key)))))
 
 (deftest unsuback-packet
-  (let [client (client/client "localhost" 1883)
+  (let [client (client/client2 "localhost" 1883)
         map (gen/generate (s/gen :mqtt/unsuback))
         _ (clojure.pprint/pprint map)
         bufs (MqttUnSubAck/encode map)
@@ -139,7 +140,7 @@
 ;    (is (= map (dissoc received-map :client-key)))))
 
 (deftest connack-packet
-  (let [client (client/client "localhost" 1883)
+  (let [client (client/client2 "localhost" 1883)
         map (gen/generate (s/gen :mqtt/connack))
         _ (clojure.pprint/pprint map)
         bufs (MqttConnAck/encode map)

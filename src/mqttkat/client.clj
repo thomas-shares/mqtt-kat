@@ -18,6 +18,11 @@
     (let [client (MqttClient. ^String host ^int port 2 ( MqttHandler. ^clojure.lang.IFn handler-fn 2))]
       (reset! client-atom client))))
 
+(defn client2 [host port]
+  (let [client (MqttClient. ^String host ^int port 2 ( MqttHandler. ^clojure.lang.IFn handler-fn 2))]
+    (reset! client-atom client)))
+
+
 (defn connect
   ([] (connect "localhost" 1883))
   ([host port]

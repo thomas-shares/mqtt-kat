@@ -80,7 +80,6 @@ public class MqttSubscribe extends GenericMessage{
 		while(it.hasNext()) {
 			@SuppressWarnings("unchecked")
 			Map<Keyword, ?> topicMap = (Map<Keyword, ?>) it.next();
-			
 			byte[] topic = ((String) topicMap.get(TOPIC_FILTER)).getBytes("UTF-8");
 			bytes[length++] = (byte) ((topic.length >>> 8) & 0xFF);
 			bytes[length++] = (byte) (topic.length & 0xFF);
@@ -90,11 +89,9 @@ public class MqttSubscribe extends GenericMessage{
 			
 			bytes[length++] = Byte.parseByte(((Long) topicMap.get(QOS)).toString());
 		}
-		//log("limit: " +  payload.limit());
 
 		buffer.put(calculateLenght(length));
 		buffer.put(bytes, 0, length);
-		//log("buffers.size: " + buffers.size());
 		buffer.flip();
 		//log("length: " + length);
 		return new ByteBuffer[]{buffer};		
