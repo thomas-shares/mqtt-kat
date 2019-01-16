@@ -14,7 +14,8 @@
    [org.clojure/core.specs.alpha "0.2.44"]
    [org.clojure/test.check "0.10.0-alpha3"]
    [proto-repl "0.3.1"]
-   [org.craigandera/causatum "0.3.0"]]
+   [org.craigandera/causatum "0.3.0"]
+   [clojurewerkz/triennium "1.0.0-beta2"]]
 
   :plugins
   [[lein-swank   "1.4.5"]
