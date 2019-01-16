@@ -4,7 +4,7 @@ import static clojure.lang.Keyword.intern;
 import static org.mqttkat.MqttUtil.calculateLenght;
 import static org.mqttkat.MqttUtil.decodeUTF8;
 import static org.mqttkat.MqttUtil.log;
-import static org.mqttkat.MqttUtil.twoBytesToInt;
+import static org.mqttkat.MqttUtil.twoBytesToLong;
 
 import java.io.IOException;
 import java.io.UnsupportedEncodingException;
@@ -30,7 +30,7 @@ public class MqttUnsubscribe extends GenericMessage{
 
 		m.put(PACKET_TYPE, intern("UNSUBSCRIBE"));
 
-		m.put(PACKET_IDENTIFIER, twoBytesToInt( data[offset++], data[offset++]));
+		m.put(PACKET_IDENTIFIER, twoBytesToLong( data[offset++], data[offset++]));
 		
 	    IPersistentVector v = PersistentVector.create();
 

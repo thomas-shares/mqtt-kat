@@ -26,15 +26,15 @@
 
 
 (defn connect [msg]
-  (println "CONNECT: " msg)
+  (println "clj CONNECT: " msg)
   (println (str "valid connect: " (s/valid? :mqtt/connect msg)))
   ;(s/explain :mqtt/connect msg)
   (add-client msg)
   (swap! clients assoc (:client-key msg) (dissoc msg  :packet-type))
   (send-message [(:client-key msg)]
                 {:packet-type :CONNACK
-                 :session-present false
-                 :return-code-value 0x00}))
+                 :session-present? false
+                 :connect-return-code 0x00}))
 
 (defn connack [msg]
   (println "CONNACK: " msg))
@@ -42,19 +42,19 @@
 
 (defn publish [msg]
   (println "clj PUBLISH: " msg)
-  ;;(println (str (class (:payload msg))))
-  ;;(println (bytes? (:payload msg)))
   (println (str "valid publish: " (s/valid? :mqtt/publish msg)))
-  ;;(s/explain :mqtt/publish msg)
+  (s/explain :mqtt/publish msg)
   (let [payload (:payload msg)
         topic (:topic msg)
-        keys (get @subscribers topic)]
-        ;_ (println "Keys: " keys)]
+        keys (get @subscribers topic)
+        _ (println "Keys: " keys " " @subscribers)]
     (when keys
       (send-message keys
         {:packet-type :PUBLISH
          :payload payload
-         :topic topic}))))
+         :topic topic
+         :qos 0
+         :retain? false}))))
 
 (defn puback [msg]
   (println "PUBACK: " msg))
@@ -74,37 +74,37 @@
     (assoc subscribers topic [key])))
 
 (defn subscribe [msg]
-  ;(println "SUBSCRIBE:" msg)
+  (println "clj SUBSCRIBE:" msg)
   (let [client-key (:client-key msg)
         topics (:topics msg)]
         ;;_ (println "topics: " topics " key:" client-key)]
     ;(swap! subscribers assoc (:topic (first topics)) client-key)
-    (swap! subscribers add-subscriber (:topic (first topics)) client-key)
-    ;(println "subscribers: " @subscribers)
+    (swap! subscribers add-subscriber (:topic-filter (first topics)) client-key)
+    (println "subscribers: " @subscribers)
     (send-message [client-key] {:packet-type :SUBACK
                                 :packet-identifier  (:packet-identifier msg)
-                                :payload [0]})))
+                                :response [0]})))
 
 (defn remove-subsciber [m [topic] key]
   (update m topic (fn [v] (filterv #(not= key %) v))))
 
 (defn unsubscribe [msg]
-  ;(println "UNSCUBSCRIBE: " msg)
+  (println "clj UNSCUBSCRIBE: " msg)
   (swap! subscribers remove-subsciber (:topics msg) (:client-key msg)))
 
 (defn pingreq [msg]
-  ;;(println "PINGREQ: " msg)
+  (println "clj PINGREQ: " msg)
   (send-message [(:client-key msg)] {:packet-type :PINGRESP}))
 
 (defn pingresp [msg]
-  (println "PINGRESP: " msg))
+  (println "clj PINGRESP: " msg))
 
 
 (defn remove-client-subscriber [m val]
   (into {} (map (fn [[k v]] (let [nv (filterv #(not= val %) v)] {k nv}))  m)))
 
 (defn disconnect [msg]
-  ;(println "DISCONNECT: " msg)
+  (println "clj DISCONNECT: " msg)
   ;(println "count: " (count (get @subscribers "test")))
   (swap! subscribers remove-client-subscriber  (:client-key msg))
   (swap! clients dissoc (:client-key msg)))

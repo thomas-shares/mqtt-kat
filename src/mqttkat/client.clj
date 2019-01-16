@@ -1,6 +1,7 @@
 (ns mqttkat.client
   (:require [clojure.spec.gen.alpha :as gen]
-            [clojure.spec.alpha :as s])
+            [clojure.spec.alpha :as s]
+            [mqttkat.spec :refer :all])
   (:import [org.mqttkat.client MqttClient]
            [org.mqttkat MqttHandler]
            [org.mqttkat.packages MqttConnect MqttPingReq MqttPublish MqttDisconnect]))

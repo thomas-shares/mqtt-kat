@@ -86,9 +86,9 @@ public abstract class MqttUtil {
 		System.out.println(str);
 	}
 	
-	public static Integer twoBytesToInt(byte b1, byte b2) {
+	public static Long twoBytesToLong(byte b1, byte b2) {
 		//log("hoog: " +  b1 + "  laag: " + b2);
-		Integer ret = Short.toUnsignedInt((short) (b1<<8)) + Short.toUnsignedInt((short)(b2 & 0xFF));
+		Long ret = Short.toUnsignedLong((short) (b1<<8)) + Short.toUnsignedLong((short)(b2 & 0xFF));
 		//log("ret: " +  ret);
 		return ret;
 	}

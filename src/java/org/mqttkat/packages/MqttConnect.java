@@ -43,8 +43,8 @@ public class MqttConnect extends GenericMessage {
 		//int keepAlive = Short.toUnsignedInt((short) (b1<<8)) + Short.toUnsignedInt((short)(b2 & 0xFF));
 		//System.out.println("4 " + offset + " keepAlive: " + keepAlive);
 		
-		int keepAlive = twoBytesToInt( remainAndPayload[offset++], remainAndPayload[offset++]);
-		System.out.println("4 " + offset + "  keep alive:" + keepAlive);
+		Long keepAlive = twoBytesToLong( remainAndPayload[offset++], remainAndPayload[offset++]);
+		//System.out.println("4 " + offset + "  keep alive:" + keepAlive);
 
 		
 		String clientID = decodeUTF8(remainAndPayload, offset);

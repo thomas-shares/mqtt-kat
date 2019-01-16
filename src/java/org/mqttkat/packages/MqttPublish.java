@@ -32,7 +32,7 @@ public class MqttPublish extends GenericMessage {
 		offset += topic.length() + 2;
 		m.put(TOPIC, topic);
 		if(qos > 0 ) {
-			m.put(PACKET_IDENTIFIER, twoBytesToInt( remainAndPayload[offset++], remainAndPayload[offset++]));
+			m.put(PACKET_IDENTIFIER, twoBytesToLong( remainAndPayload[offset++], remainAndPayload[offset++]));
 			m.put(DUPLICATE, (flags & 0x08) == 0x08);
 		}
 		//System.out.println("index: " + (topic.length() + 2) + " length: " + remainAndPayload.length + " topic: " + topic);

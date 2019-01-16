@@ -53,8 +53,9 @@
         bufs (MqttConnect/encode map)
         _ (.sendMessage ^MqttClient client bufs)
         received-map (async/<!! channel)
+        new-map (dissoc received-map :client-key)
         _ (.close client)]
-    (is (= map (dissoc received-map :client-key)))))
+    (is (=  map new-map ))))
 
 (deftest publish-packet
   (let [client (client/client2 "localhost" 1883)

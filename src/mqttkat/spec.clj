@@ -13,10 +13,10 @@
 (def short-values (s/int-in 0 65534))
 ;;(def qos #{0 1 2})
 
-;(s/def :mqtt/payload bytes?)
+(s/def :mqtt/payload bytes?)
   ;(s/with-gen #(instance? java.io.InputStream %) gen-input-stream))
 
-(s/def :mqtt/payload string?)
+;(s/def :mqtt/payload string?)
 
 (s/def :mqtt/topic string?)
 (s/def :mqtt/packet-identifier short-values)
@@ -57,7 +57,7 @@
                               :mqtt/keep-alive
                               :mqtt/clean-session?
                               :mqtt/client-id]
-                     :opt-un [;;:mqtt/user-credentials
+                     :opt-un [:mqtt/user-credentials
                               :mqtt/will])))
 
 
