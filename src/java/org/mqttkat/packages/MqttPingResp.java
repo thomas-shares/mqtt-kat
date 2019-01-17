@@ -29,5 +29,4 @@ public class MqttPingResp extends GenericMessage {
 		buffer.flip();
 		return new ByteBuffer[]{buffer};
 	}
-
 }

@@ -12,12 +12,14 @@
 (def client-atom (atom nil))
 
 (defn handler-fn [msg]
-  (println "handler: " msg))
+  (println "clj handler: " msg))
 
-(defn client [host port]
-  (when (nil? @client-atom)
-    (let [client (MqttClient. ^String host ^int port 2 ( MqttHandler. ^clojure.lang.IFn handler-fn 2))]
-      (reset! client-atom client))))
+(defn client
+  ([host port] (client host port (MqttHandler. ^clojure.lang.IFn handler-fn 2)))
+  ([host port handler]
+   (when (nil? @client-atom)
+      (let [client (MqttClient. ^String host ^int port 2 handler)]
+        (reset! client-atom client)))))
 
 (defn client2 [host port]
   (let [client (MqttClient. ^String host ^int port 2 ( MqttHandler. ^clojure.lang.IFn handler-fn 2))]
@@ -26,8 +28,9 @@
 
 (defn connect
   ([] (connect "localhost" 1883))
-  ([host port]
-   (client host port)
+  ([host port] (client host port (MqttHandler. ^clojure.lang.IFn handler-fn 2)))
+  ([host port handler]
+   (client host port handler)
    (let [map (gen/generate (s/gen :mqtt/connect))
          ;_ (print map)
          bufs (MqttConnect/encode map)]

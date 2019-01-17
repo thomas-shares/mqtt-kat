@@ -17,6 +17,23 @@ import java.util.Map;
 
 import org.mqttkat.IHandler;
 import org.mqttkat.packages.GenericMessage;
+import org.mqttkat.packages.MqttAuthenticate;
+import org.mqttkat.packages.MqttConnAck;
+import org.mqttkat.packages.MqttConnect;
+import org.mqttkat.packages.MqttDisconnect;
+import org.mqttkat.packages.MqttPingReq;
+import org.mqttkat.packages.MqttPingResp;
+import org.mqttkat.packages.MqttPubAck;
+import org.mqttkat.packages.MqttPubComp;
+import org.mqttkat.packages.MqttPubRec;
+import org.mqttkat.packages.MqttPubRel;
+import org.mqttkat.packages.MqttPublish;
+import org.mqttkat.packages.MqttSubAck;
+import org.mqttkat.packages.MqttSubscribe;
+import org.mqttkat.packages.MqttUnSubAck;
+import org.mqttkat.packages.MqttUnsubscribe;
+
+import clojure.lang.IPersistentMap;
 
 public class MqttClient implements Runnable {
 	private volatile boolean running = true;
@@ -183,37 +200,45 @@ public class MqttClient implements Runnable {
 		
 		type = (byte) ((rspData[0] & 0xff) >> 4);
 		flags = (byte) (rspData[0] &= 0x0f);
-
-		if (type == GenericMessage.MESSAGE_CONNECT) {
-			System.out.println("CONNECT");
-		} else if (type == GenericMessage.MESSAGE_CONNACK) {
-			System.out.println("client receiced CONNACK");
+		SelectionKey key = null;
+		IPersistentMap incoming = null;
+		if (type == GenericMessage.MESSAGE_CONNECT) {	
+			incoming =  MqttConnect.decode(key, flags, rspData);
+		} else if ( type ==  GenericMessage.MESSAGE_CONNACK) {
+			incoming = MqttConnAck.decode(key, flags, rspData);
 		} else if (type == GenericMessage.MESSAGE_PUBLISH) {
-			System.out.println("PUBLISH");
+			incoming = MqttPublish.decode(key, flags, rspData);
 		} else if (type == GenericMessage.MESSAGE_PUBACK) {
-			System.out.println("PUBACK");
+			incoming = MqttPubAck.decode(key,  flags, rspData);
 		} else if (type == GenericMessage.MESSAGE_PUBREC) {
-			System.out.println("PUBREC");
+			incoming = MqttPubRec.decode(key, flags, rspData);
 		} else if (type == GenericMessage.MESSAGE_PUBREL) {
-			System.out.println("PUBREL");
+			incoming = MqttPubRel.decode(key,  flags, rspData);
 		} else if (type == GenericMessage.MESSAGE_PUBCOMP) {
-			System.out.println("PUBCOMP");
+			incoming = MqttPubComp.decode(key,  flags, rspData);
 		} else if (type == GenericMessage.MESSAGE_SUBSCRIBE) {
-			System.out.println("SUBSCRIBE");
+			incoming = MqttSubscribe.decode(key, flags, rspData);
+		} else if( type == GenericMessage.MESSAGE_SUBACK) {
+			incoming = MqttSubAck.decode(key, flags, rspData);
 		} else if (type == GenericMessage.MESSAGE_UNSUBSCRIBE) {
-			System.out.println("UNSUBSCRIBE");
+			incoming = MqttUnsubscribe.decode(key, flags, rspData);
+		} else if ( type == GenericMessage.MESSAGE_UNSUBACK ) {
+			incoming = MqttUnSubAck.decode(key,  flags, rspData);
 		} else if (type == GenericMessage.MESSAGE_PINGREQ) {
-			System.out.println("PINGREQ");
-		} else if ( type == GenericMessage.MESSAGE_PINGRESP) {
-			System.out.println("PINGRESP");
+			incoming = MqttPingReq.decode(key,  flags);
+		} else if (type == GenericMessage.MESSAGE_PINGRESP) {
+			incoming = MqttPingResp.decode(key,  flags);
 		} else if (type == GenericMessage.MESSAGE_DISCONNECT) {
-			System.out.println("DISCONNECT");
-		} else if ( type ==  GenericMessage.MESSAGE_AUTHENTICATION) {	
-			System.out.println("AUTHENTICATE");
+			incoming = MqttDisconnect.decode(key,  flags, rspData);
+		} else if ( type ==  GenericMessage.MESSAGE_AUTHENTICATION) {
+			incoming = MqttAuthenticate.decode(key, flags, rspData);
 		} else {
 			System.out.println("FAIL!!!!!! INVALID packet sent: " + type);
 		}
-		//handler.handle(incoming);
+
+		if( incoming != null ) {
+			handler.handle(incoming);
+		}
 	}
 	
 	private void write(SelectionKey key) throws IOException {

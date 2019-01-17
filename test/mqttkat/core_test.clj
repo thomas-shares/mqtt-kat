@@ -55,7 +55,7 @@
         received-map (async/<!! channel)
         new-map (dissoc received-map :client-key)
         _ (.close client)]
-    (is (=  map new-map ))))
+    (is (=  map new-map))))
 
 (deftest publish-packet
   (let [client (client/client2 "localhost" 1883)

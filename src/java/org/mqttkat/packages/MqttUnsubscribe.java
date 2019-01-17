@@ -22,7 +22,7 @@ import clojure.lang.PersistentVector;
 
 public class MqttUnsubscribe extends GenericMessage{
 
-	public static IPersistentMap decode(SelectionKey key, byte flags, byte[] data, int msgLength) throws IOException {
+	public static IPersistentMap decode(SelectionKey key, byte flags, byte[] data) throws IOException {
 		//System.out.println("UNSUBSCRIBE message...");
 
 		int offset = 0;
@@ -34,7 +34,7 @@ public class MqttUnsubscribe extends GenericMessage{
 		
 	    IPersistentVector v = PersistentVector.create();
 
-		while(offset < msgLength) {
+		while(offset < data.length) {
 		   // Map<Object, Object> topicMap = new TreeMap<Object, Object>();
 			String topic = decodeUTF8(data, offset);
 			//System.out.println("topic: " + topic);

@@ -23,4 +23,6 @@ public class MqttAuthenticate extends GenericMessage{
 		return PersistentArrayMap.create(m);
 	}
 
+
+
 }

@@ -34,5 +34,4 @@ public class MqttPubComp extends GenericMessage{
 		
 		return new ByteBuffer[] {payload};
 	}
-
 }

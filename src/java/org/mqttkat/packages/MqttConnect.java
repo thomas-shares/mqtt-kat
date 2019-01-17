@@ -17,7 +17,7 @@ import java.nio.channels.SelectionKey;
 
 public class MqttConnect extends GenericMessage {
 
-	public static IPersistentMap decodeConnect(SelectionKey key, byte flags, byte[] remainAndPayload) throws IOException {
+	public static IPersistentMap decode(SelectionKey key, byte flags, byte[] remainAndPayload) throws IOException {
 		//System.out.println("decode connect from...");
 
 

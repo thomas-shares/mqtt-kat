@@ -114,7 +114,6 @@ public class MqttServer implements Runnable {
 		byte type = 0;
 		byte flags = 0;
 		int msgLength = 0;
-		int msgLengthExtra = 0;
 		while ((read = ch.read(buf)) > 0) {
 			buf.flip();
 			// byte[] bytes = new byte[buf.limit()];
@@ -186,7 +185,6 @@ public class MqttServer implements Runnable {
 			//System.out.print("\n");
 
 			buf.clear();
-			msgLengthExtra = msgLength;
 			msgLength = 0;
 		}
 		
@@ -201,7 +199,7 @@ public class MqttServer implements Runnable {
 		
 		IPersistentMap incoming = null;
 		if (type == GenericMessage.MESSAGE_CONNECT) {	
-			incoming =  MqttConnect.decodeConnect(key, flags, remainAndPayload);
+			incoming =  MqttConnect.decode(key, flags, remainAndPayload);
 		} else if ( type ==  GenericMessage.MESSAGE_CONNACK) {
 			incoming = MqttConnAck.decode(key, flags, remainAndPayload);
 		} else if (type == GenericMessage.MESSAGE_PUBLISH) {
@@ -215,11 +213,11 @@ public class MqttServer implements Runnable {
 		} else if (type == GenericMessage.MESSAGE_PUBCOMP) {
 			incoming = MqttPubComp.decode(key, flags, remainAndPayload);
 		} else if (type == GenericMessage.MESSAGE_SUBSCRIBE) {
-			incoming = MqttSubscribe.decode(key, flags, remainAndPayload, msgLengthExtra);
+			incoming = MqttSubscribe.decode(key, flags, remainAndPayload);
 		} else if( type == GenericMessage.MESSAGE_SUBACK) {
 			incoming = MqttSubAck.decode(key, flags, remainAndPayload);
 		} else if (type == GenericMessage.MESSAGE_UNSUBSCRIBE) {
-			incoming = MqttUnsubscribe.decode(key, flags, remainAndPayload, msgLengthExtra);
+			incoming = MqttUnsubscribe.decode(key, flags, remainAndPayload);
 		} else if ( type == GenericMessage.MESSAGE_UNSUBACK ) {
 			incoming = MqttUnSubAck.decode(key, flags, remainAndPayload);
 		} else if (type == GenericMessage.MESSAGE_PINGREQ) {

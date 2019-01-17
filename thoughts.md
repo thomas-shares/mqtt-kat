@@ -2,6 +2,11 @@
 
 In this file will go my thoughts and ramblings about this project and what I have done and what I might do next.
 
+## 20190117
+
+https://clojure.github.io/test.check/generator-examples.html
+
+
 ## 20190116
 
 I can send hundreds of message from my client to a real broker and then receive loads of them when I subscribe to '#' as a topic. I can also send a few messages to my own broker with the real clients and forward any publishes to a real client. I can also send quite a message with my own client to my own broker and I haven't seen any major errors, but this needs more testing. I may need to add triennium now and see if I can use that for packet routing... that would be a good point to start.
