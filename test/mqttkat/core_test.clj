@@ -6,7 +6,8 @@
             [mqttkat.spec :refer :all]
             [clojure.spec.gen.alpha :as gen]
             [clojure.spec.alpha :as s]
-            [clojure.core.async :as async])
+            [clojure.core.async :as async]
+            [clojure.test.check :as check])
   (:import [org.mqttkat.server MqttServer]
            [org.mqttkat.client MqttClient]
            [org.mqttkat MqttHandler MqttUtil]

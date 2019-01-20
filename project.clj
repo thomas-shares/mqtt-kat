@@ -27,7 +27,7 @@
 
   :jvm-opts
   ["-Dclojure.compiler.disable-locals-clearing=true"
-   "-Xms1g" "-Xmx1g"]
+   "-Xms512m" "-Xmx512m"]
 
   :javac-options ["-source" "1.8" "-target" "1.8" "-g"]
   :java-source-paths ["src/java"]

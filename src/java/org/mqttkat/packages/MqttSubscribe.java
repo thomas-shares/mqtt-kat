@@ -66,13 +66,23 @@ public class MqttSubscribe extends GenericMessage{
 
 		byte[] bytes = new byte[MESSAGE_LENGTH];
 		ByteBuffer buffer = ByteBuffer.allocate(MESSAGE_LENGTH);
-		byte[] bType = {(byte) (MESSAGE_SUBSCRIBE << 4)};
+		byte[] bType = {(byte) (MESSAGE_SUBSCRIBE << 4) | 0x02};
+		
+		//String q1 = String.format("%8s", Integer.toBinaryString(bType[0] & 0xf2)).replace(' ', '0');
+		//System.out.println("packet id 2: " + q1);
 		buffer.put((byte) (bType[0] & 0xf2));
 		
-		Long packetIdentifierL = (Long) message.get(PACKET_IDENTIFIER);
-		bytes[length++] = (byte) ((packetIdentifierL >>> 8) & 0xFF);
-		bytes[length++] = (byte) ((packetIdentifierL >>> 0) & 0xFF);
+		Long packetIdentifier = (Long) message.get(PACKET_IDENTIFIER);
+		bytes[length++] = (byte) ((packetIdentifier >> 8) & 0xFF);
+		bytes[length++] = (byte) ((packetIdentifier >> 0) & 0xFF);
 	
+		//String s1 = String.format("%8s", Integer.toBinaryString(bytes[0])).replace(' ', '0');
+		//System.out.println("packet id 1: " + s1);
+	
+		
+		//String s2 = String.format("%8s", Integer.toBinaryString(bytes[1])).replace(' ', '0');
+		//System.out.println("packet id 2: " + s2);
+
 		PersistentVector vector = (PersistentVector) message.get(TOPICS);
 		//System.out.println("vector size: " + vector.size());
 
@@ -89,6 +99,11 @@ public class MqttSubscribe extends GenericMessage{
 			
 			bytes[length++] = Byte.parseByte(((Long) topicMap.get(QOS)).toString());
 		}
+
+		//for(int i =0; i < length ; i++) {
+		//	System.out.print(bytes[i] + " ");
+		//}
+		//System.out.print("\n");
 
 		buffer.put(calculateLenght(length));
 		buffer.put(bytes, 0, length);

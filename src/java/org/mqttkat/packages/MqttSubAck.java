@@ -21,7 +21,7 @@ import clojure.lang.PersistentVector;
 public class MqttSubAck extends GenericMessage {
 
 	public static IPersistentMap decode(SelectionKey key, byte flags, byte[] data) throws IOException {
-		//System.out.println("SUBACK message...");
+		//System.out.println("SUBACK message..." + data.length);
 		int offset = 0;
 
 		Map<Keyword, Object> m = new TreeMap<Keyword, Object>();

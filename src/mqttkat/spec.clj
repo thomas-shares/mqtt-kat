@@ -1,21 +1,11 @@
 (ns mqttkat.spec
-  (:require [clojure.spec.alpha :as s]
-            [clojure.spec.gen.alpha :as gen]))
+  (:require [clojure.spec.alpha :as s]))
 
 (set! *warn-on-reflection* true)
 
-(defn- gen-input-stream []
-  (gen/fmap #(java.io.ByteArrayInputStream. %) (gen/bytes)))
-
-;(def ^:const byte-array-type (type (byte-array 0)))
-;(defn bytes? [x] (= (type x) byte-array-type))
-
 (def short-values (s/int-in 0 65534))
-;;(def qos #{0 1 2})
 
 (s/def :mqtt/payload bytes?)
-  ;(s/with-gen #(instance? java.io.InputStream %) gen-input-stream))
-
 ;(s/def :mqtt/payload string?)
 
 (s/def :mqtt/topic string?)
@@ -104,7 +94,7 @@
 (s/def :mqtt/topic_
   (s/keys :req-un [:mqtt/topic-filter
                    :mqtt/qos]))
-(s/def :mqtt-subscribe/topics (s/coll-of :mqtt/topic_))
+(s/def :mqtt-subscribe/topics (s/coll-of :mqtt/topic_ ::min-count 1 :distinct true))
 
 (s/def :mqtt-subscribe/packet-type #{:SUBSCRIBE})
 (s/def :mqtt/subscribe

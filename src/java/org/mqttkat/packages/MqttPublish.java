@@ -24,9 +24,13 @@ public class MqttPublish extends GenericMessage {
 		m.put(PACKET_TYPE, intern("PUBLISH"));
 		m.put(CLIENT_KEY, key);
 
+		//for(int i = 0 ; i < remainAndPayload.length; i++) {
+		//	System.out.print(remainAndPayload[i] + " ");
+		//}
+		//System.out.println("\n");
 		int qos = qos(flags & 0x06);
 		m.put(QOS, qos);
-		System.out.println(qos);
+		//System.out.println(qos);
 		m.put(RETAIN, (flags & 0x01) == 0x01);
 		String topic = decodeUTF8(remainAndPayload, 0);
 		offset += topic.length() + 2;

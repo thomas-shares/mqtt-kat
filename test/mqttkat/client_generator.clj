@@ -6,6 +6,7 @@
             [clojure.core.async :as async])
   (:import  [org.mqttkat MqttHandler]))
 
+(def subscribe-topics (atom #{}))
 
 (def channel (async/chan 1))
 
@@ -19,33 +20,57 @@
     {:connect [;{:disconnect {:weight 1}}
                ;;{:publish {:weight 1}}
                {:connack {:weight 1}}]
-     :connack [{:publish {:weight 1}}]
-     :publish [{:disconnect {:weight 1}}]
+     :connack [{:subscribe {:weight 1}}]
+     :subscribe [{:publish {:weight 1}}]
+     :publish [{:publish {:weight 1}}]
                ;{:publish {:weight 2}}]
      :disconnect [{:connect {:weight 1}}]}})
 
-;(def client (client/client "localhost" 1883))
 
-;
+
 (defn connect []
   (client/connect "localhost" 1883 (MqttHandler. ^clojure.lang.IFn handler-fn 2)))
 
 (defn connack []
-  (println "receive connack")
   (let [msg (async/<!! channel)]
-    (= (:packet-type msg) :CONNACK)))
+    (= (:packet-type msg) :CONNACK)
+    (println msg)))
 
 (defn publish []
-  (client/publish))
+  (let [topic (rand-nth (into [] @subscribe-topics))
+        ;_ (println topic)
+        payload (client/publish topic)
+        msg (async/<!! channel)]
+      (when-not (= (seq payload) (seq (:payload msg)))
+         (do
+           (println " NOT EQUAL MISCOMPARE!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+           (println (seq payload))
+           (println (seq (:payload msg)))))))
 
 (defn disconnect []
+  (reset! subscribe-topics #{})
   (client/disconnect))
+
+(defn subscribe []
+  (let [topic-filter (client/subscribe)
+        topics (map #(:topic-filter % ) (:topics topic-filter))]
+    (swap! subscribe-topics (partial apply conj) topics)
+    (let [msg (async/<!! channel)]
+      (println msg))))
+
+
+(defn run []
+  (connect)
+  (connack)
+  (subscribe)
+  (doseq [x (range 10)]
+    (publish)))
 
 (deftest simulation
     ;; We create an event stream (or chain of state transitions, if you will) by
     ;; calling Causatum's event-stream function with our model and an initial seed
     ;; state.
-    (doseq [{state :state} (take 10   (es/event-stream model [{:rtime 0, :state :connect}]))]
-      (println "State:" state)
-      (Thread/sleep 50)
-      (({:connect connect, :publish publish, :disconnect disconnect, :connack connack} state))))
+    (doseq [{state :state} (take 100   (es/event-stream model [{:rtime 0, :state :connect}]))]
+      ;;(println "State:" state)
+      (Thread/sleep 500)
+      (({:connect connect, :publish publish, :disconnect disconnect, :connack connack :subscribe subscribe} state))))

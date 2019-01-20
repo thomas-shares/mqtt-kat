@@ -185,21 +185,35 @@ public class MqttClient implements Runnable {
 	private void handleResponse( byte[] data, int numRead) throws IOException {
 		// Make a correctly sized copy of the data before handing it
 		// to the client
-		byte[] rspData = new byte[numRead];
-		System.arraycopy(data, 0, rspData, 0, numRead);
+		//byte[] rspData = new byte[numRead];
+		//System.arraycopy(data, 0, rspData, 0, numRead);
 
+			byte type = (byte) ((data[0] & 0xff) >> 4);
+		byte flags = (byte) (data[0] &= 0x0f);
 		
-		//for(byte i :rspData) {
-			//System.out.print(i + " ");
+
+		byte digit;
+		int multiplier = 1;
+		int msgLength = 0;
+		//System.out.println( "limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity() );
+		int i = 1;
+		do {
+			digit =  data[i++];
+			msgLength += ((digit & 0x7F) * multiplier);
+			multiplier *= 128;
+		} while ((digit & 0x80) != 0);
+
+		byte[] rspData = new byte[msgLength];
+		System.arraycopy(data, i, rspData, 0, msgLength);
+ 		
+		
+		//for(byte q :rspData) {
+		//	System.out.print(q + " ");
 		//}
 		//System.out.println("\n");
 		
-				
-		byte type = 0;
-		byte flags = 0;
+
 		
-		type = (byte) ((rspData[0] & 0xff) >> 4);
-		flags = (byte) (rspData[0] &= 0x0f);
 		SelectionKey key = null;
 		IPersistentMap incoming = null;
 		if (type == GenericMessage.MESSAGE_CONNECT) {	
