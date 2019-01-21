@@ -27,7 +27,7 @@
 
 (defn connect [msg]
   (println "clj CONNECT: " msg)
-  (println (str "valid connect: " (s/valid? :mqtt/connect msg)))
+  ;(println (str "valid connect: " (s/valid? :mqtt/connect msg)))
   ;(s/explain :mqtt/connect msg)
   (add-client msg)
   (swap! clients assoc (:client-key msg) (dissoc msg  :packet-type))
@@ -41,13 +41,13 @@
 
 
 (defn publish [msg]
-  (println "clj PUBLISH: " msg)
-  (println (str "valid publish: " (s/valid? :mqtt/publish msg)))
-  (s/explain :mqtt/publish msg)
+  (println "clj PUBLISH: ")
+  ;(println (str "valid publish: " (s/valid? :mqtt/publish msg)))
+  ;(s/explain :mqtt/publish msg)
   (let [payload (:payload msg)
         topic (:topic msg)
-        keys (get @subscribers topic)
-        _ (println "Keys: " keys " " @subscribers)]
+        keys (get @subscribers topic)]
+        ;_ (println "Keys: " keys " " @subscribers)]
     (when keys
       (send-message keys
         {:packet-type :PUBLISH
@@ -69,22 +69,24 @@
   (println "PUBCOMP: " msg))
 
 (defn add-subscriber [subscribers topic key]
+  (println "now here:   " topic)
   (if (contains? subscribers topic)
     (update-in subscribers [topic] conj key)
     (assoc subscribers topic [key])))
 
 (defn subscribe [msg]
-  (println "clj SUBSCRIBE:" msg)
+  ;(println "clj SUBSCRIBE:" msg)
   (let [client-key (:client-key msg)
         topics (:topics msg)
-        _ (pr topics)
-        filters (map #(:topic-filter %) topics)
-        _ (println "filters: " filters " key:" client-key)]
-    (map #(swap! subscribers add-subscriber (:topic-filter (first topics)) client-key)) filters
-    (println "subscribers: " @subscribers)
+        c (count topics)
+        filters (mapv #(:topic-filter %) topics)
+        _ (println c)]
+    (doseq [f filters]
+      (swap! subscribers add-subscriber f client-key))
+    ;(println "subscribers: " @subscribers)
     (send-message [client-key] {:packet-type :SUBACK
                                 :packet-identifier  (:packet-identifier msg)
-                                :response [0]})))
+                                :response (into [] (take c (repeat 0)))})))
 
 (defn remove-subsciber [m [topic] key]
   (update m topic (fn [v] (filterv #(not= key %) v))))

@@ -38,7 +38,7 @@
 
 (defn publish []
   (let [topic (rand-nth (into [] @subscribe-topics))
-        ;_ (println topic)
+        _ (println "received" topic)
         payload (client/publish topic)
         msg (async/<!! channel)]
       (when-not (= (seq payload) (seq (:payload msg)))
@@ -53,18 +53,17 @@
 
 (defn subscribe []
   (let [topic-filter (client/subscribe)
-        topics (map #(:topic-filter % ) (:topics topic-filter))]
+        topics (map #(:topic-filter % ) (:topics topic-filter))
+        c (count topics)]
     (swap! subscribe-topics (partial apply conj) topics)
-    (let [msg (async/<!! channel)]
-      (println msg))))
+    (let [msg (async/<!! channel)
+          ret-count (count (:response msg))]
+      (println msg)
+      (= c ret-count))))
 
 
-(defn run []
-  (connect)
-  (connack)
-  (subscribe)
-  (doseq [x (range 10)]
-    (publish)))
+
+
 
 (deftest simulation
     ;; We create an event stream (or chain of state transitions, if you will) by
