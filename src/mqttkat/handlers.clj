@@ -76,10 +76,11 @@
 (defn subscribe [msg]
   (println "clj SUBSCRIBE:" msg)
   (let [client-key (:client-key msg)
-        topics (:topics msg)]
-        ;;_ (println "topics: " topics " key:" client-key)]
-    ;(swap! subscribers assoc (:topic (first topics)) client-key)
-    (swap! subscribers add-subscriber (:topic-filter (first topics)) client-key)
+        topics (:topics msg)
+        _ (pr topics)
+        filters (map #(:topic-filter %) topics)
+        _ (println "filters: " filters " key:" client-key)]
+    (map #(swap! subscribers add-subscriber (:topic-filter (first topics)) client-key)) filters
     (println "subscribers: " @subscribers)
     (send-message [client-key] {:packet-type :SUBACK
                                 :packet-identifier  (:packet-identifier msg)
