@@ -5,7 +5,7 @@
   (:import [org.mqttkat.client MqttClient]
            [org.mqttkat MqttHandler]
            [org.mqttkat.packages MqttConnect MqttPingReq MqttPublish
-             MqttDisconnect MqttSubscribe]))
+             MqttDisconnect MqttSubscribe MqttPubRel]))
 
 
 (set! *warn-on-reflection* true)
@@ -37,12 +37,12 @@
      (.sendMessage ^MqttClient @client-atom bufs))))
 
 (defn publish
-  ([topic] (let [map (gen/generate (s/gen :mqtt/publish))
+  ([topic] (let [map (gen/generate (s/gen :mqtt/publish-qos-gt0))
                  map (assoc map :topic topic)
                  _ (println map)
                  bufs (MqttPublish/encode map)]
              (.sendMessage ^MqttClient @client-atom bufs)
-             (:payload map)))
+             (select-keys map [:qos :payload :packet-identifier])))
   ([topic msg qos]
    (let [bufs (MqttPublish/encode {:packet-type :PUBLISH :qos qos :topic topic :payload msg})]
      (.sendMessage ^MqttClient @client-atom bufs))))
@@ -68,3 +68,7 @@
 
 (defn close []
   (.close ^MqttClient @client-atom))
+
+(defn pubrel [id]
+  (let [bufs (MqttPubRel/encode {:packet-type :PUBREL :packet-identifier id})]
+    (.sendMessage ^MqttClient @client-atom bufs)))

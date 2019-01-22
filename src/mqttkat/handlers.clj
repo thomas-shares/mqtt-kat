@@ -69,7 +69,6 @@
   (println "PUBCOMP: " msg))
 
 (defn add-subscriber [subscribers topic key]
-  (println "now here:   " topic)
   (if (contains? subscribers topic)
     (update-in subscribers [topic] conj key)
     (assoc subscribers topic [key])))
@@ -79,15 +78,15 @@
   (let [client-key (:client-key msg)
         topics (:topics msg)
         c (count topics)
-        filters (mapv #(:topic-filter %) topics)
-        _ (println c)]
+        filters (mapv #(:topic-filter %) topics)]
+        ;_ (println c)]
     (doseq [f filters]
       (swap! subscribers add-subscriber f client-key))
     ;(println "subscribers: " @subscribers)
     (send-message [client-key] {:packet-type :SUBACK
                                 :packet-identifier  (:packet-identifier msg)
                                 :response (into [] (take c (repeat 0)))})))
-
+ 
 (defn remove-subsciber [m [topic] key]
   (update m topic (fn [v] (filterv #(not= key %) v))))
 

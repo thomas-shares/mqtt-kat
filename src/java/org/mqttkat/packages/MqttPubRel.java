@@ -26,7 +26,7 @@ public class MqttPubRel extends GenericMessage{
 	
 	public static ByteBuffer[] encode(Map<Keyword, ?> message) {
 		ByteBuffer payload = ByteBuffer.allocate(4);
-		payload.put((byte) (MESSAGE_PUBREL << 4));
+		payload.put((byte) ((MESSAGE_PUBREL << 4) | 0x02));
 		payload.put((byte) 0x02);
 		Long packetIdentifierL = (Long) message.get(PACKET_IDENTIFIER);
 		payload.put((byte) ((packetIdentifierL >>> 8) & 0xFF)).put((byte) (packetIdentifierL & 0xFF));

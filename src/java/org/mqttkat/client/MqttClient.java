@@ -184,75 +184,82 @@ public class MqttClient implements Runnable {
 
 	private void handleResponse( byte[] data, int numRead) throws IOException {
 		// Make a correctly sized copy of the data before handing it
-		// to the client
-		//byte[] rspData = new byte[numRead];
-		//System.arraycopy(data, 0, rspData, 0, numRead);
+		// to the client this can be multiple MQTT packets...
 
-			byte type = (byte) ((data[0] & 0xff) >> 4);
-		byte flags = (byte) (data[0] &= 0x0f);
-		
+		//System.out.println(numRead);
+		int i = 0 ;
 
-		byte digit;
-		int multiplier = 1;
-		int msgLength = 0;
-		//System.out.println( "limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity() );
-		int i = 1;
 		do {
-			digit =  data[i++];
-			msgLength += ((digit & 0x7F) * multiplier);
-			multiplier *= 128;
-		} while ((digit & 0x80) != 0);
+ 
+			//System.out.println("start " + i);
 
-		byte[] rspData = new byte[msgLength];
-		System.arraycopy(data, i, rspData, 0, msgLength);
- 		
-		
-		//for(byte q :rspData) {
-		//	System.out.print(q + " ");
-		//}
-		//System.out.println("\n");
-		
-
-		
-		SelectionKey key = null;
-		IPersistentMap incoming = null;
-		if (type == GenericMessage.MESSAGE_CONNECT) {	
-			incoming =  MqttConnect.decode(key, flags, rspData);
-		} else if ( type ==  GenericMessage.MESSAGE_CONNACK) {
-			incoming = MqttConnAck.decode(key, flags, rspData);
-		} else if (type == GenericMessage.MESSAGE_PUBLISH) {
-			incoming = MqttPublish.decode(key, flags, rspData);
-		} else if (type == GenericMessage.MESSAGE_PUBACK) {
-			incoming = MqttPubAck.decode(key,  flags, rspData);
-		} else if (type == GenericMessage.MESSAGE_PUBREC) {
-			incoming = MqttPubRec.decode(key, flags, rspData);
-		} else if (type == GenericMessage.MESSAGE_PUBREL) {
-			incoming = MqttPubRel.decode(key,  flags, rspData);
-		} else if (type == GenericMessage.MESSAGE_PUBCOMP) {
-			incoming = MqttPubComp.decode(key,  flags, rspData);
-		} else if (type == GenericMessage.MESSAGE_SUBSCRIBE) {
-			incoming = MqttSubscribe.decode(key, flags, rspData);
-		} else if( type == GenericMessage.MESSAGE_SUBACK) {
-			incoming = MqttSubAck.decode(key, flags, rspData);
-		} else if (type == GenericMessage.MESSAGE_UNSUBSCRIBE) {
-			incoming = MqttUnsubscribe.decode(key, flags, rspData);
-		} else if ( type == GenericMessage.MESSAGE_UNSUBACK ) {
-			incoming = MqttUnSubAck.decode(key,  flags, rspData);
-		} else if (type == GenericMessage.MESSAGE_PINGREQ) {
-			incoming = MqttPingReq.decode(key,  flags);
-		} else if (type == GenericMessage.MESSAGE_PINGRESP) {
-			incoming = MqttPingResp.decode(key,  flags);
-		} else if (type == GenericMessage.MESSAGE_DISCONNECT) {
-			incoming = MqttDisconnect.decode(key,  flags, rspData);
-		} else if ( type ==  GenericMessage.MESSAGE_AUTHENTICATION) {
-			incoming = MqttAuthenticate.decode(key, flags, rspData);
-		} else {
-			System.out.println("FAIL!!!!!! INVALID packet sent: " + type);
-		}
-
-		if( incoming != null ) {
-			handler.handle(incoming);
-		}
+			byte type = (byte) ((data[i] & 0xff) >> 4);
+			byte flags = (byte) (data[i] &= 0x0f);
+			
+	
+			byte digit;
+			int multiplier = 1;
+			int msgLength = 0;
+			//System.out.println( "limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity() );
+			i++;
+			do {
+				digit =  data[i++];
+				msgLength += ((digit & 0x7F) * multiplier);
+				multiplier *= 128;
+			} while ((digit & 0x80) != 0);
+			//System.out.println(msgLength);
+	
+			byte[] rspData = new byte[msgLength];
+			System.arraycopy(data, i, rspData, 0, msgLength);
+	 		i += msgLength;
+			
+			//for(byte q :rspData) {
+			//	System.out.print(q + " ");
+			//}
+			//System.out.println("\n");
+			
+	
+			
+			SelectionKey key = null;
+			IPersistentMap incoming = null;
+			if (type == GenericMessage.MESSAGE_CONNECT) {	
+				incoming =  MqttConnect.decode(key, flags, rspData);
+			} else if ( type ==  GenericMessage.MESSAGE_CONNACK) {
+				incoming = MqttConnAck.decode(key, flags, rspData);
+			} else if (type == GenericMessage.MESSAGE_PUBLISH) {
+				incoming = MqttPublish.decode(key, flags, rspData);
+			} else if (type == GenericMessage.MESSAGE_PUBACK) {
+				incoming = MqttPubAck.decode(key,  flags, rspData);
+			} else if (type == GenericMessage.MESSAGE_PUBREC) {
+				incoming = MqttPubRec.decode(key, flags, rspData);
+			} else if (type == GenericMessage.MESSAGE_PUBREL) {
+				incoming = MqttPubRel.decode(key,  flags, rspData);
+			} else if (type == GenericMessage.MESSAGE_PUBCOMP) {
+				incoming = MqttPubComp.decode(key,  flags, rspData);
+			} else if (type == GenericMessage.MESSAGE_SUBSCRIBE) {
+				incoming = MqttSubscribe.decode(key, flags, rspData);
+			} else if( type == GenericMessage.MESSAGE_SUBACK) {
+				incoming = MqttSubAck.decode(key, flags, rspData);
+			} else if (type == GenericMessage.MESSAGE_UNSUBSCRIBE) {
+				incoming = MqttUnsubscribe.decode(key, flags, rspData);
+			} else if ( type == GenericMessage.MESSAGE_UNSUBACK ) {
+				incoming = MqttUnSubAck.decode(key,  flags, rspData);
+			} else if (type == GenericMessage.MESSAGE_PINGREQ) {
+				incoming = MqttPingReq.decode(key,  flags);
+			} else if (type == GenericMessage.MESSAGE_PINGRESP) {
+				incoming = MqttPingResp.decode(key,  flags);
+			} else if (type == GenericMessage.MESSAGE_DISCONNECT) {
+				incoming = MqttDisconnect.decode(key,  flags, rspData);
+			} else if ( type ==  GenericMessage.MESSAGE_AUTHENTICATION) {
+				incoming = MqttAuthenticate.decode(key, flags, rspData);
+			} else {
+				System.out.println("FAIL!!!!!! INVALID packet sent: " + type);
+			}
+	
+			if( incoming != null ) {
+				handler.handle(incoming);
+			}
+		} while( i < numRead );
 	}
 	
 	private void write(SelectionKey key) throws IOException {

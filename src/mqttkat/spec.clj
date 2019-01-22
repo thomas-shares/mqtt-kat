@@ -24,8 +24,8 @@
 (s/def :mqtt/will-message string?)
 (s/def :mqtt/will-qos #{0 1 2})
 (s/def :mqtt/will-retain boolean?)
-(s/def :mqtt/user-credentials (s/keys :req-un [:mqtt/username]
-                                      :opt-un [:mqtt/password]))
+(s/def :mqtt/user-credentials (s/keys :req-un [:mqtt/username]))
+                                    ;  :opt-un [:mqtt/password]))
 (s/def :mqtt/will (s/keys :req-un [:mqtt/will-topic
                                    :mqtt/will-message
                                    :mqtt/will-qos
@@ -90,7 +90,7 @@
                                   :mqtt/packet-identifier])))
 
 (s/def :mqtt/topic-filter (s/and string? #(<= 1 (count %))))
-(s/def :mqtt/qos #{0 1 2})
+(s/def :mqtt/qos #{0})
 (s/def :mqtt/topic_
   (s/keys :req-un [:mqtt/topic-filter
                    :mqtt/qos]))
@@ -139,6 +139,13 @@
 (s/def :mqtt/pubcomp
   (s/keys :req-un [:mqtt-pubcomp/packet-type
                    :mqtt/packet-identifier]))
+
+(s/def :mqtt-pubrel/packet-type #{:PUBREL})
+(s/def :mqtt/pubrel
+  (s/keys :req-un [:mqtt-pubrel/packet-type
+                   :mqtt/packet-identifier]))
+
+
 
 (s/def :mqtt-pingreq/packet-type #{:PINGREQ})
 (s/def :mqtt/pingreq
