@@ -39,22 +39,38 @@
 (defn connack [msg]
   (println "CONNACK: " msg))
 
+(defn qos-0 [keys topic payload]
+  (println "QOS 0")
+  (send-message keys
+    {:packet-type :PUBLISH
+     :payload payload
+     :topic topic
+     :qos 0
+     :retain? false}))
+
+(defn qos-1 [keys topic msg]
+  (println "QOS 1")
+  (send-message [(:client-key msg)]
+    {:packet-type :PUBACK
+     :packet-identifier (:packet-identifier msg)})
+  (qos-0 keys topic (:payload msg)))
+
+(defn qos-2 [keys topic msg]
+  (println "QOS 2"))
 
 (defn publish [msg]
   (println "clj PUBLISH: ")
   ;(println (str "valid publish: " (s/valid? :mqtt/publish msg)))
   ;(s/explain :mqtt/publish msg)
-  (let [payload (:payload msg)
-        topic (:topic msg)
+  (let [topic (:topic msg)
+        qos (:qos msg)
         keys (get @subscribers topic)]
         ;_ (println "Keys: " keys " " @subscribers)]
     (when keys
-      (send-message keys
-        {:packet-type :PUBLISH
-         :payload payload
-         :topic topic
-         :qos 0
-         :retain? false}))))
+      (condp = qos
+        0 (qos-0 keys topic (:payload msg))
+        1 (qos-1 keys topic msg)
+        2 (qos-2 keys topic msg)))))
 
 (defn puback [msg]
   (println "PUBACK: " msg))
@@ -86,7 +102,7 @@
     (send-message [client-key] {:packet-type :SUBACK
                                 :packet-identifier  (:packet-identifier msg)
                                 :response (into [] (take c (repeat 0)))})))
- 
+
 (defn remove-subsciber [m [topic] key]
   (update m topic (fn [v] (filterv #(not= key %) v))))
 

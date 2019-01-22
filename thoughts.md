@@ -8,7 +8,7 @@ More testing... I just ran 10k messages from the client to Mosquitto with QOS 0,
 
 Next step is to do that on my broker as well. And I think I'll just implement the message flow to start with, not (yet) the underlying logic that is needed.
 
-ooh and I removed the sleep from the event creating loop... still works.
+ooh and I removed the sleep from the event creating loop... still works. And there is some checking with exceptions being thrown if there is a miscompare detected. 
 
 ## 20190120
 
