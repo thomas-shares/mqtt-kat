@@ -68,7 +68,7 @@
             (compare-payload payload (:payload first-message)))))))
 
 (defn qos-two [payload packet-identifier]
-  ;;(println "QOS2 " packet-identifier)
+  ;(println "QOS2 " packet-identifier)
   (let [pubrec (async/<!! channel)]
     (println pubrec)
     (compare-packet-identifier packet-identifier (:packet-identifier pubrec))
@@ -117,7 +117,7 @@
     ;; We create an event stream (or chain of state transitions, if you will) by
     ;; calling Causatum's event-stream function with our model and an initial seed
     ;; state.
-    (doseq [{state :state} (take 10000   (es/event-stream model [{:rtime 0, :state :connect}]))]
+    (doseq [{state :state} (take 100  (es/event-stream model [{:rtime 0, :state :connect}]))]
       ;;(println "State:" state)
       ;;(Thread/sleep 10)
       (({:connect connect, :publish publish, :disconnect disconnect, :connack connack :subscribe subscribe} state))))

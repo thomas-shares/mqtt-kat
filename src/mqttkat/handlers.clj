@@ -5,6 +5,7 @@
             [clojure.spec.alpha :as s]))
 
 (defonce clients (atom {}))
+(defonce inflight (atom {}))
 
 ;;  example
 ;; {"topic" [key_of_client1, key_of_client1, ..]
@@ -39,27 +40,32 @@
 (defn connack [msg]
   (println "CONNACK: " msg))
 
-(defn qos-0 [keys topic payload]
-  (println "QOS 0")
+(defn qos-0 [keys topic msg]
+  ;(println "QOS 0")
   (send-message keys
     {:packet-type :PUBLISH
-     :payload payload
+     :payload (:payload msg)
      :topic topic
      :qos 0
      :retain? false}))
 
 (defn qos-1 [keys topic msg]
-  (println "QOS 1")
+  ;(println "QOS 1")
   (send-message [(:client-key msg)]
     {:packet-type :PUBACK
      :packet-identifier (:packet-identifier msg)})
-  (qos-0 keys topic (:payload msg)))
+  (qos-0 keys topic msg))
 
 (defn qos-2 [keys topic msg]
-  (println "QOS 2"))
+  ;(println "QOS 2")
+  (swap! inflight assoc [(:client-key msg) (:packet-identifier msg)] {:msg msg :topic topic :keys keys})
+  (send-message [(:client-key msg)]
+    {:packet-type :PUBREC
+     :packet-identifier (:packet-identifier msg)}))
+
 
 (defn publish [msg]
-  (println "clj PUBLISH: ")
+  ;(println "clj PUBLISH: ")
   ;(println (str "valid publish: " (s/valid? :mqtt/publish msg)))
   ;(s/explain :mqtt/publish msg)
   (let [topic (:topic msg)
@@ -68,21 +74,29 @@
         ;_ (println "Keys: " keys " " @subscribers)]
     (when keys
       (condp = qos
-        0 (qos-0 keys topic (:payload msg))
+        0 (qos-0 keys topic msg)
         1 (qos-1 keys topic msg)
         2 (qos-2 keys topic msg)))))
 
 (defn puback [msg]
-  (println "PUBACK: " msg))
+  (println "received PUBACK: " msg))
 
 (defn pubrec [msg]
-  (println "PUBREC: " msg))
+  (println "received PUBREC: " msg))
 
 (defn pubrel [msg]
-  (println "PUBREL: " msg))
+  ;(println "received (PUBREL: " msg)
+  (let [packet-identifier (:packet-identifier msg)
+        client-key (:client-key msg)]
+    (send-message [client-key]
+      {:packet-type :PUBCOMP
+       :packet-identifier packet-identifier})
+    (let [m (get @inflight [client-key packet-identifier])]
+      (qos-0 (:keys m) (:topic m) (:msg m))
+      (swap! inflight dissoc [client-key packet-identifier]))))
 
 (defn pubcomp  [msg]
-  (println "PUBCOMP: " msg))
+  (println "received PUBCOMP: " msg))
 
 (defn add-subscriber [subscribers topic key]
   (if (contains? subscribers topic)

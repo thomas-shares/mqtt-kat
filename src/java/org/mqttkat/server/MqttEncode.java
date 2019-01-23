@@ -10,6 +10,9 @@ import org.mqttkat.packages.MqttDisconnect;
 import org.mqttkat.packages.MqttPingReq;
 import org.mqttkat.packages.MqttPingResp;
 import org.mqttkat.packages.MqttPubAck;
+import org.mqttkat.packages.MqttPubComp;
+import org.mqttkat.packages.MqttPubRec;
+import org.mqttkat.packages.MqttPubRel;
 import org.mqttkat.packages.MqttPublish;
 import org.mqttkat.packages.MqttSubAck;
 
@@ -29,7 +32,7 @@ public class MqttEncode {
 
 		if(type instanceof Keyword) {
 			String strType = type.toString();
-			System.out.println(strType);
+			//System.out.println(strType);
 			if( strType.equals(":CONNECT")) {
 				outboundMessage = MqttConnect.encode(message);
 			} else if( strType.equals(":CONNACK")) {
@@ -46,7 +49,13 @@ public class MqttEncode {
 				outboundMessage = MqttPublish.encode(message);
 			} else if ( strType.equals(":PUBACK")) {
 				outboundMessage = MqttPubAck.encode(message);
-			} else {
+			} else if ( strType.equals(":PUBREC") ) {
+				outboundMessage = MqttPubRec.encode(message);
+			} else if( strType.equals(":PUBCOMP")) {
+				outboundMessage = MqttPubComp.encode(message);
+			}
+			
+			else {
 				System.out.println("DIDN'T RECOGNISE OUTBOUND MESSAGE TYPE!!!");
 				System.out.println(message.toString());
 				throw new IOException();
