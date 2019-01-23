@@ -22,8 +22,8 @@ public class MqttSendExecutor {
 	    this.selector = selector;
 	}
 	
-	public void submit(ByteBuffer[] buffers, SelectionKey key) {
-		execs.submit(new MqttSender(buffers, key, selector));
+	public void submit(ByteBuffer buffer, SelectionKey key) {
+		execs.submit(new MqttSender(buffer, key, selector));
 	}
 	
 	public void close(int timeoutMs) {

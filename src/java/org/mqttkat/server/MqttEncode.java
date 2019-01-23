@@ -22,12 +22,12 @@ import clojure.lang.Keyword;
 
 public class MqttEncode {
 
-	public static ByteBuffer[] mqttEncoder(Map<Keyword, ?> message) throws IOException {
+	public static ByteBuffer mqttEncoder(Map<Keyword, ?> message) throws IOException {
 		if( message == null ) {
 			return null;
 		}
 
-		ByteBuffer[] outboundMessage = null;
+		ByteBuffer outboundMessage = null;
 		Object type = message.get(PACKET_TYPE);
 
 		if(type instanceof Keyword) {

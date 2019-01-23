@@ -125,7 +125,7 @@ public class MqttConnect extends GenericMessage {
 	
 	
 	@SuppressWarnings({ "unchecked"})
-	public static ByteBuffer[] encode(Map<Keyword, ?> message) throws UnsupportedEncodingException {
+	public static ByteBuffer encode(Map<Keyword, ?> message) throws UnsupportedEncodingException {
 		//log("encode CONNECT");
 		int length = 0;
 		byte[] bytes = new byte[MESSAGE_LENGTH];
@@ -217,6 +217,6 @@ public class MqttConnect extends GenericMessage {
 		buffer.put(bytes, 0, length);
 		buffer.flip();
 		//log("length: " + length);
-		return new ByteBuffer[]{buffer};
+		return buffer;
 	}
 }

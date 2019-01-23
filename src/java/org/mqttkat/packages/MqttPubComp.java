@@ -24,7 +24,7 @@ public class MqttPubComp extends GenericMessage{
 		return PersistentArrayMap.create(m);
 	}
 	
-	public static ByteBuffer[] encode(Map<Keyword, ?> message) {
+	public static ByteBuffer encode(Map<Keyword, ?> message) {
 		ByteBuffer payload = ByteBuffer.allocate(4);
 		payload.put((byte) (MESSAGE_PUBCOMP << 4));
 		payload.put((byte) 0x02);
@@ -32,6 +32,6 @@ public class MqttPubComp extends GenericMessage{
 		payload.put((byte) ((packetIdentifierL >>> 8) & 0xFF)).put((byte) (packetIdentifierL & 0xFF));
 		payload.flip();
 		
-		return new ByteBuffer[] {payload};
+		return payload;
 	}
 }

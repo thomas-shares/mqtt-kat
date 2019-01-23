@@ -60,7 +60,7 @@ public class MqttUnsubscribe extends GenericMessage{
 		return PersistentArrayMap.create(m);
 	}
 	
-	public static ByteBuffer[] encode(Map<Keyword, ?> message) throws UnsupportedEncodingException {
+	public static ByteBuffer encode(Map<Keyword, ?> message) throws UnsupportedEncodingException {
 		int length = 0;
 		byte[] bytes = new byte[MESSAGE_LENGTH];
 		ByteBuffer buffer = ByteBuffer.allocate(MESSAGE_LENGTH);
@@ -89,6 +89,6 @@ public class MqttUnsubscribe extends GenericMessage{
 		//log("buffers.size: " + buffers.size());
 		buffer.flip();
 		//log("length: " + length);
-		return new ByteBuffer[]{buffer};
+		return buffer;
 	}
 }

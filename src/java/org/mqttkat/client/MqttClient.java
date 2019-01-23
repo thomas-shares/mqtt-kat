@@ -65,22 +65,18 @@ public class MqttClient implements Runnable {
 		t.start();
 	}
 
-	public void sendMessage(ByteBuffer bufs[]) throws IOException {
-		//for (int i = 0; i < bufs.length; i++) {
-		//	log(bufs[i].toString());
-		//}
-		// executor.submit(bufs);
+	public void sendMessage(ByteBuffer buffer) throws IOException {
+		
 
-		// socketChannel.write(bufs);
 		// And queue the data we want written
 		synchronized (this.pendingData) {
 			@SuppressWarnings("unchecked")
-			List<ByteBuffer[]> queue = (List<ByteBuffer[]>) this.pendingData.get(socketChannel);
+			List<ByteBuffer> queue = (List<ByteBuffer>) this.pendingData.get(socketChannel);
 			if (queue == null) {
-				queue = new ArrayList<ByteBuffer[]>();
+				queue = new ArrayList<ByteBuffer>();
 				this.pendingData.put(socketChannel, queue);
 			}
-			queue.add(bufs);
+			queue.add(buffer);
 			//System.out.println( "queue size: " + queue.size());
 		}
 		synchronized(this.pendingChanges) {
@@ -270,15 +266,13 @@ public class MqttClient implements Runnable {
 
 			// Write until there's not more data ...
 			while (!queue.isEmpty()) {
-				ByteBuffer[] bufs = (ByteBuffer[]) queue.get(0);
-				for(ByteBuffer buf : bufs) {
+				ByteBuffer buffer = (ByteBuffer) queue.get(0);
 					//log("buf: " + buf.toString());
-					socketChannel.write(buf);
-					if (buf.remaining() > 0) {
+					socketChannel.write(buffer);
+					if (buffer.remaining() > 0) {
 						// ... or the socket's buffer fills up
 						break;
 					}
-				}
 				queue.remove(0);
 			}
 

@@ -45,7 +45,7 @@ public class MqttPublish extends GenericMessage {
 		return PersistentArrayMap.create(m);
 	}
 
-	public static ByteBuffer[] encode(Map<Keyword, ?> message) throws UnsupportedEncodingException {
+	public static ByteBuffer encode(Map<Keyword, ?> message) throws UnsupportedEncodingException {
 		//System.out.println("PUBLISHING MESSAGE TO CLIENT: " + message.toString());
 		int length = 0;
 		
@@ -96,6 +96,6 @@ public class MqttPublish extends GenericMessage {
 		buffer.put(bytes, 0, length);
 		buffer.flip();
 		//log("length: " + length);
-		return new ByteBuffer[]{buffer};
+		return buffer;
 	}
 }

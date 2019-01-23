@@ -22,11 +22,11 @@ public class MqttPingResp extends GenericMessage {
 		return PersistentArrayMap.create(m);
 	}
 
-	public static ByteBuffer[] encode(Map<Keyword, ?> message) {
+	public static ByteBuffer encode(Map<Keyword, ?> message) {
 		ByteBuffer buffer = ByteBuffer.allocate(2);
 		buffer.put((byte)(MESSAGE_PINGRESP << 4));
 		buffer.put((byte)0);
 		buffer.flip();
-		return new ByteBuffer[]{buffer};
+		return buffer;
 	}
 }

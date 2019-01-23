@@ -60,7 +60,7 @@ public class MqttSubscribe extends GenericMessage{
 		return PersistentArrayMap.create(m);
 	}
 	
-	public static ByteBuffer[] encode(Map<Keyword, ?> message) throws UnsupportedEncodingException  {
+	public static ByteBuffer encode(Map<Keyword, ?> message) throws UnsupportedEncodingException  {
 		//log("encode SUBSCRIBE");
 		int length = 0;
 
@@ -109,6 +109,6 @@ public class MqttSubscribe extends GenericMessage{
 		buffer.put(bytes, 0, length);
 		buffer.flip();
 		//log("length: " + length);
-		return new ByteBuffer[]{buffer};		
+		return buffer;		
 	}
 }

@@ -1,6 +1,6 @@
 (ns mqttkat.client-generator
   (:require [causatum.event-streams :as es]
-            [clojure.test :refer [deftest]]
+            [clojure.test :refer [deftest is]]
             [mqttkat.client :as client]
             [mqttkat.spec :refer :all]
             [clojure.core.async :as async])
@@ -37,21 +37,14 @@
     (println msg)))
 
 (defn compare-packet-identifier [p-id-1 p-id-2]
-  (when-not (= p-id-1 p-id-2)
-    (throw (Exception. (str "Wrong packet identifier returned expected: " p-id-1 " but got " p-id-2)))))
+  (is (= p-id-1 p-id-2)))
 
 (defn compare-payload [payload-1 payload-2]
-   (when-not (= (seq payload-1) (seq payload-2))
-      (throw (Exception. (str "MISCOMPARE!!!!!!!!!")))))
+  (is (= (seq payload-1) (seq payload-2))))
 
 (defn qos-zero [payload]
   (let [msg (async/<!! channel)]
-    (when-not (= (seq payload) (seq (:payload msg)))
-       (do
-         (println " NOT EQUAL MISCOMPARE!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-         (println (seq payload))
-         (println (seq (:payload msg)))))))
-
+    (compare-payload payload (:payload  msg))))
 
 (defn qos-one [payload packet-identifier]
   ;(println "QOS1 " packet-identifier)
@@ -117,7 +110,8 @@
     ;; We create an event stream (or chain of state transitions, if you will) by
     ;; calling Causatum's event-stream function with our model and an initial seed
     ;; state.
-    (doseq [{state :state} (take 100  (es/event-stream model [{:rtime 0, :state :connect}]))]
-      ;;(println "State:" state)
-      ;;(Thread/sleep 10)
-      (({:connect connect, :publish publish, :disconnect disconnect, :connack connack :subscribe subscribe} state))))
+   (time
+     (doseq [{state :state} (take 10000  (es/event-stream model [{:rtime 0, :state :connect}]))]
+       ;;(println "State:" state)
+       ;;(Thread/sleep 10)
+       (({:connect connect, :publish publish, :disconnect disconnect, :connack connack :subscribe subscribe} state)))))

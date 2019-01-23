@@ -7,12 +7,12 @@ import java.nio.channels.Selector;
 import java.nio.channels.SocketChannel;
 
 public class MqttSender implements Runnable{
- 	private final ByteBuffer[] buffers;
+ 	private final ByteBuffer buffer;
  	private final SelectionKey key;
  	private final Selector selector;
  	
-	public MqttSender( ByteBuffer[] buffers, SelectionKey key, Selector selector) {
-		this.buffers  = buffers;
+	public MqttSender( ByteBuffer buffer, SelectionKey key, Selector selector) {
+		this.buffer  = buffer;
 		this.key = key;
 		this.selector = selector;
 	}
@@ -20,7 +20,7 @@ public class MqttSender implements Runnable{
 	public void run() {
 		 SocketChannel ch = (SocketChannel) key.channel();
 		 try {
-			 ch.write(buffers, 0, buffers.length);
+			 ch.write(buffer);
 			 selector.wakeup();
 		 } catch (IOException e) {
          selector.wakeup();

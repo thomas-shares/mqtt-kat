@@ -41,7 +41,7 @@ public class MqttSubAck extends GenericMessage {
 		return PersistentArrayMap.create(m);
 	}
 
-	public static ByteBuffer[] encode(Map<Keyword, ?> message) {
+	public static ByteBuffer encode(Map<Keyword, ?> message) {
 		int length = 0;
 		byte[] bytes = new byte[MESSAGE_LENGTH];
 		
@@ -68,6 +68,6 @@ public class MqttSubAck extends GenericMessage {
 		//log("buffers.size: " + buffers.size());
 		buffer.flip();
 		//log("length: " + length);
-		return new ByteBuffer[]{buffer};
+		return buffer;
 	}
 }

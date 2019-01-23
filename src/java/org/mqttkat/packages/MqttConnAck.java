@@ -23,7 +23,7 @@ public class MqttConnAck extends GenericMessage{
 		return PersistentArrayMap.create(m);
 	}
 
-	public static ByteBuffer[] encode(Map<Keyword, ?> message) {
+	public static ByteBuffer encode(Map<Keyword, ?> message) {
 		ByteBuffer buffer = ByteBuffer.allocate(4);
 		buffer.put((byte)(MESSAGE_CONNACK << 4));
 		buffer.put((byte)2);
@@ -31,6 +31,6 @@ public class MqttConnAck extends GenericMessage{
 		buffer.put(Byte.parseByte(message.get(CONNECT_RETURN_CODE).toString()));
 		buffer.flip();
 
-		return new ByteBuffer[]{buffer};
+		return buffer;
 	}
 }

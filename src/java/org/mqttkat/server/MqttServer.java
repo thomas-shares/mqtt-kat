@@ -290,18 +290,14 @@ public class MqttServer implements Runnable {
 	  }
 	
 	public void sendMessage( final clojure.lang.PersistentVector keys, final Map<Keyword, ?> message) throws IOException {
-		ByteBuffer bufs[] = MqttEncode.mqttEncoder(message);
-		int length = bufs.length;
+		ByteBuffer buffer = MqttEncode.mqttEncoder(message);
 		
 		Iterator<?> it = keys.iterator();
 
 		while(it.hasNext() ) {
 			SelectionKey key = (SelectionKey) it.next();
-			ByteBuffer[] copyBufs = new ByteBuffer[length] ;
-			for(int i = 0 ; i < length; i++) {
-				copyBufs[i] = bufs[i].duplicate();
-			}
-			executor.submit(copyBufs, key);
+			ByteBuffer copyBuf = buffer.duplicate();
+			executor.submit(copyBuf, key);
 		}
 	}
 }
