@@ -110,82 +110,126 @@ public class MqttServer implements Runnable {
 
 		buf.clear();
 		int read = 0;
-		byte[] remainAndPayload = null;
+		//byte[] remainAndPayload = null;
 		byte type = 0;
 		byte flags = 0;
-		int msgLength = 0;
 		while ((read = ch.read(buf)) > 0) {
 			buf.flip();
 			// byte[] bytes = new byte[buf.limit()];
 			// buf.get(bytes);
-			byte[] bytes = new byte[1];
-			buf.get(bytes, 0, 1);
-
-			//System.out.println("byte 0: "  + Integer.toBinaryString( (int) bytes[0]));
-			type = (byte) ((bytes[0] & 0xff) >> 4);
-			flags = (byte) (bytes[0] &= 0x0f);
-
-			/*
-			if (type == GenericMessage.MESSAGE_CONNECT) {
-				System.out.println("Server: CONNECT");
-			} else if ( type == GenericMessage.MESSAGE_CONNACK) {
-				System.out.println("Server: CONNACK");
-			} else if (type == GenericMessage.MESSAGE_PUBLISH) {
-				System.out.println("Server: PUBLISH");
-			} else if (type == GenericMessage.MESSAGE_PUBACK) {
-				System.out.println("PUBACK");
-			} else if (type == GenericMessage.MESSAGE_PUBREC) {
-				System.out.println("PUBREC");
-			} else if (type == GenericMessage.MESSAGE_PUBREL) {
-				System.out.println("PUBREL");
-			} else if (type == GenericMessage.MESSAGE_PUBCOMP) {
-				System.out.println("PUBCOMP");
-			} else if (type == GenericMessage.MESSAGE_SUBSCRIBE) {
-				System.out.println("SUBSCRIBE");
-			} else if( type == GenericMessage.MESSAGE_SUBACK) {
-				System.out.println("SUBACK");
-			} else if (type == GenericMessage.MESSAGE_UNSUBSCRIBE) {
-				System.out.println("UNSUBSCRIBE");
-			} else if (type == GenericMessage.MESSAGE_PINGREQ) {
-				System.out.println("PINGREQ");
-			} else if (type == GenericMessage.MESSAGE_PINGRESP) {
-				System.out.println("PINGRESP");
-		    } else if (type == GenericMessage.MESSAGE_DISCONNECT) {
-				System.out.println("Server: DISCONNECT");
-			} else if ( type ==  GenericMessage.MESSAGE_AUTHENTICATION) {	
-				System.out.println("AUTHENTICATE");
-			}else if ( type == GenericMessage.MESSAGE_UNSUBACK ) {
-				System.out.println("UNSUBACK");
-			} 
-			else {
-				System.out.println("FAIL!!!!!! INVALID packet sent: " + type);
-			}
-
-*/			byte digit;
-			int multiplier = 1;
-			//System.out.println( "limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity() );
-			
 			do {
-				digit = buf.get(); // bytes[0];
-				msgLength += ((digit & 0x7F) * multiplier);
-				multiplier *= 128;
-			} while ((digit & 0x80) != 0);
+				
+				
+				byte[] bytes = new byte[1];
+				buf.get(bytes, 0, 1);
+	
+				//System.out.println("byte 0: "  + Integer.toBinaryString( (int) bytes[0]));
+				type = (byte) ((bytes[0] & 0xff) >> 4);
+				flags = (byte) (bytes[0] &= 0x0f);
+	
+				/*
+				if (type == GenericMessage.MESSAGE_CONNECT) {
+					System.out.println("Server: CONNECT");
+				} else if ( type == GenericMessage.MESSAGE_CONNACK) {
+					System.out.println("Server: CONNACK");
+				} else if (type == GenericMessage.MESSAGE_PUBLISH) {
+					System.out.println("Server: PUBLISH");
+				} else if (type == GenericMessage.MESSAGE_PUBACK) {
+					System.out.println("PUBACK");
+				} else if (type == GenericMessage.MESSAGE_PUBREC) {
+					System.out.println("PUBREC");
+				} else if (type == GenericMessage.MESSAGE_PUBREL) {
+					System.out.println("PUBREL");
+				} else if (type == GenericMessage.MESSAGE_PUBCOMP) {
+					System.out.println("PUBCOMP");
+				} else if (type == GenericMessage.MESSAGE_SUBSCRIBE) {
+					System.out.println("SUBSCRIBE");
+				} else if( type == GenericMessage.MESSAGE_SUBACK) {
+					System.out.println("SUBACK");
+				} else if (type == GenericMessage.MESSAGE_UNSUBSCRIBE) {
+					System.out.println("UNSUBSCRIBE");
+				} else if (type == GenericMessage.MESSAGE_PINGREQ) {
+					System.out.println("PINGREQ");
+				} else if (type == GenericMessage.MESSAGE_PINGRESP) {
+					System.out.println("PINGRESP");
+			    } else if (type == GenericMessage.MESSAGE_DISCONNECT) {
+					System.out.println("Server: DISCONNECT");
+				} else if ( type ==  GenericMessage.MESSAGE_AUTHENTICATION) {	
+					System.out.println("AUTHENTICATE");
+				}else if ( type == GenericMessage.MESSAGE_UNSUBACK ) {
+					System.out.println("UNSUBACK");
+				} 
+				else {
+					System.out.println("FAIL!!!!!! INVALID packet sent: " + type);
+				}
+	
+	*/			byte digit;
+				int multiplier = 1;
+				//System.out.println( "limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity() );
+				int msgLength = 0;
 
-			//System.out.println("msgLenght: " + msgLength);
-
-			remainAndPayload = new byte[msgLength];
-
-			//System.out.println( "limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity() + " remainLength: " +  remainAndPayload.length);
-			buf.get(remainAndPayload, 0, msgLength);
-			//System.out.println( "limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity());
-
-			//for(int i=0; i < msgLength ;i++ ){
-			//	System.out.print(" " + remainAndPayload[i]);
-			//}
-			//System.out.print("\n");
+				do {
+					digit = buf.get(); // bytes[0];
+					msgLength += ((digit & 0x7F) * multiplier);
+					multiplier *= 128;
+				} while ((digit & 0x80) != 0);
+	
+				//System.out.println("msgLenght: " + msgLength);
+	
+				byte[] remainAndPayload = new byte[msgLength];
+	
+				//System.out.println( "limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity() + " remainLength: " +  remainAndPayload.length);
+				buf.get(remainAndPayload, 0, msgLength);
+				//System.out.println( "limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity());
+	
+				//for(int i=0; i < msgLength ;i++ ){
+				//	System.out.print(" " + remainAndPayload[i]);
+				//}
+				//System.out.print("\n");
+				
+				IPersistentMap incoming = null;
+				if (type == GenericMessage.MESSAGE_CONNECT) {	
+					incoming =  MqttConnect.decode(key, flags, remainAndPayload);
+				} else if ( type ==  GenericMessage.MESSAGE_CONNACK) {
+					incoming = MqttConnAck.decode(key, flags, remainAndPayload);
+				} else if (type == GenericMessage.MESSAGE_PUBLISH) {
+					incoming = MqttPublish.decode(key, flags, remainAndPayload);
+				} else if (type == GenericMessage.MESSAGE_PUBACK) {
+					incoming = MqttPubAck.decode(key, flags, remainAndPayload);
+				} else if (type == GenericMessage.MESSAGE_PUBREC) {
+					incoming = MqttPubRec.decode(key, flags, remainAndPayload);
+				} else if (type == GenericMessage.MESSAGE_PUBREL) {
+					incoming = MqttPubRel.decode(key, flags, remainAndPayload);
+				} else if (type == GenericMessage.MESSAGE_PUBCOMP) {
+					incoming = MqttPubComp.decode(key, flags, remainAndPayload);
+				} else if (type == GenericMessage.MESSAGE_SUBSCRIBE) {
+					incoming = MqttSubscribe.decode(key, flags, remainAndPayload);
+				} else if( type == GenericMessage.MESSAGE_SUBACK) {
+					incoming = MqttSubAck.decode(key, flags, remainAndPayload);
+				} else if (type == GenericMessage.MESSAGE_UNSUBSCRIBE) {
+					incoming = MqttUnsubscribe.decode(key, flags, remainAndPayload);
+				} else if ( type == GenericMessage.MESSAGE_UNSUBACK ) {
+					incoming = MqttUnSubAck.decode(key, flags, remainAndPayload);
+				} else if (type == GenericMessage.MESSAGE_PINGREQ) {
+					incoming = MqttPingReq.decode(key, flags);
+				} else if (type == GenericMessage.MESSAGE_PINGRESP) {
+					incoming = MqttPingResp.decode(key, flags);
+				} else if (type == GenericMessage.MESSAGE_DISCONNECT) {
+					incoming = MqttDisconnect.decode(key, flags, remainAndPayload);
+					closeKey(key);
+				} else if ( type ==  GenericMessage.MESSAGE_AUTHENTICATION) {
+					incoming = MqttAuthenticate.decode(key, flags, remainAndPayload);
+				} else {
+					System.out.println("FAIL!!!!!! INVALID packet sent: " + type);
+					closeKey(key);
+				}
+	
+				if( incoming != null ) {
+					handler.handle(incoming);
+				}
+			} while (buf.limit() > buf.position());
 
 			buf.clear();
-			msgLength = 0;
 		}
 		
 		//client has gone away...
@@ -194,49 +238,9 @@ public class MqttServer implements Runnable {
 			closeKey(key);
 		}
 		
-		String address = (new StringBuilder(ch.socket().getInetAddress().toString())).append(":")
-				.append(ch.socket().getPort()).toString();
+		//String address = (new StringBuilder(ch.socket().getInetAddress().toString())).append(":")
+		//		.append(ch.socket().getPort()).toString();
 		
-		IPersistentMap incoming = null;
-		if (type == GenericMessage.MESSAGE_CONNECT) {	
-			incoming =  MqttConnect.decode(key, flags, remainAndPayload);
-		} else if ( type ==  GenericMessage.MESSAGE_CONNACK) {
-			incoming = MqttConnAck.decode(key, flags, remainAndPayload);
-		} else if (type == GenericMessage.MESSAGE_PUBLISH) {
-			incoming = MqttPublish.decode(key, flags, remainAndPayload);
-		} else if (type == GenericMessage.MESSAGE_PUBACK) {
-			incoming = MqttPubAck.decode(key, flags, remainAndPayload);
-		} else if (type == GenericMessage.MESSAGE_PUBREC) {
-			incoming = MqttPubRec.decode(key, flags, remainAndPayload);
-		} else if (type == GenericMessage.MESSAGE_PUBREL) {
-			incoming = MqttPubRel.decode(key, flags, remainAndPayload);
-		} else if (type == GenericMessage.MESSAGE_PUBCOMP) {
-			incoming = MqttPubComp.decode(key, flags, remainAndPayload);
-		} else if (type == GenericMessage.MESSAGE_SUBSCRIBE) {
-			incoming = MqttSubscribe.decode(key, flags, remainAndPayload);
-		} else if( type == GenericMessage.MESSAGE_SUBACK) {
-			incoming = MqttSubAck.decode(key, flags, remainAndPayload);
-		} else if (type == GenericMessage.MESSAGE_UNSUBSCRIBE) {
-			incoming = MqttUnsubscribe.decode(key, flags, remainAndPayload);
-		} else if ( type == GenericMessage.MESSAGE_UNSUBACK ) {
-			incoming = MqttUnSubAck.decode(key, flags, remainAndPayload);
-		} else if (type == GenericMessage.MESSAGE_PINGREQ) {
-			incoming = MqttPingReq.decode(key, flags);
-		} else if (type == GenericMessage.MESSAGE_PINGRESP) {
-			incoming = MqttPingResp.decode(key, flags);
-		} else if (type == GenericMessage.MESSAGE_DISCONNECT) {
-			incoming = MqttDisconnect.decode(key, flags, remainAndPayload);
-			closeKey(key);
-		} else if ( type ==  GenericMessage.MESSAGE_AUTHENTICATION) {
-			incoming = MqttAuthenticate.decode(key, flags, remainAndPayload);
-		} else {
-			System.out.println("FAIL!!!!!! INVALID packet sent: " + type);
-			closeKey(key);
-		}
-
-		if( incoming != null ) {
-			handler.handle(incoming);
-		}
 	}
 
 	public void start() throws IOException {

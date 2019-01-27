@@ -2,13 +2,17 @@
 
 In this file will go my thoughts and ramblings about this project and what I have done and what I might do next.
 
+## 20190125
+
+QOS 0, 1 and 2 works both ways for the client... and when when testing with Mosquitto I can generate almost 8k message/second for one single threaded client.
+
 ## 20190122
 
 More testing... I just ran 10k messages from the client to Mosquitto with QOS 0, 1 and 2 on the publish. yeah!!!!
 
 Next step is to do that on my broker as well. And I think I'll just implement the message flow to start with, not (yet) the underlying logic that is needed.
 
-ooh and I removed the sleep from the event creating loop... still works. And there is some checking with exceptions being thrown if there is a miscompare detected. 
+ooh and I removed the sleep from the event creating loop... still works. And there is some checking with exceptions being thrown if there is a miscompare detected.
 
 ## 20190120
 

@@ -136,6 +136,7 @@ public class MqttClient implements Runnable {
 					} else if (key.isReadable()) {
 						//System.out.println("ready for read...");
 						this.read(key);
+						//System.out.println("done read in loop");
 					} else if (key.isWritable()) {
 						//System.out.println("ready for write...");
 						this.write(key);
@@ -182,9 +183,8 @@ public class MqttClient implements Runnable {
 		// Make a correctly sized copy of the data before handing it
 		// to the client this can be multiple MQTT packets...
 
-		//System.out.println(numRead);
 		int i = 0 ;
-
+		//System.out.println("read " + numRead);
 		do {
  
 			//System.out.println("start " + i);
@@ -255,6 +255,7 @@ public class MqttClient implements Runnable {
 			if( incoming != null ) {
 				handler.handle(incoming);
 			}
+			//System.out.println( "i " + i);
 		} while( i < numRead );
 	}
 	

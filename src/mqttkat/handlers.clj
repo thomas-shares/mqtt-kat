@@ -2,10 +2,13 @@
   (:use [mqttkat.s :only [server]])
   (:import [org.mqttkat.server MqttServer])
   (:require [mqttkat.spec :as spec]
+            [clojurewerkz.triennium.mqtt :as tr]
             [clojure.spec.alpha :as s]))
 
 (defonce clients (atom {}))
 (defonce inflight (atom {}))
+(defonce sub2 (atom (tr/make-trie)))
+(defonce outbound (atom {}))
 
 ;;  example
 ;; {"topic" [key_of_client1, key_of_client1, ..]
@@ -20,7 +23,7 @@
     x))
 
 (defn send-message [keys msg]
-  ;;(println "sending message  from  clj")
+  ;(println "sending message  from  clj " (:packet-type msg) " " (:packet-identifier msg))
   ;;(println (class  keys))
   (let [s (:server (meta @server))]
     (.sendMessage ^MqttServer s keys msg)))
@@ -41,8 +44,8 @@
   (println "CONNACK: " msg))
 
 (defn qos-0 [keys topic msg]
-  ;(println "QOS 0")
-  (send-message keys
+  ;;(println "respond QOS 0 ")
+  (send-message (mapv #(:client-key %) keys)
     {:packet-type :PUBLISH
      :payload (:payload msg)
      :topic topic
@@ -50,11 +53,28 @@
      :retain? false}))
 
 (defn qos-1 [keys topic msg]
-  ;(println "QOS 1")
   (send-message [(:client-key msg)]
     {:packet-type :PUBACK
      :packet-identifier (:packet-identifier msg)})
-  (qos-0 keys topic msg))
+  (let [qos-0-keys (filter #(zero? (:qos %)) keys)
+        qos-1-keys (filter #(= 1 (:qos %)) keys)]
+
+    (println (count qos-0-keys) " " (count qos-1-keys))
+
+    (when (<  0 (count qos-0-keys))
+      (qos-0 qos-0-keys topic msg))
+    (when (< 0 (count qos-1-keys))
+      (do
+        (send-message (mapv #(:client-key %) keys)
+              {:packet-type :PUBLISH
+               :payload (:payload msg)
+               :topic topic
+               :qos 1
+               :retain? false
+               :packet-identifier (:packet-identifier msg)})))))
+        ;(doseq [k qos-1-keys]
+          ;(println "K " k)
+          ;(swap! outbound assoc (:client-key k) (:packet-identifier msg)))))))
 
 (defn qos-2 [keys topic msg]
   ;(println "QOS 2")
@@ -65,13 +85,14 @@
 
 
 (defn publish [msg]
-  ;(println "clj PUBLISH: ")
+  (println "clj PUBLISH: ")
   ;(println (str "valid publish: " (s/valid? :mqtt/publish msg)))
   ;(s/explain :mqtt/publish msg)
   (let [topic (:topic msg)
         qos (:qos msg)
-        keys (get @subscribers topic)]
-        ;_ (println "Keys: " keys " " @subscribers)]
+        ;keys (get @subscribers topic)
+        keys (tr/find @sub2 topic)]
+        ;_ (println "Keys: " keys " qos: " qos)]
     (when keys
       (condp = qos
         0 (qos-0 keys topic msg)
@@ -80,6 +101,7 @@
 
 (defn puback [msg]
   (println "received PUBACK: " msg))
+  ;(swap! outbound dissoc [(:client-key msg) (:packet-identifier msg)]))
 
 (defn pubrec [msg]
   (println "received PUBREC: " msg))
@@ -107,15 +129,15 @@
   ;(println "clj SUBSCRIBE:" msg)
   (let [client-key (:client-key msg)
         topics (:topics msg)
-        c (count topics)
-        filters (mapv #(:topic-filter %) topics)]
-        ;_ (println c)]
-    (doseq [f filters]
-      (swap! subscribers add-subscriber f client-key))
-    ;(println "subscribers: " @subscribers)
+        qos (mapv #(long (:qos %)) topics)]
+        ;_ (println qos)]
+    (doseq [t topics]
+      (swap! subscribers add-subscriber (:topic-filter t) client-key)
+      (swap! sub2 tr/insert (:topic-filter t)  {:client-key client-key :qos (:qos t)}))
+    ;(println "subscribers: " @sub2)
     (send-message [client-key] {:packet-type :SUBACK
                                 :packet-identifier  (:packet-identifier msg)
-                                :response (into [] (take c (repeat 0)))})))
+                                :response qos})))
 
 (defn remove-subsciber [m [topic] key]
   (update m topic (fn [v] (filterv #(not= key %) v))))
@@ -136,7 +158,7 @@
   (into {} (map (fn [[k v]] (let [nv (filterv #(not= val %) v)] {k nv}))  m)))
 
 (defn disconnect [msg]
-  (println "clj DISCONNECT: " msg)
+  ;(println "clj DISCONNECT: " msg)
   ;(println "count: " (count (get @subscribers "test")))
   (swap! subscribers remove-client-subscriber  (:client-key msg))
   (swap! clients dissoc (:client-key msg)))

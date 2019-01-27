@@ -13,7 +13,7 @@
 (defn handler-fn [msg]
   ;(println "Posting on async channel: ")
   ;(clojure.pprint/pprint (dissoc msg :client-key))
-  (async/>!! channel msg))
+  (async/go (async/>! channel msg)))
 
 (def model
   {:graph
@@ -33,8 +33,8 @@
 
 (defn connack []
   (let [msg (async/<!! channel)]
-    (= (:packet-type msg) :CONNACK)
-    (println msg)))
+    (is (= (:packet-type msg) :CONNACK))
+    (println "R " msg)))
 
 (defn compare-packet-identifier [p-id-1 p-id-2]
   (is (= p-id-1 p-id-2)))
@@ -44,39 +44,60 @@
 
 (defn qos-zero [payload]
   (let [msg (async/<!! channel)]
-    (compare-payload payload (:payload  msg))))
+    (compare-payload payload (:payload  msg))
+    (is (= 0 (:qos msg)))))
+
+(defn process-qos-one [msg]
+  (when-not (zero? (:qos msg))
+    (do (println "SENDING PUBACK!!!!!! " (:packet-identifier msg))
+        (client/puback (:packet-identifier msg)))))
 
 (defn qos-one [payload packet-identifier]
   ;(println "QOS1 " packet-identifier)
   (let [first-message (async/<!! channel)
-        _ (println first-message)
+        _ (println "first: " first-message)
         second-message (async/<!! channel)
-        _ (println second-message)]
+        _ (println "second " second-message)]
     (if (= :PUBACK (:packet-type first-message))
       (do (let [received-packet-identifier (:packet-identifier first-message)]
             (compare-packet-identifier packet-identifier received-packet-identifier)
-            (compare-payload payload (:payload second-message))))
+            (compare-payload payload (:payload second-message))
+            (process-qos-one second-message)))
       (do (let [received-packet-identifier (:packet-identifier second-message)]
             (compare-packet-identifier packet-identifier received-packet-identifier)
-            (compare-payload payload (:payload first-message)))))))
+            (compare-payload payload (:payload first-message))
+            (process-qos-one first-message))))))
+
+(defn process-return [msg]
+  (condp = (:qos msg)
+    0 nil
+    1 (process-qos-one msg)
+    2 (do
+        (client/pubrec (:packet-identifier msg))
+        (let [pubrel (async/<!! channel)]
+          (println "R " pubrel)
+          (is (= :PUBREL (:packet-type pubrel)))
+          (client/pubcomp (:packet-identifier pubrel))))))
 
 (defn qos-two [payload packet-identifier]
   ;(println "QOS2 " packet-identifier)
   (let [pubrec (async/<!! channel)]
-    (println pubrec)
+    (println "R " pubrec)
     (compare-packet-identifier packet-identifier (:packet-identifier pubrec))
     (client/pubrel packet-identifier)
     (let [first-message (async/<!! channel)
           second-message (async/<!! channel)]
-      (println first-message)
-      (println second-message)
+      (println "R "first-message)
+      (println "R " second-message)
       (if (= :PUBCOMP (:packet-type first-message))
         (do (let [packet-identifier (:packet-identifier first-message)]
               (compare-packet-identifier packet-identifier (:packet-identifier first-message))
-              (compare-payload payload (:payload second-message))))
+              (compare-payload payload (:payload second-message))
+              (process-return second-message)))
         (do (let [packet-identifier (:packet-identifier second-message)]
               (compare-packet-identifier packet-identifier (:packet-identifier second-message))
-              (compare-payload payload (:payload first-message))))))))
+              (compare-payload payload (:payload first-message))
+              (process-return first-message)))))))
 
 (defn publish []
   (let [topic (rand-nth (into [] @subscribe-topics))
@@ -99,10 +120,10 @@
     (swap! subscribe-topics (partial apply conj) topics)
     (let [msg (async/<!! channel)
           ret-count (count (:response msg))]
-      (println msg)
-      (= c ret-count))))
+      (println "R " msg)
+      (is (= c ret-count)))))
 
-
+ 
 
 
 
@@ -111,7 +132,7 @@
     ;; calling Causatum's event-stream function with our model and an initial seed
     ;; state.
    (time
-     (doseq [{state :state} (take 10000  (es/event-stream model [{:rtime 0, :state :connect}]))]
+     (doseq [{state :state} (take 10000   (es/event-stream model [{:rtime 0, :state :connect}]))]
        ;;(println "State:" state)
        ;;(Thread/sleep 10)
        (({:connect connect, :publish publish, :disconnect disconnect, :connack connack :subscribe subscribe} state)))))
