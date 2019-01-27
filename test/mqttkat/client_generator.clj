@@ -4,7 +4,7 @@
             [mqttkat.client :as client]
             [mqttkat.spec :refer :all]
             [clojure.core.async :as async])
-  (:import  [org.mqttkat MqttHandler]))
+  (:import  [org.mqttkat MqttHandler MqttStat]))
 
 (def subscribe-topics (atom #{}))
 
@@ -49,15 +49,15 @@
 
 (defn process-qos-one [msg]
   (when-not (zero? (:qos msg))
-    (do (println "SENDING PUBACK!!!!!! " (:packet-identifier msg))
+    (do ;(println "SENDING PUBACK!!!!!! " (:packet-identifier msg))
         (client/puback (:packet-identifier msg)))))
 
 (defn qos-one [payload packet-identifier]
   ;(println "QOS1 " packet-identifier)
   (let [first-message (async/<!! channel)
-        _ (println "first: " first-message)
-        second-message (async/<!! channel)
-        _ (println "second " second-message)]
+        ;_ (println "first: " first-message)
+        second-message (async/<!! channel)]
+        ;_ (println "second " second-message)]
     (if (= :PUBACK (:packet-type first-message))
       (do (let [received-packet-identifier (:packet-identifier first-message)]
             (compare-packet-identifier packet-identifier received-packet-identifier)
@@ -82,13 +82,13 @@
 (defn qos-two [payload packet-identifier]
   ;(println "QOS2 " packet-identifier)
   (let [pubrec (async/<!! channel)]
-    (println "R " pubrec)
+    ;(println "R " pubrec)
     (compare-packet-identifier packet-identifier (:packet-identifier pubrec))
     (client/pubrel packet-identifier)
     (let [first-message (async/<!! channel)
           second-message (async/<!! channel)]
-      (println "R "first-message)
-      (println "R " second-message)
+      ;(println "R "first-message)
+      ;(println "R " second-message)
       (if (= :PUBCOMP (:packet-type first-message))
         (do (let [packet-identifier (:packet-identifier first-message)]
               (compare-packet-identifier packet-identifier (:packet-identifier first-message))
@@ -123,7 +123,7 @@
       (println "R " msg)
       (is (= c ret-count)))))
 
- 
+
 
 
 
@@ -131,8 +131,12 @@
     ;; We create an event stream (or chain of state transitions, if you will) by
     ;; calling Causatum's event-stream function with our model and an initial seed
     ;; state.
-   (time
-     (doseq [{state :state} (take 10000   (es/event-stream model [{:rtime 0, :state :connect}]))]
+   (let [start-time (System/currentTimeMillis)]
+     (doseq [{state :state} (take 100000   (es/event-stream model [{:rtime 0, :state :connect}]))]
        ;;(println "State:" state)
        ;;(Thread/sleep 10)
-       (({:connect connect, :publish publish, :disconnect disconnect, :connack connack :subscribe subscribe} state)))))
+       (({:connect connect, :publish publish, :disconnect disconnect, :connack connack :subscribe subscribe} state)))
+     (let [time (/ (- (System/currentTimeMillis) start-time) 1000.0)]
+       (println
+         "sent per sec "(/ (MqttStat/sentMessages) time)
+         "received per sec " (/ (MqttStat/receivedMessage) time)))))

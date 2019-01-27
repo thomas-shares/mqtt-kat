@@ -18,22 +18,10 @@ import clojure.lang.Keyword;
 
 import org.mqttkat.IHandler;
 import org.mqttkat.MqttSendExecutor;
-import org.mqttkat.packages.GenericMessage;
-import org.mqttkat.packages.MqttAuthenticate;
-import org.mqttkat.packages.MqttConnAck;
-import org.mqttkat.packages.MqttConnect;
-import org.mqttkat.packages.MqttDisconnect;
-import org.mqttkat.packages.MqttPingReq;
-import org.mqttkat.packages.MqttPingResp;
-import org.mqttkat.packages.MqttPubAck;
-import org.mqttkat.packages.MqttPubComp;
-import org.mqttkat.packages.MqttPubRec;
-import org.mqttkat.packages.MqttPubRel;
-import org.mqttkat.packages.MqttPublish;
-import org.mqttkat.packages.MqttSubAck;
-import org.mqttkat.packages.MqttSubscribe;
-import org.mqttkat.packages.MqttUnSubAck;
-import org.mqttkat.packages.MqttUnsubscribe;
+import org.mqttkat.packages.*;
+
+import static org.mqttkat.MqttStat.*;
+
 
 public class MqttServer implements Runnable {
 	static final String THREAD_NAME = "server-loop";
@@ -226,6 +214,8 @@ public class MqttServer implements Runnable {
 	
 				if( incoming != null ) {
 					handler.handle(incoming);
+					receivedBytes.getAndAdd(msgLength);
+					receivedMessage.getAndIncrement();
 				}
 			} while (buf.limit() > buf.position());
 
@@ -235,6 +225,8 @@ public class MqttServer implements Runnable {
 		//client has gone away...
 		if(read<0) {
 			System.out.println("Client has gone away...");
+			System.out.println("message received: " + receivedMessage.get());
+			System.out.println("Message sent: " + sentMessages.get());
 			closeKey(key);
 		}
 		
@@ -302,6 +294,8 @@ public class MqttServer implements Runnable {
 			SelectionKey key = (SelectionKey) it.next();
 			ByteBuffer copyBuf = buffer.duplicate();
 			executor.submit(copyBuf, key);
+			sentMessages.getAndIncrement();
+			sentBytes.getAndAdd(buffer.limit());
 		}
 	}
 }

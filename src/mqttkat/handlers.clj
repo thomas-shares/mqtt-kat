@@ -59,7 +59,7 @@
   (let [qos-0-keys (filter #(zero? (:qos %)) keys)
         qos-1-keys (filter #(= 1 (:qos %)) keys)]
 
-    (println (count qos-0-keys) " " (count qos-1-keys))
+    ;(println (count qos-0-keys) " " (count qos-1-keys))
 
     (when (<  0 (count qos-0-keys))
       (qos-0 qos-0-keys topic msg))
@@ -85,7 +85,7 @@
 
 
 (defn publish [msg]
-  (println "clj PUBLISH: ")
+  ;(println "clj PUBLISH: ")
   ;(println (str "valid publish: " (s/valid? :mqtt/publish msg)))
   ;(s/explain :mqtt/publish msg)
   (let [topic (:topic msg)
@@ -99,8 +99,8 @@
         1 (qos-1 keys topic msg)
         2 (qos-2 keys topic msg)))))
 
-(defn puback [msg]
-  (println "received PUBACK: " msg))
+(defn puback [msg])
+  ;(println "received PUBACK: "))
   ;(swap! outbound dissoc [(:client-key msg) (:packet-identifier msg)]))
 
 (defn pubrec [msg]
@@ -132,7 +132,7 @@
         qos (mapv #(long (:qos %)) topics)]
         ;_ (println qos)]
     (doseq [t topics]
-      (swap! subscribers add-subscriber (:topic-filter t) client-key)
+      ;(swap! subscribers add-subscriber (:topic-filter t) client-key)
       (swap! sub2 tr/insert (:topic-filter t)  {:client-key client-key :qos (:qos t)}))
     ;(println "subscribers: " @sub2)
     (send-message [client-key] {:packet-type :SUBACK
@@ -144,7 +144,10 @@
 
 (defn unsubscribe [msg]
   (println "clj UNSCUBSCRIBE: " msg)
-  (swap! subscribers remove-subsciber (:topics msg) (:client-key msg)))
+  ;(swap! subscribers remove-subsciber (:topics msg) (:client-key msg))
+  (doseq [t (:topics msg)]
+    (swap! sub2 tr/delete (:topic-filter) (:client-key msg))))
+
 
 (defn pingreq [msg]
   (println "clj PINGREQ: " msg)

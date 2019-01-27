@@ -15,7 +15,8 @@
    [org.clojure/test.check "0.10.0-alpha3"]
    [proto-repl "0.3.1"]
    [org.craigandera/causatum "0.3.0"]
-   [clojurewerkz/triennium "1.0.0-beta2"]]
+   [clojurewerkz/triennium "1.0.0-beta2"]
+   [com.clojure-goes-fast/clj-async-profiler "0.2.2"]]
 
   :plugins
   [[lein-swank   "1.4.5"]
@@ -27,7 +28,7 @@
 
   :jvm-opts
   ["-Dclojure.compiler.disable-locals-clearing=true"
-   "-Xms512m" "-Xmx512m"]
+   "-Xms512m" "-Xmx1G" "-Djdk.attach.allowAttachSelf" "-XX:+UnlockDiagnosticVMOptions" "-XX:+DebugNonSafepoints"]
 
   :javac-options ["-source" "1.8" "-target" "1.8" "-g"]
   :java-source-paths ["src/java"]

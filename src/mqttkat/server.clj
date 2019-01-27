@@ -1,5 +1,6 @@
 (ns mqttkat.server
-  (:require [mqttkat.handlers :as h])
+  (:require [mqttkat.handlers :as h]
+            [clj-async-profiler.core :as prof])
   (:use [mqttkat.s :only [server]])
   (:import [org.mqttkat.server MqttServer]
            [org.mqttkat MqttHandler])
@@ -27,6 +28,7 @@
     ((packet-type handler-map) msg)))
 
 (defn run-server [ip port handler]
+  ;(prof/start {})
   (let [s (MqttServer. ^String ip ^int port handler)]
     (.start s)
     (with-meta
@@ -45,6 +47,7 @@
 
 (defn stop []
   (when-not (nil? @server)
+    ;(prof/stop {})
     (println "Server stopping...")
     (@server :timeout 1000)
     (reset! server nil)))

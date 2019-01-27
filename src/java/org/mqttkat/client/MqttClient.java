@@ -34,6 +34,7 @@ import org.mqttkat.packages.MqttUnSubAck;
 import org.mqttkat.packages.MqttUnsubscribe;
 
 import clojure.lang.IPersistentMap;
+import static org.mqttkat.MqttStat.*;
 
 public class MqttClient implements Runnable {
 	private volatile boolean running = true;
@@ -66,7 +67,8 @@ public class MqttClient implements Runnable {
 	}
 
 	public void sendMessage(ByteBuffer buffer) throws IOException {
-		
+		sentMessages.incrementAndGet();
+		sentBytes.addAndGet(buffer.limit());
 
 		// And queue the data we want written
 		synchronized (this.pendingData) {
@@ -254,6 +256,8 @@ public class MqttClient implements Runnable {
 	
 			if( incoming != null ) {
 				handler.handle(incoming);
+				receivedMessage.incrementAndGet();
+				receivedBytes.addAndGet(msgLength);
 			}
 			//System.out.println( "i " + i);
 		} while( i < numRead );

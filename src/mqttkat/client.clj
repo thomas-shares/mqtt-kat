@@ -39,7 +39,7 @@
 (defn publish
   ([topic] (let [map (gen/generate (s/gen :mqtt/publish-qos-gt0))
                  map (assoc map :topic topic)
-                 _ (println "S " map)
+                 ;_ (println "S " map)
                  buf (MqttPublish/encode map)]
              (.sendMessage ^MqttClient @client-atom buf)
              (select-keys map [:qos :payload :packet-identifier])))
@@ -75,7 +75,7 @@
 
 (defn puback [id]
   (let [map {:packet-type :PUBACK :packet-identifier id}
-        _ (println "S " map)
+        ;_ (println "S " map)
         buf (MqttPubAck/encode map)]
     (.sendMessage ^MqttClient @client-atom buf)))
 
