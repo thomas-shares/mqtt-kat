@@ -53,6 +53,8 @@ public class MqttEncode {
 				outboundMessage = MqttPubRec.encode(message);
 			} else if( strType.equals(":PUBCOMP")) {
 				outboundMessage = MqttPubComp.encode(message);
+			} else if( strType.equals(":PUBREL")) {
+				outboundMessage = MqttPubRel.encode(message);
 			}
 			
 			else {

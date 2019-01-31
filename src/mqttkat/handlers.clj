@@ -3,35 +3,45 @@
   (:import [org.mqttkat.server MqttServer])
   (:require [mqttkat.spec :as spec]
             [clojurewerkz.triennium.mqtt :as tr]
-            [clojure.spec.alpha :as s]))
+            [clojure.spec.alpha :as s]
+            [clojure.core.async :as async]))
 
+(defn logger [msg & args]
+  (when false
+    (println msg args)))
+
+(def packet-identifier-queue-size 1024)
 (defonce clients (atom {}))
 (defonce inflight (atom {}))
 (defonce sub2 (atom (tr/make-trie)))
 (defonce outbound (atom {}))
+(def packet-identifiers (async/chan packet-identifier-queue-size))
 
+;; pre-load queue
+(doseq [i (range 1 (inc packet-identifier-queue-size))]
+  (async/>!! packet-identifiers i))
 ;;  example
 ;; {"topic" [key_of_client1, key_of_client1, ..]
 ;;  "other_topic" [key_of_clien3]}
-(defonce subscribers (atom {}))
+;(defonce subscribers (atom {}))
 
 (defn add-client [msg]
   (let [client-id (:client-id msg)
-        ;_ (println client-id)
+        _ (logger client-id)
         x (some #(and (= (:client-id (second %)) client-id ) %)  @clients)]
-        ;_ (println "x: " x)]
+        ;_ (logger "x: " x)]
     x))
 
 (defn send-message [keys msg]
   ;(println "sending message  from  clj " (:packet-type msg) " " (:packet-identifier msg))
-  ;;(println (class  keys))
+  ;;(logger (class  keys))
   (let [s (:server (meta @server))]
     (.sendMessage ^MqttServer s keys msg)))
 
 
 (defn connect [msg]
-  (println "clj CONNECT: " msg)
-  ;(println (str "valid connect: " (s/valid? :mqtt/connect msg)))
+  (logger "clj CONNECT: " msg)
+  ;(logger (str "valid connect: " (s/valid? :mqtt/connect msg)))
   ;(s/explain :mqtt/connect msg)
   (add-client msg)
   (swap! clients assoc (:client-key msg) (dissoc msg  :packet-type))
@@ -41,10 +51,10 @@
                  :connect-return-code 0x00}))
 
 (defn connack [msg]
-  (println "CONNACK: " msg))
+  (logger "CONNACK: " msg))
 
 (defn qos-0 [keys topic msg]
-  ;;(println "respond QOS 0 ")
+  ;;(logger "respond QOS 0 ")
   (send-message (mapv #(:client-key %) keys)
     {:packet-type :PUBLISH
      :payload (:payload msg)
@@ -52,32 +62,36 @@
      :qos 0
      :retain? false}))
 
+(defn qos-1-send [keys topic msg]
+  (send-message (mapv #(:client-key %) keys)
+        {:packet-type :PUBLISH
+         :payload (:payload msg)
+         :topic topic
+         :qos 1
+         :retain? false
+         :packet-identifier (async/<!! packet-identifiers)}))
+
+
 (defn qos-1 [keys topic msg]
+  (println  "qos 1 received..." keys)
   (send-message [(:client-key msg)]
     {:packet-type :PUBACK
      :packet-identifier (:packet-identifier msg)})
   (let [qos-0-keys (filter #(zero? (:qos %)) keys)
-        qos-1-keys (filter #(= 1 (:qos %)) keys)]
+        qos-1-keys (filter #(or (= 1 (:qos %)) (= 2 (:qos %))) keys)]
 
-    ;(println (count qos-0-keys) " " (count qos-1-keys))
+    (println (count qos-0-keys) " " (count qos-1-keys))
 
     (when (<  0 (count qos-0-keys))
       (qos-0 qos-0-keys topic msg))
     (when (< 0 (count qos-1-keys))
-      (do
-        (send-message (mapv #(:client-key %) keys)
-              {:packet-type :PUBLISH
-               :payload (:payload msg)
-               :topic topic
-               :qos 1
-               :retain? false
-               :packet-identifier (:packet-identifier msg)})))))
+      (qos-1-send qos-1-keys topic msg))))
         ;(doseq [k qos-1-keys]
-          ;(println "K " k)
+          ;(logger "K " k)
           ;(swap! outbound assoc (:client-key k) (:packet-identifier msg)))))))
 
 (defn qos-2 [keys topic msg]
-  ;(println "QOS 2")
+  ;(logger "QOS 2")
   (swap! inflight assoc [(:client-key msg) (:packet-identifier msg)] {:msg msg :topic topic :keys keys})
   (send-message [(:client-key msg)]
     {:packet-type :PUBREC
@@ -85,40 +99,65 @@
 
 
 (defn publish [msg]
-  ;(println "clj PUBLISH: ")
-  ;(println (str "valid publish: " (s/valid? :mqtt/publish msg)))
+  (logger "clj PUBLISH: ")
+  ;(logger (str "valid publish: " (s/valid? :mqtt/publish msg)))
   ;(s/explain :mqtt/publish msg)
   (let [topic (:topic msg)
         qos (:qos msg)
         ;keys (get @subscribers topic)
         keys (tr/find @sub2 topic)]
-        ;_ (println "Keys: " keys " qos: " qos)]
+        ;_ (logger "Keys: " keys " qos: " qos)]
     (when keys
       (condp = qos
         0 (qos-0 keys topic msg)
         1 (qos-1 keys topic msg)
         2 (qos-2 keys topic msg)))))
 
-(defn puback [msg])
-  ;(println "received PUBACK: "))
+(defn puback [msg]
+  (logger "received PUBACK: "))
   ;(swap! outbound dissoc [(:client-key msg) (:packet-identifier msg)]))
 
 (defn pubrec [msg]
-  (println "received PUBREC: " msg))
+  (logger "received PUBREC: " msg)
+  (send-message [(:client-key msg)]
+     {:packet-type :PUBREL :packet-identifier (:packet-identifier msg)}))
+
+
+(defn qos-2-send [keys topic msg]
+  (let [qos-0-keys (filter #(zero? (:qos %)) keys)
+        qos-1-keys (filter #(= 1 (:qos %)) keys)
+        qos-2-keys (filter #(= 2 (:qos %)) keys)]
+
+    ;(logger (count qos-0-keys) " " (count qos-1-keys))
+
+    (when (<  0 (count qos-0-keys))
+      (qos-0 qos-0-keys topic msg))
+    (when (< 0 (count qos-1-keys))
+      (qos-1-send qos-1-keys topic msg))
+    (when (< 0 (count qos-2-keys))
+      (send-message (mapv #(:client-key %) qos-2-keys)
+            {:packet-type :PUBLISH
+             :payload (:payload msg)
+             :topic topic
+             :qos 2
+             :retain? false
+             :packet-identifier (async/<!! packet-identifiers)}))))
+
 
 (defn pubrel [msg]
-  ;(println "received (PUBREL: " msg)
+  ;(logger "received (PUBREL: " msg)
   (let [packet-identifier (:packet-identifier msg)
         client-key (:client-key msg)]
     (send-message [client-key]
       {:packet-type :PUBCOMP
        :packet-identifier packet-identifier})
     (let [m (get @inflight [client-key packet-identifier])]
-      (qos-0 (:keys m) (:topic m) (:msg m))
+      (qos-2-send (:keys m) (:topic m) (:msg m))
       (swap! inflight dissoc [client-key packet-identifier]))))
 
 (defn pubcomp  [msg]
-  (println "received PUBCOMP: " msg))
+  (logger "received PUBCOMP: " msg)
+  (async/>!! packet-identifiers (:packet-identifier msg)))
 
 (defn add-subscriber [subscribers topic key]
   (if (contains? subscribers topic)
@@ -126,15 +165,15 @@
     (assoc subscribers topic [key])))
 
 (defn subscribe [msg]
-  ;(println "clj SUBSCRIBE:" msg)
+  (logger "clj SUBSCRIBE:" msg)
   (let [client-key (:client-key msg)
         topics (:topics msg)
         qos (mapv #(long (:qos %)) topics)]
-        ;_ (println qos)]
+        ;_ (logger qos)]
     (doseq [t topics]
       ;(swap! subscribers add-subscriber (:topic-filter t) client-key)
       (swap! sub2 tr/insert (:topic-filter t)  {:client-key client-key :qos (:qos t)}))
-    ;(println "subscribers: " @sub2)
+    ;(logger "subscribers: " @sub2)
     (send-message [client-key] {:packet-type :SUBACK
                                 :packet-identifier  (:packet-identifier msg)
                                 :response qos})))
@@ -143,27 +182,27 @@
   (update m topic (fn [v] (filterv #(not= key %) v))))
 
 (defn unsubscribe [msg]
-  (println "clj UNSCUBSCRIBE: " msg)
+  (logger "clj UNSCUBSCRIBE: " msg)
   ;(swap! subscribers remove-subsciber (:topics msg) (:client-key msg))
   (doseq [t (:topics msg)]
-    (swap! sub2 tr/delete (:topic-filter) (:client-key msg))))
+    (swap! sub2 tr/delete (:topic-filter t) (:client-key t))))
 
 
 (defn pingreq [msg]
-  (println "clj PINGREQ: " msg)
+  (logger "clj PINGREQ: " msg)
   (send-message [(:client-key msg)] {:packet-type :PINGRESP}))
 
 (defn pingresp [msg]
-  (println "clj PINGRESP: " msg))
+  (logger "clj PINGRESP: " msg))
 
 
 (defn remove-client-subscriber [m val]
   (into {} (map (fn [[k v]] (let [nv (filterv #(not= val %) v)] {k nv}))  m)))
 
 (defn disconnect [msg]
-  ;(println "clj DISCONNECT: " msg)
+  ;(logger "clj DISCONNECT: " msg)
   ;(println "count: " (count (get @subscribers "test")))
-  (swap! subscribers remove-client-subscriber  (:client-key msg))
+  ;(swap! subscribers remove-client-subscriber  (:client-key msg))
   (swap! clients dissoc (:client-key msg)))
   ;(println "subscribers: " @subscribers)
   ;(println "count: " (count (get @subscribers "test"))))

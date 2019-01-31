@@ -12,6 +12,10 @@
 
 (def client-atom (atom nil))
 
+(defn logger [msg & args]
+  (when true
+    (println msg args)))
+
 (defn handler-fn [msg]
   (println "clj handler: " msg))
 
@@ -32,14 +36,14 @@
   ([host port handler]
    (client host port handler)
    (let [map (gen/generate (s/gen :mqtt/connect))
-         _ (println "S " map)
+         _ (logger "S " map)
          bufs (MqttConnect/encode map)]
      (.sendMessage ^MqttClient @client-atom bufs))))
 
 (defn publish
   ([topic] (let [map (gen/generate (s/gen :mqtt/publish-qos-gt0))
                  map (assoc map :topic topic)
-                 ;_ (println "S " map)
+                 _ (logger "S " map)
                  buf (MqttPublish/encode map)]
              (.sendMessage ^MqttClient @client-atom buf)
              (select-keys map [:qos :payload :packet-identifier])))
@@ -49,7 +53,7 @@
 
 (defn subscribe []
   (let [map (gen/generate (s/gen :mqtt/subscribe))
-        _ (println "S " map)
+        _ (logger "S " map)
         bufs (MqttSubscribe/encode map)]
      (.sendMessage ^MqttClient @client-atom bufs)
     map))
@@ -75,18 +79,18 @@
 
 (defn puback [id]
   (let [map {:packet-type :PUBACK :packet-identifier id}
-        ;_ (println "S " map)
+        _ (logger "S " map)
         buf (MqttPubAck/encode map)]
     (.sendMessage ^MqttClient @client-atom buf)))
 
 (defn pubrec [id]
   (let [map {:packet-type :PUBREC :packet-identifier id}
-        ;_ (println "S " map)
+        _ (logger "S " map)
         buf (MqttPubRec/encode map)]
     (.sendMessage ^MqttClient @client-atom buf)))
 
 (defn pubcomp [id]
   (let [map {:packet-type :PUBCOMP :packet-identifier id}
-        ;_ (println "S " map)
+        _ (logger "S " map)
         buf (MqttPubComp/encode map)]
     (.sendMessage ^MqttClient @client-atom buf)))

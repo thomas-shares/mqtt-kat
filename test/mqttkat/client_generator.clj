@@ -34,7 +34,7 @@
 (defn connack []
   (let [msg (async/<!! channel)]
     (is (= (:packet-type msg) :CONNACK))
-    (println "R " msg)))
+    (client/logger "R " msg)))
 
 (defn compare-packet-identifier [p-id-1 p-id-2]
   (is (= p-id-1 p-id-2)))
@@ -49,15 +49,14 @@
 
 (defn process-qos-one [msg]
   (when-not (zero? (:qos msg))
-    (do ;(println "SENDING PUBACK!!!!!! " (:packet-identifier msg))
-        (client/puback (:packet-identifier msg)))))
+    (client/puback (:packet-identifier msg))))
 
 (defn qos-one [payload packet-identifier]
   ;(println "QOS1 " packet-identifier)
   (let [first-message (async/<!! channel)
-        ;_ (println "first: " first-message)
-        second-message (async/<!! channel)]
-        ;_ (println "second " second-message)]
+        _ (client/logger  "first: " first-message)
+        second-message (async/<!! channel)
+        _ (client/logger  "second " second-message)]
     (if (= :PUBACK (:packet-type first-message))
       (do (let [received-packet-identifier (:packet-identifier first-message)]
             (compare-packet-identifier packet-identifier received-packet-identifier)
@@ -75,20 +74,20 @@
     2 (do
         (client/pubrec (:packet-identifier msg))
         (let [pubrel (async/<!! channel)]
-          (println "R " pubrel)
+          (client/logger  "R " pubrel)
           (is (= :PUBREL (:packet-type pubrel)))
           (client/pubcomp (:packet-identifier pubrel))))))
 
 (defn qos-two [payload packet-identifier]
-  ;(println "QOS2 " packet-identifier)
+  ;(client/logger  "QOS2 " packet-identifier)
   (let [pubrec (async/<!! channel)]
-    ;(println "R " pubrec)
+    (client/logger  "R " pubrec)
     (compare-packet-identifier packet-identifier (:packet-identifier pubrec))
     (client/pubrel packet-identifier)
     (let [first-message (async/<!! channel)
           second-message (async/<!! channel)]
-      ;(println "R "first-message)
-      ;(println "R " second-message)
+      (client/logger  "R "first-message)
+      (client/logger  "R " second-message)
       (if (= :PUBCOMP (:packet-type first-message))
         (do (let [packet-identifier (:packet-identifier first-message)]
               (compare-packet-identifier packet-identifier (:packet-identifier first-message))
@@ -101,7 +100,7 @@
 
 (defn publish []
   (let [topic (rand-nth (into [] @subscribe-topics))
-        ;;_ (println "received" topic)
+        _ (client/logger  "R" topic)
         {payload :payload qos :qos packet-identifier :packet-identifier} (client/publish topic)]
      (condp = qos
        0 (qos-zero payload)
@@ -120,7 +119,7 @@
     (swap! subscribe-topics (partial apply conj) topics)
     (let [msg (async/<!! channel)
           ret-count (count (:response msg))]
-      (println "R " msg)
+      (client/logger  "R " msg)
       (is (= c ret-count)))))
 
 
@@ -132,7 +131,7 @@
     ;; calling Causatum's event-stream function with our model and an initial seed
     ;; state.
    (let [start-time (System/currentTimeMillis)]
-     (doseq [{state :state} (take 100000   (es/event-stream model [{:rtime 0, :state :connect}]))]
+     (doseq [{state :state} (take 1500    (es/event-stream model [{:rtime 0, :state :connect}]))]
        ;;(println "State:" state)
        ;;(Thread/sleep 10)
        (({:connect connect, :publish publish, :disconnect disconnect, :connack connack :subscribe subscribe} state)))

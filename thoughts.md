@@ -2,6 +2,10 @@
 
 In this file will go my thoughts and ramblings about this project and what I have done and what I might do next.
 
+## 20190128
+
+The broker now supports QOS 1 on a publish to a client. I have also started using the Triennium library. That was very straight forward even though at the moment it only does a subscribe at the moment, as I haven't tested the unsubscribe yet. Nor does the disconnect clear all the subscribers from a singe client. I also managed to make a flamegraph wit the profiler, but not quite sure yet as to what it is telling me.
+
 ## 20190125
 
 QOS 0, 1 and 2 works both ways for the client... and when when testing with Mosquitto I can generate almost 8k message/second for one single threaded client.

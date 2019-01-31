@@ -62,7 +62,7 @@
 ;;publish
 (s/def :mqtt/duplicate? boolean?)
 (s/def :mqtt-qos-0/qos #{0})
-(s/def :mqtt-qos-gt0/qos #{1})
+(s/def :mqtt-qos-gt0/qos #{1 2})
 (s/def :mqtt/retain? boolean?)
 (s/def :mqtt-publish/packet-type #{:PUBLISH})
 
@@ -90,7 +90,7 @@
                                   :mqtt/packet-identifier])))
 
 (s/def :mqtt/topic-filter (s/and string? #(<= 1 (count %))))
-(s/def :mqtt/qos #{0 1})
+(s/def :mqtt/qos #{0 1 2})
 (s/def :mqtt/topic_
   (s/keys :req-un [:mqtt/topic-filter
                    :mqtt/qos]))
