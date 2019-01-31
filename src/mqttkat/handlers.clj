@@ -54,7 +54,7 @@
   (logger "CONNACK: " msg))
 
 (defn qos-0 [keys topic msg]
-  ;;(logger "respond QOS 0 ")
+  (logger "respond QOS 0 ")
   (send-message (mapv #(:client-key %) keys)
     {:packet-type :PUBLISH
      :payload (:payload msg)
@@ -63,6 +63,7 @@
      :retain? false}))
 
 (defn qos-1-send [keys topic msg]
+  (logger "respond qos 1")
   (send-message (mapv #(:client-key %) keys)
         {:packet-type :PUBLISH
          :payload (:payload msg)
@@ -73,14 +74,14 @@
 
 
 (defn qos-1 [keys topic msg]
-  (println  "qos 1 received..." keys)
+  (logger  "qos 1 received..." keys)
   (send-message [(:client-key msg)]
     {:packet-type :PUBACK
      :packet-identifier (:packet-identifier msg)})
   (let [qos-0-keys (filter #(zero? (:qos %)) keys)
         qos-1-keys (filter #(or (= 1 (:qos %)) (= 2 (:qos %))) keys)]
 
-    (println (count qos-0-keys) " " (count qos-1-keys))
+    ;;(println (count qos-0-keys) " " (count qos-1-keys))
 
     (when (<  0 (count qos-0-keys))
       (qos-0 qos-0-keys topic msg))
@@ -91,7 +92,7 @@
           ;(swap! outbound assoc (:client-key k) (:packet-identifier msg)))))))
 
 (defn qos-2 [keys topic msg]
-  ;(logger "QOS 2")
+  (logger "QOS 2")
   (swap! inflight assoc [(:client-key msg) (:packet-identifier msg)] {:msg msg :topic topic :keys keys})
   (send-message [(:client-key msg)]
     {:packet-type :PUBREC
@@ -114,7 +115,8 @@
         2 (qos-2 keys topic msg)))))
 
 (defn puback [msg]
-  (logger "received PUBACK: "))
+  (logger "received PUBACK: ")
+  (async/>!! packet-identifiers (:packet-identifier msg)))
   ;(swap! outbound dissoc [(:client-key msg) (:packet-identifier msg)]))
 
 (defn pubrec [msg]
@@ -128,7 +130,7 @@
         qos-1-keys (filter #(= 1 (:qos %)) keys)
         qos-2-keys (filter #(= 2 (:qos %)) keys)]
 
-    ;(logger (count qos-0-keys) " " (count qos-1-keys))
+    (logger (count qos-0-keys) " " (count qos-1-keys) " " (count qos-2-keys))
 
     (when (<  0 (count qos-0-keys))
       (qos-0 qos-0-keys topic msg))
@@ -145,7 +147,7 @@
 
 
 (defn pubrel [msg]
-  ;(logger "received (PUBREL: " msg)
+  (logger "received (PUBREL: " msg)
   (let [packet-identifier (:packet-identifier msg)
         client-key (:client-key msg)]
     (send-message [client-key]
