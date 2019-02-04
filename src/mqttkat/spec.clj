@@ -6,7 +6,7 @@
 (def short-values (s/int-in 1 65534))
 
 (s/def :mqtt/payload bytes?)
-;(s/def :mqtt/payload string?)
+;;(s/def :mqtt/payload string?)
 
 (s/def :mqtt/topic string?)
 (s/def :mqtt/packet-identifier short-values)
@@ -158,3 +158,23 @@
 (s/def :mqtt-disconnect/packet-type #{:DISCONNECT})
 (s/def :mqtt/disconnect
   (s/keys :req-un [:mqtt-disconnect/packet-type]))
+
+
+
+
+
+(comment
+  (require '[clojure.spec.alpha :as s])
+  (require '[clojure.spec.gen.alpha :as gen])
+  (s/def ::string-segment (s/and  string? #(<= 1 (count %))))
+  (s/def ::+-segment #{"+"})
+  (s/def ::sep #{"/"})
+  (s/def ::hash #{"/#"})
+
+  (s/def ::segment (s/cat :sep ::sep :segment
+                          (s/alt :string ::string-segment
+                                 :+ ::+-segment)))
+  (s/def ::topic-filter (s/cat :seperator (s/? ::sep) :segments (s/+ ::segment) :hash (s/? ::hash)))
+  (gen/sample (s/gen ::topic-filter))
+  (doseq [x (map #(apply str %)  (gen/sample (s/gen ::topic-filter)))]
+    (println x)))

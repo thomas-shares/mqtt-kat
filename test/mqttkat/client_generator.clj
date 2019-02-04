@@ -22,16 +22,17 @@
                {:connack {:weight 1}}]
      :connack [{:subscribe {:weight 1}}]
      :subscribe [{:publish {:weight 1}}]
-     :publish [{:publish {:weight 1}}]
-               ;{:publish {:weight 2}}]
+     :publish [{:publish {:weight 2}}]
+              ;{:disconnect {:weight 1}}]
      :disconnect [{:connect {:weight 1}}]}})
 
+(defn client []
+  (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn handler-fn 2)))
 
+(defn connect [client]
+  (client/connect client))
 
-(defn connect []
-  (client/connect "localhost" 1883 (MqttHandler. ^clojure.lang.IFn handler-fn 2)))
-
-(defn connack []
+(defn connack [client]
   (let [msg (async/<!! channel)]
     (is (= (:packet-type msg) :CONNACK))
     (client/logger "R " msg)))
@@ -47,11 +48,11 @@
     (compare-payload payload (:payload  msg))
     (is (= 0 (:qos msg)))))
 
-(defn process-qos-one [msg]
+(defn process-qos-one [client msg]
   (when-not (zero? (:qos msg))
-    (client/puback (:packet-identifier msg))))
+    (client/puback client (:packet-identifier msg))))
 
-(defn qos-one [payload packet-identifier]
+(defn qos-one [client payload packet-identifier]
   ;(println "QOS1 " packet-identifier)
   (let [first-message (async/<!! channel)
         _ (client/logger  "first: " first-message)
@@ -61,29 +62,29 @@
       (do (let [received-packet-identifier (:packet-identifier first-message)]
             (compare-packet-identifier packet-identifier received-packet-identifier)
             (compare-payload payload (:payload second-message))
-            (process-qos-one second-message)))
+            (process-qos-one client second-message)))
       (do (let [received-packet-identifier (:packet-identifier second-message)]
             (compare-packet-identifier packet-identifier received-packet-identifier)
             (compare-payload payload (:payload first-message))
-            (process-qos-one first-message))))))
+            (process-qos-one client first-message))))))
 
-(defn process-return [msg]
+(defn process-return [client msg]
   (condp = (:qos msg)
     0 nil
-    1 (process-qos-one msg)
+    1 (process-qos-one client msg)
     2 (do
-        (client/pubrec (:packet-identifier msg))
+        (client/pubrec client (:packet-identifier msg))
         (let [pubrel (async/<!! channel)]
           (client/logger  "R " pubrel)
           (is (= :PUBREL (:packet-type pubrel)))
-          (client/pubcomp (:packet-identifier pubrel))))))
+          (client/pubcomp client (:packet-identifier pubrel))))))
 
-(defn qos-two [payload packet-identifier]
+(defn qos-two [client payload packet-identifier]
   ;(client/logger  "QOS2 " packet-identifier)
   (let [pubrec (async/<!! channel)]
     (client/logger  "R " pubrec)
     (compare-packet-identifier packet-identifier (:packet-identifier pubrec))
-    (client/pubrel packet-identifier)
+    (client/pubrel client packet-identifier)
     (let [first-message (async/<!! channel)
           second-message (async/<!! channel)]
       (client/logger  "R "first-message)
@@ -92,28 +93,28 @@
         (do (let [packet-identifier (:packet-identifier first-message)]
               (compare-packet-identifier packet-identifier (:packet-identifier first-message))
               (compare-payload payload (:payload second-message))
-              (process-return second-message)))
+              (process-return client  second-message)))
         (do (let [packet-identifier (:packet-identifier second-message)]
               (compare-packet-identifier packet-identifier (:packet-identifier second-message))
               (compare-payload payload (:payload first-message))
-              (process-return first-message)))))))
+              (process-return client first-message)))))))
 
-(defn publish []
+(defn publish [client]
   (let [topic (rand-nth (into [] @subscribe-topics))
-        _ (client/logger  "R" topic)
-        {payload :payload qos :qos packet-identifier :packet-identifier} (client/publish topic)]
+        ;_ (client/logger  "S" topic)
+        {payload :payload qos :qos packet-identifier :packet-identifier} (client/publish client topic)]
      (condp = qos
        0 (qos-zero payload)
-       1 (qos-one payload packet-identifier)
-       2 (qos-two payload packet-identifier))))
+       1 (qos-one client payload packet-identifier)
+       2 (qos-two client payload packet-identifier))))
 
 
-(defn disconnect []
+(defn disconnect [client]
   (reset! subscribe-topics #{})
   (client/disconnect))
 
-(defn subscribe []
-  (let [topic-filter (client/subscribe)
+(defn subscribe [client]
+  (let [topic-filter (client/subscribe client)
         topics (map #(:topic-filter % ) (:topics topic-filter))
         c (count topics)]
     (swap! subscribe-topics (partial apply conj) topics)
@@ -130,11 +131,12 @@
     ;; We create an event stream (or chain of state transitions, if you will) by
     ;; calling Causatum's event-stream function with our model and an initial seed
     ;; state.
-   (let [start-time (System/currentTimeMillis)]
-     (doseq [{state :state} (take 100000    (es/event-stream model [{:rtime 0, :state :connect}]))]
+   (let [start-time (System/currentTimeMillis)
+         client (client)]
+     (doseq [{state :state} (take 100000  (es/event-stream model [{:rtime 0, :state :connect}]))]
        ;;(println "State:" state)
        ;;(Thread/sleep 10)
-       (({:connect connect, :publish publish, :disconnect disconnect, :connack connack :subscribe subscribe} state)))
+       (({:connect connect, :publish publish, :disconnect disconnect, :connack connack :subscribe subscribe} state) client))
      (let [time (/ (- (System/currentTimeMillis) start-time) 1000.0)]
        (println
          "sent per sec "(/ (MqttStat/sentMessages) time)

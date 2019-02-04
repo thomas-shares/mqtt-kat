@@ -9,12 +9,12 @@
 (defn logger [msg & args]
   (when false
     (println msg args)))
-
+ 
 (def packet-identifier-queue-size 1024)
-(defonce clients (atom {}))
-(defonce inflight (atom {}))
-(defonce sub2 (atom (tr/make-trie)))
-(defonce outbound (atom {}))
+(def clients (atom {}))
+(def inflight (atom {}))
+(def sub2 (atom (tr/make-trie)))
+(def outbound (atom {}))
 (def packet-identifiers (async/chan packet-identifier-queue-size))
 
 ;; pre-load queue
@@ -33,7 +33,7 @@
     x))
 
 (defn send-message [keys msg]
-  ;(println "sending message  from  clj " (:packet-type msg) " " (:packet-identifier msg))
+  (logger "sending message  from  clj " (:packet-type msg) " " (:packet-identifier msg))
   ;;(logger (class  keys))
   (let [s (:server (meta @server))]
     (.sendMessage ^MqttServer s keys msg)))
@@ -64,13 +64,14 @@
 
 (defn qos-1-send [keys topic msg]
   (logger "respond qos 1")
-  (send-message (mapv #(:client-key %) keys)
+  (doseq [key (mapv #(:client-key %) keys)]
+      (send-message [key]
         {:packet-type :PUBLISH
          :payload (:payload msg)
          :topic topic
          :qos 1
          :retain? false
-         :packet-identifier (async/<!! packet-identifiers)}))
+         :packet-identifier (async/<!! packet-identifiers)})))
 
 
 (defn qos-1 [keys topic msg]
@@ -86,10 +87,10 @@
     (when (<  0 (count qos-0-keys))
       (qos-0 qos-0-keys topic msg))
     (when (< 0 (count qos-1-keys))
-      (qos-1-send qos-1-keys topic msg))))
-        ;(doseq [k qos-1-keys]
-          ;(logger "K " k)
-          ;(swap! outbound assoc (:client-key k) (:packet-identifier msg)))))))
+       (qos-1-send qos-1-keys topic msg))))
+      ;  (doseq [k qos-1-keys]
+      ;    (logger "K " k)
+      ;    (swap! outbound assoc (:client-key k) (:packet-identifier msg))))))
 
 (defn qos-2 [keys topic msg]
   (logger "QOS 2")
@@ -100,14 +101,14 @@
 
 
 (defn publish [msg]
-  (logger "clj PUBLISH: ")
+  (logger "clj PUBLISH: " msg)
   ;(logger (str "valid publish: " (s/valid? :mqtt/publish msg)))
   ;(s/explain :mqtt/publish msg)
   (let [topic (:topic msg)
         qos (:qos msg)
         ;keys (get @subscribers topic)
-        keys (tr/find @sub2 topic)]
-        ;_ (logger "Keys: " keys " qos: " qos)]
+        keys (tr/matching-vals @sub2 topic)
+        _ (logger "Keys: " keys " qos: " qos)]
     (when keys
       (condp = qos
         0 (qos-0 keys topic msg)
@@ -115,7 +116,7 @@
         2 (qos-2 keys topic msg)))))
 
 (defn puback [msg]
-  (logger "received PUBACK: ")
+  (logger "received PUBACK: " (:packet-identifier msg))
   (async/>!! packet-identifiers (:packet-identifier msg)))
   ;(swap! outbound dissoc [(:client-key msg) (:packet-identifier msg)]))
 
@@ -137,13 +138,14 @@
     (when (< 0 (count qos-1-keys))
       (qos-1-send qos-1-keys topic msg))
     (when (< 0 (count qos-2-keys))
-      (send-message (mapv #(:client-key %) qos-2-keys)
+      (doseq [key (mapv #(:client-key %) qos-2-keys)]
+        (send-message [key]
             {:packet-type :PUBLISH
              :payload (:payload msg)
              :topic topic
              :qos 2
              :retain? false
-             :packet-identifier (async/<!! packet-identifiers)}))))
+             :packet-identifier (async/<!! packet-identifiers)})))))
 
 
 (defn pubrel [msg]

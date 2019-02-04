@@ -6,7 +6,7 @@ The idea is to see if a MQTT Broker could be as scalable as http-kit and handle 
 
 ## What does it do at the moment?
 
-Well... with the latest push it can actually forward a `PUBLISH`ed message to multiple clients that have `SUBSCRIBE`d to a particular topic. I have tested this with three subscribers concurrently. At the moment there is no support for wildcards in subscriptions. While those message are accepted and acknowledged nothing is done with them.
+Well... with the latest push it can actually forward a `PUBLISH`ed message to multiple clients that have `SUBSCRIBE`d to a particular topic. I have tested this with three subscribers concurrently.
 
 ## Are there any bugs?
 
@@ -18,9 +18,8 @@ Loads. Too many to mention actually. But here are a few I know of:
 * Disconnecting clients in error cases is not fully implemented.
 * Declining `CONNECT` packages is needed.
 * `UNSUBSCRIBE` is not handled.
-* `SUBACK` is hardcoded
 * Nothing is done for pings, no time out and subsequent disconnect.
-* Only QOS 0 is assumed at the moment, no code in place for other QOS's
+* At the moment the message flows for good path QOS 0, 1 and 2 is in place. But there is no error recovery if one of the packets gets lost. So no resending of packets.
 
 ## What about the name?
 
@@ -61,6 +60,8 @@ I call `(start)` function in the repl and then use an MQTT client to send packet
 ## Thank you
 
 First of all an extra big thank you to [Feng Shen](http://shenfeng.me/) for making http-kit. I have borrowed heavily from his code. And also a big thank you to the [Eclipse Paho Project](https://www.eclipse.org/paho/). I have used their [code](https://github.com/eclipse/paho.mqtt.java) as inspiration as well and yes I have copied the MQTT packet length code from them.
+
+And also a big thank you for the people from [ClojureWerkz](http://clojurewerkz.org/) for their [triennium](https://github.com/clojurewerkz/triennium) library. It just works.
 
 ## License
 

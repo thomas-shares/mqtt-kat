@@ -6,6 +6,7 @@ import java.nio.channels.Selector;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
@@ -17,7 +18,7 @@ public class MqttSendExecutor {
 		
 	public MqttSendExecutor(Selector selector, int thread) {
 		PrefixThreadFactory factory = new PrefixThreadFactory("senders-");
-	    BlockingQueue<Runnable> queue = new ArrayBlockingQueue<Runnable>(8);
+	    BlockingQueue<Runnable> queue = new LinkedBlockingQueue<Runnable>();
 	    this.execs = new ThreadPoolExecutor(thread, thread, 0, TimeUnit.MILLISECONDS, queue, factory);
 	    this.selector = selector;
 	}

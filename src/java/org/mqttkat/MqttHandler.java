@@ -4,6 +4,7 @@ import clojure.lang.IPersistentMap;
 
 import clojure.lang.IFn;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
@@ -46,7 +47,7 @@ public class MqttHandler implements IHandler {
     public MqttHandler(IFn handler, int thread) {
       this.handler = handler;
       PrefixThreadFactory factory = new PrefixThreadFactory("prefix");
-      BlockingQueue<Runnable> queue = new ArrayBlockingQueue<Runnable>(8);
+      BlockingQueue<Runnable> queue = new LinkedBlockingQueue<Runnable>();
       this.execs = new ThreadPoolExecutor(thread, thread, 0, TimeUnit.MILLISECONDS, queue, factory);
     }
 
