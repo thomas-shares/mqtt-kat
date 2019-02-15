@@ -285,9 +285,21 @@ public class MqttServer implements Runnable {
 		 }
 	  }
 	
-	public void sendMessage( final clojure.lang.PersistentVector keys, final Map<Keyword, ?> message) throws IOException {
-		ByteBuffer buffer = MqttEncode.mqttEncoder(message);
-		
+//	public void sendMessage( final clojure.lang.PersistentVector keys, final Map<Keyword, ?> message) throws IOException {
+//		ByteBuffer buffer = MqttEncode.mqttEncoder(message);
+//		
+//		Iterator<?> it = keys.iterator();
+//
+//		while(it.hasNext() ) {
+//			SelectionKey key = (SelectionKey) it.next();
+//			ByteBuffer copyBuf = buffer.duplicate();
+//			executor.submit(copyBuf, key);
+//			sentMessages.getAndIncrement();
+//			sentBytes.getAndAdd(buffer.limit());
+//		}
+//	}
+	
+	public void sendMessageBuffer( final clojure.lang.PersistentVector keys, final ByteBuffer buffer) throws IOException {
 		Iterator<?> it = keys.iterator();
 
 		while(it.hasNext() ) {
@@ -298,4 +310,5 @@ public class MqttServer implements Runnable {
 			sentBytes.getAndAdd(buffer.limit());
 		}
 	}
+
 }

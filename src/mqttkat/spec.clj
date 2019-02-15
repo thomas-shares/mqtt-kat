@@ -1,5 +1,7 @@
 (ns mqttkat.spec
-  (:require [clojure.spec.alpha :as s]))
+  (:require [clojure.spec.alpha :as s]
+            [clojure.spec.gen.alpha :as gen]
+            [clojure.test.check.generators :as gen2]))
 
 (set! *warn-on-reflection* true)
 
@@ -160,12 +162,51 @@
   (s/keys :req-un [:mqtt-disconnect/packet-type]))
 
 
+(def test-gen
+  (gen/fmap
+    (fn [chars]
+      (apply str chars))
+    (gen/vector (gen/char-alpha) 1 100)))
 
+
+(def test-gen2)
+  ;(gen/fmap))
+  ;  (gen/frequency [[5 gen/int] [3 (gen/vector gen/int)] [2 gen/boolean]])))
+
+
+(s/def ::test
+  (s/with-gen string?
+    (fn [] test-gen2)))
+
+
+;; /*[[A-Za-z0-9]+|/]*#?
 
 
 (comment
+
+
+
   (require '[clojure.spec.alpha :as s])
   (require '[clojure.spec.gen.alpha :as gen])
+
+  (s/def ::string-segment #{\a \b \c}
+    (s/def ::+-segment #{\+})
+    (s/def ::sep #{\/})
+    (s/def ::hash #{\#})
+    (s/def ::segment (s/cat :sep ::sep :segment
+                            (s/alt :string ::string-segment
+                                   :+ ::+-segment)))
+    (s/def ::topic-filter (s/cat :segments (s/+ ::segment) :hash (s/? ::hash)))
+    (gen/sample (gen/fmap (fn [chars]
+                            (str/join chars))
+                          (s/gen ::topic-filter)))
+    ("/c#" "/a#" "/b/+" "/+/+/+" "/c/+" "/+#" "/+/c#" "/+/+/b/+#" "/c/+/+/+/+/+/a/b" "/a/+/c/b/+/c/+#"))
+
+  
+
+
+
+
   (s/def ::string-segment (s/and  string? #(<= 1 (count %))))
   (s/def ::+-segment #{"+"})
   (s/def ::sep #{"/"})

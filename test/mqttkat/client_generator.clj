@@ -124,7 +124,7 @@
       (is (= c ret-count)))))
 
 
-
+ 
 
 
 (deftest simulation
@@ -133,7 +133,7 @@
     ;; state.
    (let [start-time (System/currentTimeMillis)
          client (client)]
-     (doseq [{state :state} (take 100000  (es/event-stream model [{:rtime 0, :state :connect}]))]
+     (doseq [{state :state} (take 100   (es/event-stream model [{:rtime 0, :state :connect}]))]
        ;;(println "State:" state)
        ;;(Thread/sleep 10)
        (({:connect connect, :publish publish, :disconnect disconnect, :connack connack :subscribe subscribe} state) client))
