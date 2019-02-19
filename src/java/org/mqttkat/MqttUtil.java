@@ -12,7 +12,8 @@ public abstract class MqttUtil {
 	protected static final String STRING_ENCODING = "UTF-8";
 
 	public static String decodeUTF8(byte[] input, int offset) throws IOException 	{
-		short encodedLength = (short)((input[offset]<<8) | input[1+offset]);
+		//short encodedLength = (short)((input[offset]<<8) | input[1+offset]);
+		int encodedLength = twoBytesToInt(input[offset], input[1+offset]);
 		String ret =  new String(Arrays.copyOfRange(input,(offset + 2),(offset + 2 + encodedLength)), STRING_ENCODING);
 		//System.out.println("ret: " +  ret + " length: " + encodedLength + " string length: " + ret.length());
 		return ret;
@@ -90,6 +91,13 @@ public abstract class MqttUtil {
 		//log("hoog: " +  b1 + "  laag: " + b2);
 		Long ret = Short.toUnsignedLong((short) (b1<<8)) + Short.toUnsignedLong((short)(b2 & 0xFF));
 		//log("ret: " +  ret);
+		return ret;
+	}
+	
+	public static int twoBytesToInt(byte b1, byte b2) {
+		//log("hoog: " + b1 + "  " +  (b1<<8) + "  laag: " + b2);
+
+		int ret = Short.toUnsignedInt((short) (b1<<8)) + Short.toUnsignedInt((short) (b2 & 0xFF));
 		return ret;
 	}
 }

@@ -31,7 +31,7 @@ public class MqttServer implements Runnable {
 	private Thread serverThread;
 	private final IHandler handler;
 	private final int port;
-	private ByteBuffer buf = ByteBuffer.allocate(1024);
+	private ByteBuffer buf = ByteBuffer.allocate(4096);
 	private MqttSendExecutor executor;
 
 	public MqttServer(String ip, int port, IHandler handler) throws IOException {
@@ -46,14 +46,17 @@ public class MqttServer implements Runnable {
 	}
 
    private void closeKey(final SelectionKey key) {
+	   System.out.println("closing key: " + key.toString());
 		try {
 			IPersistentMap incoming = MqttDisconnect.decode(key, (byte)0x00, new byte[] {0x0});
 			handler.handle(incoming);
-		} catch (IOException ignore) {
+		} catch (IOException e) {
+        	System.out.println(e.getMessage());
 		}
         try {
             key.channel().close();
-        } catch (Exception ignore) {
+        } catch (Exception e) {
+        	System.out.println(e.getMessage());
         }
     }
 	
@@ -115,7 +118,7 @@ public class MqttServer implements Runnable {
 				type = (byte) ((bytes[0] & 0xff) >> 4);
 				flags = (byte) (bytes[0] &= 0x0f);
 	
-				/*
+				
 				if (type == GenericMessage.MESSAGE_CONNECT) {
 					System.out.println("Server: CONNECT");
 				} else if ( type == GenericMessage.MESSAGE_CONNACK) {
@@ -131,7 +134,7 @@ public class MqttServer implements Runnable {
 				} else if (type == GenericMessage.MESSAGE_PUBCOMP) {
 					System.out.println("PUBCOMP");
 				} else if (type == GenericMessage.MESSAGE_SUBSCRIBE) {
-					System.out.println("SUBSCRIBE");
+					System.out.println("Server: SUBSCRIBE");
 				} else if( type == GenericMessage.MESSAGE_SUBACK) {
 					System.out.println("SUBACK");
 				} else if (type == GenericMessage.MESSAGE_UNSUBSCRIBE) {
@@ -151,7 +154,7 @@ public class MqttServer implements Runnable {
 					System.out.println("FAIL!!!!!! INVALID packet sent: " + type);
 				}
 	
-	*/			byte digit;
+				byte digit;
 				int multiplier = 1;
 				//System.out.println( "limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity() );
 				int msgLength = 0;
@@ -204,7 +207,7 @@ public class MqttServer implements Runnable {
 					incoming = MqttPingResp.decode(key, flags);
 				} else if (type == GenericMessage.MESSAGE_DISCONNECT) {
 					incoming = MqttDisconnect.decode(key, flags, remainAndPayload);
-					closeKey(key);
+					//closeKey(key);
 				} else if ( type ==  GenericMessage.MESSAGE_AUTHENTICATION) {
 					incoming = MqttAuthenticate.decode(key, flags, remainAndPayload);
 				} else {

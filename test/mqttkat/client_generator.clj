@@ -101,7 +101,7 @@
 
 (defn publish [client]
   (let [topic (rand-nth (into [] @subscribe-topics))
-        ;_ (client/logger  "S" topic)
+        _ (client/logger  "S" topic)
         {payload :payload qos :qos packet-identifier :packet-identifier} (client/publish client topic)]
      (condp = qos
        0 (qos-zero payload)
@@ -124,7 +124,7 @@
       (is (= c ret-count)))))
 
 
- 
+
 
 
 (deftest simulation

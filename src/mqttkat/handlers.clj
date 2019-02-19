@@ -47,8 +47,8 @@
 (defn send-message [keys msg]
   (logger "sending message  from  clj " (:packet-type msg) " " (:packet-identifier msg))
   ;;(logger (class  keys))
-  (let [s (:server (meta @server))]
-    (.sendMessage ^MqttServer s keys msg)))
+  (let [s (:server (meta @server))]))
+  ;  (.sendMessage ^MqttServer s keys msg)))
 
 (defn send-buffer [keys buf]
   (logger "sending buffer  from  clj ")
@@ -225,7 +225,7 @@
 (defn disconnect [msg]
   ;(logger "clj DISCONNECT: " msg)
   ;(println "count: " (count (get @subscribers "test")))
-  (swap! sub2 tr/delete-matching  (:client-key msg))
+  ;(swap! sub2 tr/delete-matching  (:client-key msg))
   (swap! clients dissoc (:client-key msg)))
   ;(println "subscribers: " @subscribers)
   ;(println "count: " (count (get @subscribers "test"))))

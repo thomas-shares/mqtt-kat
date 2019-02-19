@@ -91,7 +91,23 @@
                                   :mqtt/payload
                                   :mqtt/packet-identifier])))
 
-(s/def :mqtt/topic-filter (s/and string? #(<= 1 (count %))))
+(s/def ::string-segment (s/and string? #(<= 5 (count %))))
+(s/def ::+-segment #{\+})
+(s/def ::sep #{\/})
+(s/def ::hash #{"/#"})
+(s/def ::segment (s/cat :sep ::sep :segment
+                         (s/alt :string ::string-segment
+                                :+ ::+-segment)))
+(s/def ::topic-filter (s/cat :segments (s/+ ::segment) :hash (s/? ::hash)))
+(s/def :mqtt/topic-filter
+  (s/with-gen string?
+    #(gen/fmap (fn [chars]
+                 (clojure.string/join chars))
+           (s/gen ::topic-filter))))
+
+ 
+
+;(s/def :mqtt/topic-filter (s/and string? #(<= 1 (count %))))
 (s/def :mqtt/qos #{0 1 2})
 (s/def :mqtt/topic_
   (s/keys :req-un [:mqtt/topic-filter
@@ -161,53 +177,27 @@
 (s/def :mqtt/disconnect
   (s/keys :req-un [:mqtt-disconnect/packet-type]))
 
-
-(def test-gen
-  (gen/fmap
-    (fn [chars]
-      (apply str chars))
-    (gen/vector (gen/char-alpha) 1 100)))
-
-
-(def test-gen2)
-  ;(gen/fmap))
-  ;  (gen/frequency [[5 gen/int] [3 (gen/vector gen/int)] [2 gen/boolean]])))
-
-
-(s/def ::test
-  (s/with-gen string?
-    (fn [] test-gen2)))
-
-
 ;; /*[[A-Za-z0-9]+|/]*#?
 
-
 (comment
-
-
-
   (require '[clojure.spec.alpha :as s])
   (require '[clojure.spec.gen.alpha :as gen])
 
-  (s/def ::string-segment #{\a \b \c}
-    (s/def ::+-segment #{\+})
-    (s/def ::sep #{\/})
-    (s/def ::hash #{\#})
-    (s/def ::segment (s/cat :sep ::sep :segment
-                            (s/alt :string ::string-segment
-                                   :+ ::+-segment)))
-    (s/def ::topic-filter (s/cat :segments (s/+ ::segment) :hash (s/? ::hash)))
-    (gen/sample (gen/fmap (fn [chars]
-                            (str/join chars))
-                          (s/gen ::topic-filter)))
-    ("/c#" "/a#" "/b/+" "/+/+/+" "/c/+" "/+#" "/+/c#" "/+/+/b/+#" "/c/+/+/+/+/+/a/b" "/a/+/c/b/+/c/+#"))
-
-  
+  (s/def ::string-segment (s/and string? #(<= 5 (count %))))
+  (s/def ::+-segment #{\+})
+  (s/def ::sep #{\/})
+  (s/def ::hash #{"/#"})
+  (s/def ::segment (s/cat :sep ::sep :segment
+                           (s/alt :string ::string-segment
+                                  :+ ::+-segment)))
+  (s/def ::topic-filter (s/cat :segments (s/+ ::segment) :hash (s/? ::hash)))
+  (gen/sample (gen/fmap (fn [chars]
+                          (clojure.string/join chars))
+                        (s/gen ::topic-filter)))
 
 
 
-
-  (s/def ::string-segment (s/and  string? #(<= 1 (count %))))
+  (s/def ::string-segment (s/and  string? #(<= 5 (count %))))
   (s/def ::+-segment #{"+"})
   (s/def ::sep #{"/"})
   (s/def ::hash #{"/#"})

@@ -5,7 +5,7 @@ import static clojure.lang.Keyword.intern;
 import clojure.lang.Keyword;
 
 public abstract class GenericMessage {
-	public static final int MESSAGE_LENGTH = 1024;
+	public static final int MESSAGE_LENGTH = 4096;
 	
 	public static final byte MESSAGE_CONNECT = 1;
 	public static final byte MESSAGE_CONNACK = 2;

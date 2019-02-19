@@ -41,13 +41,13 @@ public class MqttSubscribe extends GenericMessage{
 			offset += topic.length() + 2;
 			//System.out.println(offset);
 			topicMap.put(QOS, data[offset++]);
-			//System.out.println(offset + " " +  msgLength + " " + v.toString() + " " + topicMap.toString());
+			//System.out.println(offset + " " +  data.length + " " + topicMap.toString());
 
 			v = v.cons(PersistentArrayMap.create(topicMap));
 			//System.out.println(v.toString());
 
 		}
-		//System.out.println("uit de loop: " +  offset + " " + msgLength + " " + v.toString());
+		//System.out.println("uit de loop: " +  offset + " " + data.length + " " + v.toString());
 	    //IPersistentVector v = PersistentVector.create(1, 2, 3);
 
 		

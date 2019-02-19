@@ -44,7 +44,7 @@
 ;         _ (logger "S " map)
 ;         bufs (MqttConnect/encode map)
 ;     (.sendMessage ^MqttClient @client-atom bufs)))
-
+ 
 (defn publish
   ([client topic]
    (let [map (gen/generate (s/gen :mqtt/publish-qos-gt0))

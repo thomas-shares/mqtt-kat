@@ -13,9 +13,9 @@
            [org.mqttkat MqttHandler MqttUtil]
            [org.mqttkat.packages MqttConnect MqttPingReq MqttPublish
              MqttDisconnect MqttPingResp MqttSubscribe MqttSubAck
-             MqttUnsubscribe MqttUnSubAck MqttDisconnect MqttConnAck]))
+             MqttUnsubscribe MqttUnSubAck MqttConnAck]))
 
-
+  
 ;(deftest subscription
 ;  (is (= {"test" [:key]} (add-subscriber {} "test" :key))))
 
@@ -35,6 +35,7 @@
 (def handler (MqttHandler. ^clojure.lang.IFn handler-fn 2))
 
 (defn mqtt-fixture [f]
+  (println "here...")
   (server/start "0.0.0.0" 1883 handler)
   (def client (client/client2 "localhost" 1883))
 
