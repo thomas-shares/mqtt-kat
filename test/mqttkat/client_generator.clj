@@ -2,7 +2,9 @@
   (:require [causatum.event-streams :as es]
             [clojure.test :refer [deftest is]]
             [mqttkat.client :as client]
-            [mqttkat.spec :refer :all]
+            [mqttkat.spec :as mqtt]
+            [clojure.spec.alpha :as s]
+            [clojure.spec.gen.alpha :as gen]
             [clojure.core.async :as async])
   (:import  [org.mqttkat MqttHandler MqttStat]))
 
@@ -99,9 +101,16 @@
               (compare-payload payload (:payload first-message))
               (process-return client first-message)))))))
 
+(defn filter-to-topic [filter]
+  (-> filter
+    (clojure.string/replace  #"\+" (gen/generate (s/gen (s/and string? #(<= 2 (count %))))))
+    (clojure.string/replace  #"#" (gen/generate (s/gen (s/and string? #(<= 2 (count %))))))))
+
 (defn publish [client]
-  (let [topic (rand-nth (into [] @subscribe-topics))
-        _ (client/logger  "S" topic)
+  (let [filter (rand-nth (into [] @subscribe-topics))
+        topic (filter-to-topic filter)
+        _ (client/logger "S filter: " filter)
+        _ (client/logger "S topic: " topic)
         {payload :payload qos :qos packet-identifier :packet-identifier} (client/publish client topic)]
      (condp = qos
        0 (qos-zero payload)
@@ -133,7 +142,7 @@
     ;; state.
    (let [start-time (System/currentTimeMillis)
          client (client)]
-     (doseq [{state :state} (take 100   (es/event-stream model [{:rtime 0, :state :connect}]))]
+     (doseq [{state :state} (take 11000   (es/event-stream model [{:rtime 0, :state :connect}]))]
        ;;(println "State:" state)
        ;;(Thread/sleep 10)
        (({:connect connect, :publish publish, :disconnect disconnect, :connack connack :subscribe subscribe} state) client))

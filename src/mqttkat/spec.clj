@@ -1,7 +1,7 @@
 (ns mqttkat.spec
   (:require [clojure.spec.alpha :as s]
-            [clojure.spec.gen.alpha :as gen]
-            [clojure.test.check.generators :as gen2]))
+            [clojure.spec.gen.alpha :as gen]))
+        ;;    [clojure.test.check.generators :as gen2]))
 
 (set! *warn-on-reflection* true)
 
@@ -91,13 +91,14 @@
                                   :mqtt/payload
                                   :mqtt/packet-identifier])))
 
-(s/def ::string-segment (s/and string? #(<= 5 (count %))))
+(s/def ::string-segment (s/and string? #(>= 5 (count %))))
 (s/def ::+-segment #{\+})
 (s/def ::sep #{\/})
 (s/def ::hash #{"/#"})
 (s/def ::segment (s/cat :sep ::sep :segment
                          (s/alt :string ::string-segment
                                 :+ ::+-segment)))
+(s/def ::hash-replace (s/coll-of ::segment :count 1))
 (s/def ::topic-filter (s/cat :segments (s/+ ::segment) :hash (s/? ::hash)))
 (s/def :mqtt/topic-filter
   (s/with-gen string?
@@ -105,14 +106,14 @@
                  (clojure.string/join chars))
            (s/gen ::topic-filter))))
 
- 
+
 
 ;(s/def :mqtt/topic-filter (s/and string? #(<= 1 (count %))))
 (s/def :mqtt/qos #{0 1 2})
 (s/def :mqtt/topic_
   (s/keys :req-un [:mqtt/topic-filter
                    :mqtt/qos]))
-(s/def :mqtt-subscribe/topics (s/coll-of :mqtt/topic_ :min-count 1 :distinct true))
+(s/def :mqtt-subscribe/topics (s/coll-of :mqtt/topic_ :count 2 :distinct true))
 
 (s/def :mqtt-subscribe/packet-type #{:SUBSCRIBE})
 (s/def :mqtt/subscribe

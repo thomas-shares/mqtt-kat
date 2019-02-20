@@ -44,7 +44,7 @@
 ;         _ (logger "S " map)
 ;         bufs (MqttConnect/encode map)
 ;     (.sendMessage ^MqttClient @client-atom bufs)))
- 
+
 (defn publish
   ([client topic]
    (let [map (gen/generate (s/gen :mqtt/publish-qos-gt0))
@@ -59,6 +59,8 @@
 
 (defn subscribe [client]
   (let [map (gen/generate (s/gen :mqtt/subscribe))
+        filtered (filterv #(boolean (re-find #"\w+" (:topic-filter %))) (:topics map))
+        map (assoc map :topics filtered)
         _ (logger "S " map)
         buf (MqttSubscribe/encode map)]
      (.sendMessage ^MqttClient client buf)
