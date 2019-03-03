@@ -117,7 +117,7 @@ public class MqttServer implements Runnable {
 				//System.out.println("byte 0: "  + Integer.toBinaryString( (int) bytes[0]));
 				type = (byte) ((bytes[0] & 0xff) >> 4);
 				flags = (byte) (bytes[0] &= 0x0f);
-	
+	/*
 				
 				if (type == GenericMessage.MESSAGE_CONNECT) {
 					System.out.println("Server: CONNECT");
@@ -153,7 +153,7 @@ public class MqttServer implements Runnable {
 				else {
 					System.out.println("FAIL!!!!!! INVALID packet sent: " + type);
 				}
-	
+	*/
 				byte digit;
 				int multiplier = 1;
 				//System.out.println( "limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity() );

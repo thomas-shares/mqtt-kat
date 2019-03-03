@@ -10,7 +10,7 @@
             [clojure.core.async :as async]))
 
 (defn logger [msg & args]
-  (when false
+  (when true
     (println msg args)))
 
 (def packet-identifier-queue-size 1024)
@@ -40,8 +40,8 @@
 (defn add-client [msg]
   (let [client-id (:client-id msg)
         _ (logger client-id)
-        x (some #(and (= (:client-id (second %)) client-id ) %)  @clients)]
-        ;_ (logger "x: " x)]
+        x (some #(and (= (:client-id (second %)) client-id ) %)  @clients)
+        _ (println (count @clients))]
     x))
 
 (defn send-message [keys msg]

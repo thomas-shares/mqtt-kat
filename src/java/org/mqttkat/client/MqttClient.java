@@ -42,13 +42,14 @@ public class MqttClient implements Runnable {
 	private SocketChannel socketChannel;
 	private final Selector selector;
 	private final IHandler handler;
+	private final Object asyncChannel;
 	private Map<SocketChannel, List> pendingData = new HashMap<SocketChannel, List>();
 	// A list of PendingChange instances
 	private List<ChangeRequest> pendingChanges = new LinkedList<ChangeRequest>();
 	// The buffer into which we'll read data when it's available
 	private ByteBuffer readBuffer = ByteBuffer.allocate(8192);
-
-	public MqttClient(String host, int port, int threadPoolSize, IHandler handler) throws IOException {
+	
+	public MqttClient(String host, int port, int threadPoolSize, IHandler handler, Object asyncChannel) throws IOException {
 		log("Creating client...");
 		this.handler = handler;
 
@@ -56,7 +57,7 @@ public class MqttClient implements Runnable {
 		socketChannel = SocketChannel.open(mqttAddr);
 		socketChannel.configureBlocking(false);
 
-
+		this.asyncChannel = asyncChannel;
 		
 		selector = Selector.open();
 		//this.executor = new MqttSendExecutor(selector, threadPoolSize);
@@ -66,6 +67,10 @@ public class MqttClient implements Runnable {
 		t.start();
 	}
 
+	public Object getChannel() {
+		return this.asyncChannel;
+	}
+	
 	public void sendMessage(ByteBuffer buffer) throws IOException {
 		sentMessages.incrementAndGet();
 		sentBytes.addAndGet(buffer.limit());
@@ -255,11 +260,10 @@ public class MqttClient implements Runnable {
 			}
 	
 			if( incoming != null ) {
-				handler.handle(incoming);
+				handler.handle(incoming, this.asyncChannel);
 				receivedMessage.incrementAndGet();
 				receivedBytes.addAndGet(msgLength);
 			}
-			//System.out.println( "i " + i);
 		} while( i < numRead );
 	}
 	

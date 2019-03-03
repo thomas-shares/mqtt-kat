@@ -1,7 +1,8 @@
 (ns mqttkat.client
   (:require [clojure.spec.gen.alpha :as gen]
             [clojure.spec.alpha :as s]
-            [mqttkat.spec :refer :all])
+            [mqttkat.spec :refer :all]
+            [clojure.core.async :as async])
   (:import [org.mqttkat.client MqttClient]
            [org.mqttkat MqttHandler]
            [org.mqttkat.packages MqttConnect MqttPingReq MqttPublish
@@ -13,7 +14,7 @@
 (def client-atom (atom nil))
 
 (defn logger [msg & args]
-  (when true
+  (when false
     (println msg args)))
 
 (defn handler-fn [msg]
@@ -23,18 +24,21 @@
   ([host port] (client host port (MqttHandler. ^clojure.lang.IFn handler-fn 2)))
   ([host port handler]
    (when (nil? @client-atom)
-      (let [client (MqttClient. ^String host ^int port 2 handler)]
+      (let [ch (async/chan 1)
+            client (MqttClient. ^String host ^int port 2 handler ^Object ch)]
         (reset! client-atom client)
         client))))
 
 (defn client2 [host port]
-  (let [client (MqttClient. ^String host ^int port 2 ( MqttHandler. ^clojure.lang.IFn handler-fn 2))]
+  (let [ch (async/chan 1)
+        client (MqttClient. ^String host ^int port 2 (MqttHandler. ^clojure.lang.IFn handler-fn 2) ch)]
     (reset! client-atom client)))
 
 (defn connect
   ([client] (let [map (gen/generate (s/gen :mqtt/connect))
                   _ (logger "S " map)
                   buf (MqttConnect/encode map)]
+                  ;ch (async/chan 1)]
                 (.sendMessage ^MqttClient client buf))))
 
 ;  ([host port] (client host port (MqttHandler. ^clojure.lang.IFn handler-fn 2)));

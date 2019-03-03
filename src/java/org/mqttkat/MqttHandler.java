@@ -1,7 +1,6 @@
 package org.mqttkat;
 
 import clojure.lang.IPersistentMap;
-
 import clojure.lang.IFn;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -16,15 +15,19 @@ import java.util.concurrent.ArrayBlockingQueue;
 class MqttExecutor implements Runnable{
 	final IFn handler;
 	final IPersistentMap incoming;
+	final Object asyncChannel;
+	
+	
 
-	public MqttExecutor(IFn handler, IPersistentMap incoming) {
+	public MqttExecutor(IFn handler, IPersistentMap incoming, Object asyncChannel) {
 		this.handler = handler;
 		this.incoming = incoming;
+		this.asyncChannel = asyncChannel;
 	}
 
 	public void run() {
 	    try {
-	    		handler.invoke(incoming);
+	    		handler.invoke(incoming, asyncChannel);
 	     } catch (Throwable e) {
 	    	 	e.printStackTrace();
 	    	 	System.out.println("Can't RUN!!! " + e.getMessage());
@@ -55,7 +58,7 @@ public class MqttHandler implements IHandler {
 		if( incoming ==  null ) {
 			return;
 		}
-		execs.submit(new MqttExecutor(handler, incoming));
+		execs.submit(new MqttExecutor(handler, incoming, null));
 	}
 
 	public void close(int timeoutMs) {
@@ -78,4 +81,13 @@ public class MqttHandler implements IHandler {
 		// TODO Auto-generated method stub
 		
 	}
+
+	public void handle(IPersistentMap incoming, Object asyncChannel) {
+		if( incoming ==  null ) {
+			return;
+		}
+		execs.submit(new MqttExecutor(handler, incoming, asyncChannel)); 
+	}
+
+
 }
