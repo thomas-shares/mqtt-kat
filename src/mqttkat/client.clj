@@ -12,10 +12,12 @@
 (set! *warn-on-reflection* true)
 
 (def client-atom (atom nil))
+(def o (Object.))
 
 (defn logger [msg & args]
-  (when false
-    (println msg args)))
+  (when true
+    (locking 0
+      (println msg args))))
 
 (defn handler-fn [msg]
   (println "clj handler: " msg))
@@ -26,7 +28,7 @@
    (when (nil? @client-atom)
       (let [ch (async/chan 1)
             client (MqttClient. ^String host ^int port 2 handler ^Object ch)]
-        (reset! client-atom client)
+        ;(reset! client-atom client)
         client))))
 
 (defn client2 [host port]
@@ -36,8 +38,8 @@
 
 (defn connect
   ([client] (let [map (gen/generate (s/gen :mqtt/connect))
-                  _ (logger "S " map)
-                  buf (MqttConnect/encode map)]
+                  _ (logger "S " map " " client)
+                  buf (MqttConnect/encode (assoc map :keep-alive 60))]
                   ;ch (async/chan 1)]
                 (.sendMessage ^MqttClient client buf))))
 
@@ -53,7 +55,7 @@
   ([client topic]
    (let [map (gen/generate (s/gen :mqtt/publish-qos-gt0))
          map (assoc map :topic topic)
-         _ (logger "S " map)
+         _ (logger "S " map " " client)
          buf (MqttPublish/encode map)]
       (.sendMessage ^MqttClient client buf)
       (select-keys map [:qos :payload :packet-identifier])))
@@ -65,7 +67,7 @@
   (let [map (gen/generate (s/gen :mqtt/subscribe))
         filtered (filterv #(boolean (re-find #"\w+" (:topic-filter %))) (:topics map))
         map (assoc map :topics filtered)
-        _ (logger "S " map)
+        _ (logger "S " map " " client)
         buf (MqttSubscribe/encode map)]
      (.sendMessage ^MqttClient client buf)
     map))

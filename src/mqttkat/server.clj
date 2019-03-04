@@ -22,7 +22,7 @@
                   :DISCONNECT h/disconnect
                   :AUTHENTICATE h/authenticate})
 
-(defn handler-fn [msg]
+(defn handler-fn [msg dummy]
   ;(println msg)
   (when-let [packet-type (:packet-type msg)]
     ((packet-type handler-map) msg)))

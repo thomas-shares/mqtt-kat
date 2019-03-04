@@ -47,7 +47,7 @@ public class MqttClient implements Runnable {
 	// A list of PendingChange instances
 	private List<ChangeRequest> pendingChanges = new LinkedList<ChangeRequest>();
 	// The buffer into which we'll read data when it's available
-	private ByteBuffer readBuffer = ByteBuffer.allocate(8192);
+	private ByteBuffer readBuffer = ByteBuffer.allocate(4096);
 	
 	public MqttClient(String host, int port, int threadPoolSize, IHandler handler, Object asyncChannel) throws IOException {
 		log("Creating client...");

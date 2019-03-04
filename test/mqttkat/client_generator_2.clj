@@ -1,22 +1,33 @@
-(ns mqttkat.client-generator
-  (:require [clojure.test :refer [deftest is]]
+(ns mqttkat.client-generator-2
+  (:require [causatum.event-streams :as es]
+            [clojure.test :refer [deftest is]]
             [mqttkat.client :as client]
             ;;[mqttkat.spec :as mqtt]
             [clojure.spec.alpha :as s]
             [clojure.spec.gen.alpha :as gen]
-            [clojure.core.async :as async]
-            [overtone.at-at :as at])
+            [clojure.core.async :as async])
   (:import  [org.mqttkat MqttHandler MqttStat]
             [org.mqttkat.client MqttClient]))
 
-(def subscribe-topics (atom {}))
-(def my-pool (at/mk-pool))
+(def subscribe-topics (atom #{}))
+
 ;(def channel (async/chan 1))
 
 (defn handler-fn [msg chan]
   ;;(println "Posting on async channel: ")
   ;(clojure.pprint/pprint (dissoc msg :client-key))
   (async/go (async/>! chan msg)))
+
+(def model
+  {:graph
+    {:connect [;{:disconnect {:weight 1}}
+               ;;{:publish {:weight 1}}
+               {:connack {:weight 1}}]
+     :connack [{:subscribe {:weight 1}}]
+     :subscribe [{:publish {:weight 1}}]
+     :publish [{:publish {:weight 2}}]
+              ;{:disconnect {:weight 1}}]
+     :disconnect [{:connect {:weight 1}}]}})
 
 (defn client []
   (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn handler-fn 2)))
@@ -97,10 +108,10 @@
     (clojure.string/replace  #"#" (gen/generate (s/gen (s/and string? #(<= 2 (count %))))))))
 
 (defn publish [client]
-  (let [filter (rand-nth (into [] (get @subscribe-topics client)))
+  (let [filter (rand-nth (into [] @subscribe-topics))
         topic (filter-to-topic filter)
-        ;_ (client/logger "S filter: " filter)
-        ;_ (client/logger "S topic: " topic)
+        _ (client/logger "S filter: " filter)
+        _ (client/logger "S topic: " topic)
         {payload :payload qos :qos packet-identifier :packet-identifier} (client/publish client topic)]
      (condp = qos
        0 (qos-zero client payload)
@@ -116,25 +127,30 @@
   (let [topic-filter (client/subscribe ^MqttClient client)
         topics (map #(:topic-filter % ) (:topics topic-filter))
         c (count topics)]
-    (swap! subscribe-topics assoc client topics)
+    (swap! subscribe-topics (partial apply conj) topics)
     (let [msg (async/<!! (.getChannel ^MqttClient client))
           ret-count (count (:response msg))]
       (client/logger  "R " msg)
       (is (= c ret-count)))))
 
 
-(defn start-client [client]
-  (connect client)
-  (connack client)
-  (subscribe client)
-  (at/interspaced 1000 #(publish client) my-pool :initial-delay 1000))
 
 
-(deftest multiple-clients
-  (let [;;start-time (System/currentTimeMillis)
-        clients (into [] (take 1000   (repeatedly #(client))))]
-    (doseq [client clients]
-      ;;(println client)
-      (at/after 5 #(start-client client) my-pool))
-    (Thread/sleep 60000)
-    (println "done sleepeing....")))
+
+(deftest simulation
+    ;; We create an event stream (or chain of state transitions, if you will) by
+    ;; calling Causatum's event-stream function with our model and an initial seed
+    ;; state.
+   (let [start-time (System/currentTimeMillis)
+         client-numbers 2
+         client (client)]
+         ;clients (take client-numbers (repeatedly (client)))
+         ;streams (take client-numbers (repeatedly (es/event-stream model [{:rtime 0, :state :connect}])))]
+     (doseq [{state :state} (take 110000   (es/event-stream model [{:rtime 0, :state :connect}]))]
+       ;;(println "State:" state)
+       ;;(Thread/sleep 10)
+       (({:connect connect, :publish publish, :disconnect disconnect, :connack connack :subscribe subscribe} state) client))
+     (let [time (/ (- (System/currentTimeMillis) start-time) 1000.0)]
+       (println
+         "sent per sec "(/ (MqttStat/sentMessages) time)
+         "received per sec " (/ (MqttStat/receivedMessage) time)))))
