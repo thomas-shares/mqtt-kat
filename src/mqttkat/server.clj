@@ -1,5 +1,6 @@
 (ns mqttkat.server
   (:require [mqttkat.handlers :as h]
+            [mqttkat.util :as util]
             [clj-async-profiler.core :as prof])
   (:use [mqttkat.s :only [server]])
   (:import [org.mqttkat.server MqttServer]
@@ -53,4 +54,5 @@
     (reset! server nil)))
 
 (defn -main [& args]
-  (start))
+  (start)
+  (util/info))

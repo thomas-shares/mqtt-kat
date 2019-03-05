@@ -132,9 +132,9 @@
 
 (deftest multiple-clients
   (let [;;start-time (System/currentTimeMillis)
-        clients (into [] (take 1000   (repeatedly #(client))))]
+        clients (into [] (take 2000   (repeatedly #(client))))]
     (doseq [client clients]
       ;;(println client)
       (at/after 5 #(start-client client) my-pool))
     (Thread/sleep 60000)
-    (println "done sleepeing....")))
+    (println "done sleeping....")))

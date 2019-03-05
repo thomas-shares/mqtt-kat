@@ -29,7 +29,7 @@
 
   :jvm-opts
   ["-Dclojure.compiler.disable-locals-clearing=true"
-   "-Xms512m" "-Xmx2G" "-Djdk.attach.allowAttachSelf" "-XX:+UnlockDiagnosticVMOptions" "-XX:+DebugNonSafepoints"]
+   "-Xms512m" "-Xmx4G" "-Djdk.attach.allowAttachSelf" "-XX:+UnlockDiagnosticVMOptions" "-XX:+DebugNonSafepoints"]
 
   :javac-options ["-source" "1.8" "-target" "1.8" "-g"]
   :java-source-paths ["src/java"]

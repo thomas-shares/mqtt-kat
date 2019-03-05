@@ -10,7 +10,7 @@
             [clojure.core.async :as async]))
 
 (defn logger [msg & args]
-  (when true
+  (when false
     (println msg args)))
 
 (def packet-identifier-queue-size 1024)

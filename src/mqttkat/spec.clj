@@ -113,7 +113,7 @@
 (s/def :mqtt/topic_
   (s/keys :req-un [:mqtt/topic-filter
                    :mqtt/qos]))
-(s/def :mqtt-subscribe/topics (s/coll-of :mqtt/topic_ :count 2 :distinct true))
+(s/def :mqtt-subscribe/topics (s/coll-of :mqtt/topic_ :count 1 :distinct true))
 
 (s/def :mqtt-subscribe/packet-type #{:SUBSCRIBE})
 (s/def :mqtt/subscribe
