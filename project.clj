@@ -16,7 +16,7 @@
    [proto-repl "0.3.1"]
    [org.craigandera/causatum "0.3.0"]
    [clojurewerkz/triennium "1.0.0-beta2"]
-   [liftoff/at-at "1.3.0"]
+   [overtone/at-at "1.2.0"]
    [com.clojure-goes-fast/clj-async-profiler "0.2.2"]]
 
   :plugins

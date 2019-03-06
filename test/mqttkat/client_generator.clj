@@ -105,7 +105,8 @@
      (condp = qos
        0 (qos-zero client payload)
        1 (qos-one client payload packet-identifier)
-       2 (qos-two client payload packet-identifier))))
+       2 (qos-two client payload packet-identifier)))
+  (recur client))
 
 
 (defn disconnect [client]
@@ -127,14 +128,16 @@
   (connect client)
   (connack client)
   (subscribe client)
-  (at/interspaced 1000 #(publish client) my-pool :initial-delay 1000))
+  ;(at/interspaced 1 #(publish client) my-pool :initial-delay 1000))
+  (at/after 100 #(publish client) my-pool))
 
 
 (deftest multiple-clients
   (let [;;start-time (System/currentTimeMillis)
-        clients (into [] (take 2000   (repeatedly #(client))))]
+        clients (into [] (take 160   (repeatedly #(client))))]
     (doseq [client clients]
       ;;(println client)
-      (at/after 5 #(start-client client) my-pool))
-    (Thread/sleep 60000)
+      (at/after 100 #(start-client client) my-pool))
+    (Thread/sleep 30000)
+    ;(at/show-schedule my-pool)
     (println "done sleeping....")))

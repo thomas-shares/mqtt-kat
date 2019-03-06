@@ -261,7 +261,7 @@ public class MqttClient implements Runnable {
 	
 			if( incoming != null ) {
 				handler.handle(incoming, this.asyncChannel);
-				receivedMessage.incrementAndGet();
+				receivedMessages.incrementAndGet();
 				receivedBytes.addAndGet(msgLength);
 			}
 		} while( i < numRead );

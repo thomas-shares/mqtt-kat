@@ -41,7 +41,7 @@
   (let [client-id (:client-id msg)
         _ (logger client-id)
         x (some #(and (= (:client-id (second %)) client-id ) %)  @clients)
-        _ (println (count @clients))]
+        _ (logger (count @clients))]
     x))
 
 (defn send-message [keys msg]

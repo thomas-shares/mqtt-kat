@@ -46,7 +46,7 @@ public class MqttServer implements Runnable {
 	}
 
    private void closeKey(final SelectionKey key) {
-	   System.out.println("closing key: " + key.toString());
+	   //System.out.println("closing key: " + key.toString());
 		try {
 			IPersistentMap incoming = MqttDisconnect.decode(key, (byte)0x00, new byte[] {0x0});
 			handler.handle(incoming);
@@ -93,7 +93,7 @@ public class MqttServer implements Runnable {
 				.append(sc.socket().getPort()).toString();
 		sc.configureBlocking(false);
 		sc.register(selector, SelectionKey.OP_READ, address);
-		System.out.println("Server accepted Client connection from: " + address);
+		//System.out.println("Server accepted Client connection from: " + address);
 	}
 
 	private void handleRead(SelectionKey key) throws IOException {
@@ -218,7 +218,7 @@ public class MqttServer implements Runnable {
 				if( incoming != null ) {
 					handler.handle(incoming);
 					receivedBytes.getAndAdd(msgLength);
-					receivedMessage.getAndIncrement();
+					receivedMessages.getAndIncrement();
 				}
 			} while (buf.limit() > buf.position());
 
@@ -227,9 +227,9 @@ public class MqttServer implements Runnable {
 		
 		//client has gone away...
 		if(read<0) {
-			System.out.println("Client has gone away...");
-			System.out.println("message received: " + receivedMessage.get());
-			System.out.println("Message sent: " + sentMessages.get());
+			//System.out.println("Client has gone away...");
+			//System.out.println("message received: " + receivedMessage.get());
+			//System.out.println("Message sent: " + sentMessages.get());
 			closeKey(key);
 		}
 		
