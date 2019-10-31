@@ -13,3 +13,25 @@ TODO: write [great documentation](http://jacobian.org/writing/what-to-write/)
 {:client-key #object[sun.nio.ch.SelectionKeyImpl 0x176ca445 sun.nio.ch.SelectionKeyImpl@176ca445], :flags 2, :packet-identifier 1, :packet-type :SUBSCRIBE, :topics [{:message-qos :0, :topic test}]}
 
 {:client-key #object[sun.nio.ch.SelectionKeyImpl 0x176ca445 sun.nio.ch.SelectionKeyImpl@176ca445], :flags 0, :packet-type :PINGREQ}
+
+used to make a Linux machine accept lots of connections:
+
+ulimit -n 3000000
+
+and
+
+#!/bin/bash
+
+sysctl -w fs.file-max=11000000
+sysctl -w fs.nr_open=11000000
+
+sysctl -w net.core.somaxconn=65535
+sysctl -w net.ipv4.tcp_max_syn_backlog=65535
+
+sysctl -w net.ipv4.ip_local_port_range="1025 65535"
+
+sysctl -w net.ipv4.tcp_mem="100000000 100000000 100000000"
+sysctl -w net.ipv4.tcp_rmem='4096 4096 4096'
+sysctl -w net.ipv4.tcp_wmem='4096 4096 4096'
+
+from: https://oatpp.io/benchmark/websocket/2-million/

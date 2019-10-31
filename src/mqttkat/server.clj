@@ -2,7 +2,7 @@
   (:require [mqttkat.handlers :as h]
             [mqttkat.util :as util]
             [clj-async-profiler.core :as prof])
-  (:use [mqttkat.s :only [server]])
+  (:use [mqttkat.s :only [conn]])
   (:import [org.mqttkat.server MqttServer]
            [org.mqttkat MqttHandler])
   (:gen-class))
