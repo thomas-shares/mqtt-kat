@@ -44,7 +44,7 @@ public class MqttEncode {
 			} else if (strType.equals(":SUBACK")) {
 				outboundMessage = MqttSubAck.encode(message);
 			} else if( strType.equals(":DISCONNECT")) {
-				outboundMessage = MqttDisconnect.encode(message);
+				outboundMessage = MqttDisconnect.encode();
 			} else if ( strType.equals(":PUBLISH")) {
 				outboundMessage = MqttPublish.encode(message);
 			} else if ( strType.equals(":PUBACK")) {

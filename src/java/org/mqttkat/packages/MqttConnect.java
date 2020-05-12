@@ -134,7 +134,7 @@ public class MqttConnect extends GenericMessage {
 		byte firstByte = (byte) (MESSAGE_CONNECT << 4);
 		buffer.put(firstByte);
 
-		byte[] protocolName = ((String) message.get(PROTOCOL_NAME)).getBytes("UTF-8");
+		byte[] protocolName = ((String) message.get(PROTOCOL_NAME)).getBytes(StandardCharsets.UTF_8);
 		bytes[length++] = (byte) ((protocolName.length >>> 8) & 0xFF);
 		bytes[length++] = (byte) (protocolName.length & 0xFF);
 		for(int i = 0; i < protocolName.length; i++) {
@@ -146,13 +146,13 @@ public class MqttConnect extends GenericMessage {
 		int connectFlagOffset = protocolName.length == 4 ? 7 : 9;
 
 		boolean cleanSession = (Boolean) message.get(CLEAN_SESSION);
-		bytes[connectFlagOffset] = (byte) (cleanSession == true ? CLEANSESSION_FLAG : 0);
+		bytes[connectFlagOffset] = (byte) (cleanSession ? CLEANSESSION_FLAG : 0);
 		//log("connect flags: " + connectFlags[0]);
 		length++;
 	
 		Long keepAlive = (Long) message.get(KEEP_ALIVE);
 		bytes[length++] = (byte) ((keepAlive >>> 8) & 0xFF);
-		bytes[length++] = (byte) ((keepAlive >>> 0) & 0xFF);
+		bytes[length++] = (byte) (keepAlive & 0xFF);
 	
 		byte[] clientId = ((String) message.get(CLIENT_ID)).getBytes(StandardCharsets.UTF_8);
 		bytes[length++] = (byte) ((clientId.length >>> 8) & 0xFF);

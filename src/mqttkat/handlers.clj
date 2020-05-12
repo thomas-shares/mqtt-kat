@@ -10,7 +10,7 @@
             [clojure.core.async :as async]))
 
 (defn logger [msg & args]
-  (when false
+  (when true
     (println msg args)))
 
 (def packet-identifier-queue-size 1024)
@@ -56,13 +56,21 @@
   (let [s (:server (meta @server))]
     (.sendMessageBuffer ^MqttServer s keys buf)))
 
-(defn connect [msg]
-  (logger "clj CONNECT: " msg)
-  ;(logger (str "valid connect: " (s/valid? :mqtt/connect msg)))
-  ;(s/explain :mqtt/connect msg)
+(defn connect [{:keys [protocol-name protocol-version client-key] :as msg}]
+  (logger "clj CONNECT: " protocol-name protocol-version client-key msg)
+  (when-not (= protocol-version 4)
+    (send-buffer [client-key]
+                 (MqttConnAck/encode {:packet-type :CONNACK
+                                      :session-present? false?
+                                      :connect-return-code 0x01}))
+    (send-buffer [client-key]
+                 (MqttDisconnect/encode)))
+  (when-not (= protocol-name "MQTT")
+    (send-buffer [client-key]
+                 (MqttDisconnect/encode)))
   (add-client msg)
-  (swap! clients assoc (:client-key msg) (dissoc msg  :packet-type))
-  (send-buffer [(:client-key msg)]
+  (swap! clients assoc client-key (dissoc msg :packet-type))
+  (send-buffer [client-key]
                (MqttConnAck/encode {:packet-type :CONNACK
                                     :session-present? false
                                     :connect-return-code 0x00})))
