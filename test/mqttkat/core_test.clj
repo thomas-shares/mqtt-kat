@@ -56,7 +56,7 @@
         _ (.sendMessage ^MqttClient client bufs)
         received-map (async/<!! channel)
         new-map (dissoc received-map :client-key)
-        _ (.close client)]
+        _ (.close ^MqttClient client)]
     (is (=  map new-map))))
 
 (deftest publish-packet
@@ -67,7 +67,7 @@
         _ (.sendMessage ^MqttClient client bufs)
         received-map (async/<!! channel)
         new-map (dissoc received-map :client-key)
-        _ (.close client)]
+        _ (.close ^MqttClient client)]
     (is (= (update map :payload #(seq (:payload %)))  (update new-map :payload #(seq (:payload %)))))))
 
 (deftest pingreq-packet
@@ -77,7 +77,7 @@
         bufs (MqttPingReq/encode map)
         _ (.sendMessage ^MqttClient client bufs)
         received-map (async/<!! channel)
-        _ (.close client)]
+        _ (.close ^MqttClient client)]
     (is (= map (dissoc received-map :client-key)))))
 
 (deftest pingresp-packet
@@ -87,7 +87,7 @@
         bufs (MqttPingResp/encode map)
         _ (.sendMessage ^MqttClient client bufs)
         received-map (async/<!! channel)
-        _ (.close client)]
+        _ (.close ^MqttClient client)]
     (is (= map (dissoc received-map :client-key)))))
 
 (deftest subscribe-packet

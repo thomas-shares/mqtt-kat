@@ -1,9 +1,8 @@
 package org.mqttkat.packages;
 
 import static clojure.lang.Keyword.intern;
-import static org.mqttkat.MqttUtil.calculateLenght;
+import static org.mqttkat.MqttUtil.calculateLength;
 import static org.mqttkat.MqttUtil.decodeUTF8;
-import static org.mqttkat.MqttUtil.log;
 import static org.mqttkat.MqttUtil.twoBytesToLong;
 
 import java.io.IOException;
@@ -105,7 +104,7 @@ public class MqttSubscribe extends GenericMessage{
 		//}
 		//System.out.print("\n");
 
-		buffer.put(calculateLenght(length));
+		buffer.put(calculateLength(length));
 		buffer.put(bytes, 0, length);
 		buffer.flip();
 		//log("length: " + length);

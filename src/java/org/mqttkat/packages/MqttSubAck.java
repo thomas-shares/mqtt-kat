@@ -1,8 +1,7 @@
 package org.mqttkat.packages;
 
 import static clojure.lang.Keyword.intern;
-import static org.mqttkat.MqttUtil.calculateLenght;
-import static org.mqttkat.MqttUtil.log;
+import static org.mqttkat.MqttUtil.calculateLength;
 import static org.mqttkat.MqttUtil.twoBytesToLong;
 
 import java.io.IOException;
@@ -63,7 +62,7 @@ public class MqttSubAck extends GenericMessage {
 
 		}
 
-		buffer.put(calculateLenght(length));
+		buffer.put(calculateLength(length));
 		buffer.put(bytes, 0, length);
 		//log("buffers.size: " + buffers.size());
 		buffer.flip();

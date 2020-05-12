@@ -1,8 +1,8 @@
 (ns mqttkat.server
   (:require [mqttkat.handlers :as h]
             [mqttkat.util :as util]
-            [clj-async-profiler.core :as prof])
-  (:use [mqttkat.s :only [conn]])
+            [mqttkat.s :refer [server]])
+            ;[clj-async-profiler.core :as prof])
   (:import [org.mqttkat.server MqttServer]
            [org.mqttkat MqttHandler])
   (:gen-class))
@@ -36,8 +36,8 @@
       (fn stop-server [& {:keys [timeout] :or {timeout 100}}]
         (println "meta stop...")
         (.stop s timeout))
-      ;(fn send-message [key msg]
-      ;  (.sendMessage s key msg))
+      #_(fn send-message [key msg]
+         (.sendMessage s key msg))
       {:local-port (.getPort s)
        :server s})))
 

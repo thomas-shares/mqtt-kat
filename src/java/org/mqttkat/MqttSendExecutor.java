@@ -28,6 +28,10 @@ public class MqttSendExecutor {
 	}
 	
 	public void close(int timeoutMs) {
+		shutdown(timeoutMs, execs);
+	}
+
+	static void shutdown(int timeoutMs, ExecutorService execs) {
 		if (timeoutMs > 0) {
 			execs.shutdown();
 		    try {
@@ -40,6 +44,6 @@ public class MqttSendExecutor {
 	        }
 		} else {
 			execs.shutdownNow();
-		}		
+		}
 	}
 }

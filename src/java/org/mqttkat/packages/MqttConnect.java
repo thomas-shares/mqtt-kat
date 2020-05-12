@@ -3,6 +3,7 @@ package org.mqttkat.packages;
 import clojure.lang.IPersistentMap;
 import clojure.lang.Keyword;
 
+import java.nio.charset.StandardCharsets;
 import java.util.TreeMap;
 
 import static org.mqttkat.MqttUtil.*;
@@ -153,7 +154,7 @@ public class MqttConnect extends GenericMessage {
 		bytes[length++] = (byte) ((keepAlive >>> 8) & 0xFF);
 		bytes[length++] = (byte) ((keepAlive >>> 0) & 0xFF);
 	
-		byte[] clientId = ((String) message.get(CLIENT_ID)).getBytes("UTF-8");
+		byte[] clientId = ((String) message.get(CLIENT_ID)).getBytes(StandardCharsets.UTF_8);
 		bytes[length++] = (byte) ((clientId.length >>> 8) & 0xFF);
 		bytes[length++] = (byte) (clientId.length & 0xFF);
 		for(int i = 0; i < clientId.length; i++) {
@@ -169,14 +170,14 @@ public class MqttConnect extends GenericMessage {
 			Boolean willRetain = (Boolean) will.get(WILL_RETAIN);
 			bytes[connectFlagOffset] = willRetain ? (byte) (WILLRETAIN_FLAG |bytes[connectFlagOffset]) : bytes[connectFlagOffset];
 			//log("will topic: " + ((String) will.get(WILL_TOPIC)) );
-			byte[] willTopic = ((String) will.get(WILL_TOPIC)).getBytes("UTF-8");
+			byte[] willTopic = ((String) will.get(WILL_TOPIC)).getBytes(StandardCharsets.UTF_8);
 			bytes[length++] = (byte) ((willTopic.length >>> 8) & 0xFF);
 			bytes[length++] = (byte) (willTopic.length & 0xFF);
 			for(int i = 0; i < willTopic.length; i++) {
 				bytes[length++] = willTopic[i];
 			}	
 			
-			byte[] willMessage = ((String) will.get(WILL_MSG)).getBytes("UTF-8");
+			byte[] willMessage = ((String) will.get(WILL_MSG)).getBytes(StandardCharsets.UTF_8);
 			bytes[length++] = (byte) ((willMessage.length >>> 8) & 0xFF);
 			bytes[length++] = (byte) (willMessage.length & 0xFF);
 			for(int i = 0; i < willMessage.length; i++) {
@@ -191,7 +192,7 @@ public class MqttConnect extends GenericMessage {
 			//log("set username: " + userNameStr);
 			bytes[connectFlagOffset] = (byte) (USERNAME_FLAG | bytes[connectFlagOffset]);
 			
-			byte[] userName = userNameStr.getBytes("UTF-8");
+			byte[] userName = userNameStr.getBytes(StandardCharsets.UTF_8);
 			bytes[length++] = (byte) ((userName.length >>> 8) & 0xFF);
 			bytes[length++] = (byte) (userName.length & 0xFF);
 			for(int i = 0; i < userName.length; i++) {
@@ -213,7 +214,7 @@ public class MqttConnect extends GenericMessage {
 		}
 		//String s1 = String.format("%8s", Integer.toBinaryString(bytes[connectFlagOffset] & 0xFF)).replace(' ', '0');
 		//log("connect flags: " + s1 + "  offset" + connectFlagOffset);
-		buffer.put(calculateLenght(length));
+		buffer.put(calculateLength(length));
 		buffer.put(bytes, 0, length);
 		buffer.flip();
 		//log("length: " + length);

@@ -4,6 +4,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.UnsupportedEncodingException;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -20,7 +21,7 @@ public abstract class MqttUtil {
 	}
 	
 	public static ByteBuffer encodeUTF8Buffer(String str) throws UnsupportedEncodingException {
-		byte[] encodedStr = str.getBytes("UTF-8");
+		byte[] encodedStr = str.getBytes(StandardCharsets.UTF_8);
 		//byte byte1 = (byte) ((encodedStr.length >>> 8) & 0xFF);
 		//byte byte2 =  (byte) ((encodedStr.length >>> 0) & 0xFF); 
 		ByteBuffer ret = ByteBuffer.allocate(encodedStr.length + 2);
@@ -33,7 +34,7 @@ public abstract class MqttUtil {
 		byte[] ret = new byte[length + 2];
 		ret[0] = (byte) ((length >>> 8) & 0xFF);
 		ret[1] = (byte) (length & 0xFF);
-		byte[] encodedStr = str.getBytes("UTF-8");
+		byte[] encodedStr = str.getBytes(StandardCharsets.UTF_8);
 
 		for(int i = 2; i < length+2; i++) {
 			ret[i] = encodedStr[i-2];
@@ -43,12 +44,12 @@ public abstract class MqttUtil {
 	}
 
 	public static byte[] encodeUTF8Bytes2(String str) throws UnsupportedEncodingException {
-		return str.getBytes("UTF-8");
+		return str.getBytes(StandardCharsets.UTF_8);
 	}
 
 	
 	public static List<Byte> encodeUTF8List(String str) throws UnsupportedEncodingException {
-		byte[] encodedStr = str.getBytes("UTF-8");
+		byte[] encodedStr = str.getBytes(StandardCharsets.UTF_8);
 
 		List<Byte> ret = new ArrayList<Byte>();
 		ret.add(0, (byte) ((encodedStr.length >>> 8) & 0xFF));
@@ -61,7 +62,7 @@ public abstract class MqttUtil {
 		return ret;
 	}
 
-	public static byte[] calculateLenght(long number) {
+	public static byte[] calculateLength(long number) {
 		int numBytes = 0;
 		long no = number;
 		ByteArrayOutputStream bos = new ByteArrayOutputStream();

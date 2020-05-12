@@ -153,4 +153,4 @@
      (let [time (/ (- (System/currentTimeMillis) start-time) 1000.0)]
        (println
          "sent per sec "(/ (MqttStat/sentMessages) time)
-         "received per sec " (/ (MqttStat/receivedMessage) time)))))
+         "received per sec " (/ (MqttStat/receivedMessages) time)))))

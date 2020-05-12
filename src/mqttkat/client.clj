@@ -1,7 +1,7 @@
 (ns mqttkat.client
   (:require [clojure.spec.gen.alpha :as gen]
             [clojure.spec.alpha :as s]
-            [mqttkat.spec :refer :all]
+            [mqttkat.spec]
             [clojure.core.async :as async])
   (:import [org.mqttkat.client MqttClient]
            [org.mqttkat MqttHandler]

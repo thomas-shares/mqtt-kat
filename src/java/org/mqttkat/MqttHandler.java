@@ -62,20 +62,8 @@ public class MqttHandler implements IHandler {
 	}
 
 	public void close(int timeoutMs) {
-		if (timeoutMs > 0) {
-			execs.shutdown();
-			try {
-				if (!execs.awaitTermination(timeoutMs, TimeUnit.MILLISECONDS)) {
-					execs.shutdownNow();
-				}
-			} catch (InterruptedException ie) {
-				execs.shutdownNow();
-				Thread.currentThread().interrupt();
-			}
-		} else {
-			execs.shutdownNow();
-		}		
-	}
+        MqttSendExecutor.shutdown(timeoutMs, execs);
+    }
 
 	public void connect(IPersistentMap connect) {
 		// TODO Auto-generated method stub

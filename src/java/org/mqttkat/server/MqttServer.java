@@ -31,8 +31,8 @@ public class MqttServer implements Runnable {
 	private Thread serverThread;
 	private final IHandler handler;
 	private final int port;
-	private ByteBuffer buf = ByteBuffer.allocate(4096);
-	private MqttSendExecutor executor;
+	private final ByteBuffer buf = ByteBuffer.allocate(4096);
+	private final MqttSendExecutor executor;
 
 	public MqttServer(String ip, int port, IHandler handler) throws IOException {
 		this.selector = Selector.open();
