@@ -19,7 +19,7 @@ import clojure.lang.PersistentVector;
 
 public class MqttSubAck extends GenericMessage {
 
-	public static IPersistentMap decode(SelectionKey key, byte flags, byte[] data) throws IOException {
+	public static IPersistentMap decode(SelectionKey key, byte[] data) {
 		//System.out.println("SUBACK message..." + data.length);
 		int offset = 0;
 
@@ -28,15 +28,12 @@ public class MqttSubAck extends GenericMessage {
 		m.put(CLIENT_KEY, key);
 		m.put(PACKET_IDENTIFIER, twoBytesToLong( data[offset++], data[offset++]));
 		
-	    IPersistentVector v = PersistentVector.create();
+	    IPersistentVector vector = PersistentVector.create();
 
 	    while(offset < data.length) {
-	    	v = v.cons(data[offset++] & 0xFF);
+	    	vector = vector.cons(data[offset++] & 0xFF);
 	    }
-    	//System.out.println(v.toString());
-
-	    m.put(SUBACK_RESPONSE, v);
-
+	    m.put(SUBACK_RESPONSE, vector);
 		return PersistentArrayMap.create(m);
 	}
 
@@ -50,7 +47,7 @@ public class MqttSubAck extends GenericMessage {
 		
 		Long packetIdentifierL = (Long) message.get(PACKET_IDENTIFIER);
 		bytes[length++] = (byte) ((packetIdentifierL >>> 8) & 0xFF);
-		bytes[length++] = (byte) ((packetIdentifierL >>> 0) & 0xFF);
+		bytes[length++] = (byte) (packetIdentifierL & 0xFF);
 
 		PersistentVector vector = (PersistentVector) message.get(SUBACK_RESPONSE);
 		//System.out.println("vector size: " + vector.size());

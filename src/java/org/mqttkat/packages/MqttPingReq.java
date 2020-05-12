@@ -13,7 +13,7 @@ import clojure.lang.PersistentArrayMap;
 
 public class MqttPingReq extends GenericMessage {
 
-	public static IPersistentMap decode(SelectionKey key, byte flags) {
+	public static IPersistentMap decode(SelectionKey key) {
 		Map<Keyword, Object> m = new TreeMap<Keyword, Object>();
 		m.put(PACKET_TYPE, intern("PINGREQ"));
 		m.put(CLIENT_KEY, key);

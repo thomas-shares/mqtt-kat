@@ -13,7 +13,7 @@ import clojure.lang.PersistentArrayMap;
 
 public class MqttAuthenticate extends GenericMessage{
 
-	public static IPersistentMap decode(SelectionKey key, byte flags, byte[] remainAndPayload) throws IOException {
+	public static IPersistentMap decode(SelectionKey key) throws IOException {
 		System.out.println("AUTHENTICATE message...");
 
 		Map<Keyword, Object> m = new TreeMap<Keyword, Object>();

@@ -26,7 +26,7 @@ public abstract class MqttUtil {
 		//byte byte2 =  (byte) ((encodedStr.length >>> 0) & 0xFF); 
 		ByteBuffer ret = ByteBuffer.allocate(encodedStr.length + 2);
 		//log("string: " + str + " length: " + str.length());
-		return ret.put((byte) ((encodedStr.length >>> 8) & 0xFF)).put((byte) ((encodedStr.length >>> 0) & 0xFF)).put(encodedStr);
+		return ret.put((byte) ((encodedStr.length >>> 8) & 0xFF)).put((byte) (encodedStr.length & 0xFF)).put(encodedStr);
 	}
 
 	public static byte[] encodeUTF8Bytes(String str) throws UnsupportedEncodingException {
@@ -97,7 +97,6 @@ public abstract class MqttUtil {
 	
 	public static int twoBytesToInt(byte b1, byte b2) {
 		//log("hoog: " + b1 + "  " +  (b1<<8) + "  laag: " + b2);
-
 		int ret = Short.toUnsignedInt((short) (b1<<8)) + Short.toUnsignedInt((short) (b2 & 0xFF));
 		return ret;
 	}

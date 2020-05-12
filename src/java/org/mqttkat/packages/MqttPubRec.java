@@ -15,7 +15,7 @@ import clojure.lang.PersistentArrayMap;
 
 public class MqttPubRec extends GenericMessage{
 
-	public static IPersistentMap decode(SelectionKey key, byte flags, byte[] data) throws IOException {
+	public static IPersistentMap decode(SelectionKey key, byte[] data) {
 		Map<Keyword, Object> m = new TreeMap<Keyword, Object>();
 		m.put(PACKET_TYPE, intern("PUBREC"));
 		m.put(CLIENT_KEY, key);

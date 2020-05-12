@@ -56,16 +56,16 @@ public class MqttEncode {
 			} else if( strType.equals(":PUBREL")) {
 				outboundMessage = MqttPubRel.encode(message);
 			}
-			
+
 			else {
 				System.out.println("DIDN'T RECOGNISE OUTBOUND MESSAGE TYPE!!!");
 				System.out.println(message.toString());
-				throw new IOException();
+				throw new IOException("Unrecognised keyword");
 			}
 		} else {
 			System.out.println("FAILURE!!!!! not a keyword!!!");
+			throw new IOException("No Keyword provided");
 		}
-		
 		return outboundMessage;
 	}
 }

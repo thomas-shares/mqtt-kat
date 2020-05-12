@@ -17,8 +17,6 @@ class MqttExecutor implements Runnable{
 	final IPersistentMap incoming;
 	final Object asyncChannel;
 	
-	
-
 	public MqttExecutor(IFn handler, IPersistentMap incoming, Object asyncChannel) {
 		this.handler = handler;
 		this.incoming = incoming;
@@ -27,16 +25,13 @@ class MqttExecutor implements Runnable{
 
 	public void run() {
 	    try {
-	    		handler.invoke(incoming, asyncChannel);
+				handler.invoke(incoming, asyncChannel);
 	     } catch (Throwable e) {
 	    	 	e.printStackTrace();
-	    	 	System.out.println("Can't RUN!!! " + e.getMessage());
+	    	 	System.out.println("Can't RUN!!! " + e.getMessage() + " " + incoming);
 	    }
 	}
 }
-
-
-
 
 public class MqttHandler implements IHandler {
     final ExecutorService execs;
@@ -67,7 +62,6 @@ public class MqttHandler implements IHandler {
 
 	public void connect(IPersistentMap connect) {
 		// TODO Auto-generated method stub
-		
 	}
 
 	public void handle(IPersistentMap incoming, Object asyncChannel) {
@@ -76,6 +70,4 @@ public class MqttHandler implements IHandler {
 		}
 		execs.submit(new MqttExecutor(handler, incoming, asyncChannel)); 
 	}
-
-
 }

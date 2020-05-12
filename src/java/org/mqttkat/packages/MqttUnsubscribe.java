@@ -21,7 +21,7 @@ import clojure.lang.PersistentVector;
 
 public class MqttUnsubscribe extends GenericMessage{
 
-	public static IPersistentMap decode(SelectionKey key, byte flags, byte[] data) throws IOException {
+	public static IPersistentMap decode(SelectionKey key, byte[] data) throws IOException {
 		//System.out.println("UNSUBSCRIBE message...");
 
 		int offset = 0;
@@ -31,30 +31,16 @@ public class MqttUnsubscribe extends GenericMessage{
 
 		m.put(PACKET_IDENTIFIER, twoBytesToLong( data[offset++], data[offset++]));
 		
-	    IPersistentVector v = PersistentVector.create();
+	    IPersistentVector vector = PersistentVector.create();
 
 		while(offset < data.length) {
-		   // Map<Object, Object> topicMap = new TreeMap<Object, Object>();
 			String topic = decodeUTF8(data, offset);
-			//System.out.println("topic: " + topic);
-			//topicMap.put(TOPIC, topic);
 			offset += topic.length() + 2;
-			//System.out.println(offset);
-			//topicMap.put(MSG_QOS, qos(data[offset++]));
-			//System.out.println(offset + " " +  msgLength + " " + v.toString() );
-
-			v = v.cons(topic);
-			//System.out.println(v.toString());
+			vector = vector.cons(topic);
 		}
-		//System.out.println("uit de loop: " +  offset + " " + msgLength + " " + v.toString());
-	    //IPersistentVector v = PersistentVector.create(1, 2, 3);
 
-		
-		//PersistentArrayMap  map = PersistentArrayMap.create(arg0)
-
-		m.put(TOPICS, v);
+		m.put(TOPICS, vector);
 		m.put(CLIENT_KEY, key);
-		//m.put(PAYLOAD, Arrays.copyOfRange(remainAndPayload, topic.length() + 2, remainAndPayload.length));
 
 		return PersistentArrayMap.create(m);
 	}
@@ -69,7 +55,7 @@ public class MqttUnsubscribe extends GenericMessage{
 		
 		Long packetIdentifierL = (Long) message.get(PACKET_IDENTIFIER);
 		bytes[length++] = (byte) ((packetIdentifierL >>> 8) & 0xFF);
-		bytes[length++] = (byte) ((packetIdentifierL >>> 0) & 0xFF);
+		bytes[length++] = (byte) (packetIdentifierL & 0xFF);
 
 		PersistentVector vector = (PersistentVector) message.get(TOPICS);
 

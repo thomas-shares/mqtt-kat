@@ -10,11 +10,9 @@ import java.nio.channels.SocketChannel;
 
 import java.io.IOException;
 import java.util.Iterator;
-import java.util.Map;
 import java.nio.ByteBuffer;
 
 import clojure.lang.IPersistentMap;
-import clojure.lang.Keyword;
 
 import org.mqttkat.IHandler;
 import org.mqttkat.MqttSendExecutor;
@@ -48,7 +46,7 @@ public class MqttServer implements Runnable {
    private void closeKey(final SelectionKey key) {
 	   //System.out.println("closing key: " + key.toString());
 		try {
-			IPersistentMap incoming = MqttDisconnect.decode(key, (byte)0x00, new byte[] {0x0});
+			IPersistentMap incoming = MqttDisconnect.decode(key);
 			handler.handle(incoming);
 		} catch (IOException e) {
         	System.out.println(e.getMessage());
@@ -62,27 +60,31 @@ public class MqttServer implements Runnable {
 	
 	public void run() {
 		System.out.println("Server starting on port " + this.port);
+		SelectionKey key = null;
+
 		try {
 			Iterator<SelectionKey> iter;
-			SelectionKey key;
 			while (this.serverChannel.isOpen()) {
 				selector.select();
 				iter = this.selector.selectedKeys().iterator();
 				while (iter.hasNext()) {
 					key = iter.next();
 					iter.remove();
-
 					if (key.isAcceptable()) {
 						this.handleAccept(key);
 					}
-
 					if (key.isReadable()) {
 						this.handleRead(key);
 					}
 				}
 			}
 		} catch (IOException e) {
-			System.out.println("IOException, server of port " + this.port + " terminating. Stack trace:");
+			// The remote forcibly closed the connection, cancel
+			// the selection key and close the channel.
+			if(key != null ) {
+				key.cancel();
+			}
+			System.out.println("IOException, server of port " + this.port + " terminating. Stack trace:" + e.getLocalizedMessage());
 			e.printStackTrace();
 		}
 	}
@@ -98,25 +100,23 @@ public class MqttServer implements Runnable {
 
 	private void handleRead(SelectionKey key) throws IOException {
 		SocketChannel ch = (SocketChannel) key.channel();
+		try {
+			buf.clear();
+			int read = 0;
+			//byte[] remainAndPayload = null;
+			byte type = 0;
+			byte flags = 0;
+			while ((read = ch.read(buf)) > 0) {
+				buf.flip();
+				// byte[] bytes = new byte[buf.limit()];
+				// buf.get(bytes);
+				do {
+					byte[] bytes = new byte[1];
+					buf.get(bytes, 0, 1);
 
-		buf.clear();
-		int read = 0;
-		//byte[] remainAndPayload = null;
-		byte type = 0;
-		byte flags = 0;
-		while ((read = ch.read(buf)) > 0) {
-			buf.flip();
-			// byte[] bytes = new byte[buf.limit()];
-			// buf.get(bytes);
-			do {
-				
-				
-				byte[] bytes = new byte[1];
-				buf.get(bytes, 0, 1);
-	
-				//System.out.println("byte 0: "  + Integer.toBinaryString( (int) bytes[0]));
-				type = (byte) ((bytes[0] & 0xff) >> 4);
-				flags = (byte) (bytes[0] &= 0x0f);
+					//System.out.println("byte 0: "  + Integer.toBinaryString( (int) bytes[0]));
+					type = (byte) ((bytes[0] & 0xff) >> 4);
+					flags = (byte) (bytes[0] &= 0x0f);
 	/*
 				
 				if (type == GenericMessage.MESSAGE_CONNECT) {
@@ -154,88 +154,93 @@ public class MqttServer implements Runnable {
 					System.out.println("FAIL!!!!!! INVALID packet sent: " + type);
 				}
 	*/
-				byte digit;
-				int multiplier = 1;
-				//System.out.println( "limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity() );
-				int msgLength = 0;
+					byte digit;
+					int multiplier = 1;
+					//System.out.println( "limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity() );
+					int msgLength = 0;
 
-				do {
-					digit = buf.get(); // bytes[0];
-					msgLength += ((digit & 0x7F) * multiplier);
-					multiplier *= 128;
-				} while ((digit & 0x80) != 0);
-	
-				//System.out.println("msgLenght: " + msgLength);
-	
-				byte[] remainAndPayload = new byte[msgLength];
-	
-				//System.out.println( "limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity() + " remainLength: " +  remainAndPayload.length);
-				buf.get(remainAndPayload, 0, msgLength);
-				//System.out.println( "limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity());
-	
-				//for(int i=0; i < msgLength ;i++ ){
-				//	System.out.print(" " + remainAndPayload[i]);
-				//}
-				//System.out.print("\n");
-				
-				IPersistentMap incoming = null;
-				if (type == GenericMessage.MESSAGE_CONNECT) {	
-					incoming =  MqttConnect.decode(key, flags, remainAndPayload);
-				} else if ( type ==  GenericMessage.MESSAGE_CONNACK) {
-					incoming = MqttConnAck.decode(key, flags, remainAndPayload);
-				} else if (type == GenericMessage.MESSAGE_PUBLISH) {
-					incoming = MqttPublish.decode(key, flags, remainAndPayload);
-				} else if (type == GenericMessage.MESSAGE_PUBACK) {
-					incoming = MqttPubAck.decode(key, flags, remainAndPayload);
-				} else if (type == GenericMessage.MESSAGE_PUBREC) {
-					incoming = MqttPubRec.decode(key, flags, remainAndPayload);
-				} else if (type == GenericMessage.MESSAGE_PUBREL) {
-					incoming = MqttPubRel.decode(key, flags, remainAndPayload);
-				} else if (type == GenericMessage.MESSAGE_PUBCOMP) {
-					incoming = MqttPubComp.decode(key, flags, remainAndPayload);
-				} else if (type == GenericMessage.MESSAGE_SUBSCRIBE) {
-					incoming = MqttSubscribe.decode(key, flags, remainAndPayload);
-				} else if( type == GenericMessage.MESSAGE_SUBACK) {
-					incoming = MqttSubAck.decode(key, flags, remainAndPayload);
-				} else if (type == GenericMessage.MESSAGE_UNSUBSCRIBE) {
-					incoming = MqttUnsubscribe.decode(key, flags, remainAndPayload);
-				} else if ( type == GenericMessage.MESSAGE_UNSUBACK ) {
-					incoming = MqttUnSubAck.decode(key, flags, remainAndPayload);
-				} else if (type == GenericMessage.MESSAGE_PINGREQ) {
-					incoming = MqttPingReq.decode(key, flags);
-				} else if (type == GenericMessage.MESSAGE_PINGRESP) {
-					incoming = MqttPingResp.decode(key, flags);
-				} else if (type == GenericMessage.MESSAGE_DISCONNECT) {
-					incoming = MqttDisconnect.decode(key, flags, remainAndPayload);
-					//closeKey(key);
-				} else if ( type ==  GenericMessage.MESSAGE_AUTHENTICATION) {
-					incoming = MqttAuthenticate.decode(key, flags, remainAndPayload);
-				} else {
-					System.out.println("FAIL!!!!!! INVALID packet sent: " + type);
-					closeKey(key);
-				}
-	
-				if( incoming != null ) {
-					handler.handle(incoming);
-					receivedBytes.getAndAdd(msgLength);
-					receivedMessages.getAndIncrement();
-				}
-			} while (buf.limit() > buf.position());
+					do {
+						digit = buf.get(); // bytes[0];
+						msgLength += ((digit & 0x7F) * multiplier);
+						multiplier *= 128;
+					} while ((digit & 0x80) != 0);
 
-			buf.clear();
+					//System.out.println("msgLenght: " + msgLength);
+
+					byte[] remainAndPayload = new byte[msgLength];
+
+					//System.out.println( "limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity() + " remainLength: " +  remainAndPayload.length);
+					buf.get(remainAndPayload, 0, msgLength);
+					//System.out.println( "limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity());
+
+					//for(int i=0; i < msgLength ;i++ ){
+					//	System.out.print(" " + remainAndPayload[i]);
+					//}
+					//System.out.print("\n");
+
+					IPersistentMap incoming = null;
+					if (type == GenericMessage.MESSAGE_CONNECT) {
+						incoming = MqttConnect.decode(key, flags, remainAndPayload);
+					} else if (type == GenericMessage.MESSAGE_CONNACK) {
+						incoming = MqttConnAck.decode(key, remainAndPayload);
+					} else if (type == GenericMessage.MESSAGE_PUBLISH) {
+						incoming = MqttPublish.decode(key, flags, remainAndPayload);
+					} else if (type == GenericMessage.MESSAGE_PUBACK) {
+						incoming = MqttPubAck.decode(key, remainAndPayload);
+					} else if (type == GenericMessage.MESSAGE_PUBREC) {
+						incoming = MqttPubRec.decode(key, remainAndPayload);
+					} else if (type == GenericMessage.MESSAGE_PUBREL) {
+						incoming = MqttPubRel.decode(key, remainAndPayload);
+					} else if (type == GenericMessage.MESSAGE_PUBCOMP) {
+						incoming = MqttPubComp.decode(key, remainAndPayload);
+					} else if (type == GenericMessage.MESSAGE_SUBSCRIBE) {
+						incoming = MqttSubscribe.decode(key, remainAndPayload);
+					} else if (type == GenericMessage.MESSAGE_SUBACK) {
+						incoming = MqttSubAck.decode(key, remainAndPayload);
+					} else if (type == GenericMessage.MESSAGE_UNSUBSCRIBE) {
+						incoming = MqttUnsubscribe.decode(key, remainAndPayload);
+					} else if (type == GenericMessage.MESSAGE_UNSUBACK) {
+						incoming = MqttUnSubAck.decode(key, remainAndPayload);
+					} else if (type == GenericMessage.MESSAGE_PINGREQ) {
+						incoming = MqttPingReq.decode(key);
+					} else if (type == GenericMessage.MESSAGE_PINGRESP) {
+						incoming = MqttPingResp.decode(key);
+					} else if (type == GenericMessage.MESSAGE_DISCONNECT) {
+						incoming = MqttDisconnect.decode(key);
+						//closeKey(key);
+					} else if (type == GenericMessage.MESSAGE_AUTHENTICATION) {
+						incoming = MqttAuthenticate.decode(key);
+					} else {
+						System.out.println("FAIL!!!!!! INVALID packet sent: " + type);
+						closeKey(key);
+					}
+
+					if (incoming != null) {
+						handler.handle(incoming);
+						receivedBytes.getAndAdd(msgLength);
+						receivedMessages.getAndIncrement();
+					}
+				} while (buf.limit() > buf.position());
+
+				buf.clear();
+			}
+
+			//client has gone away...
+			if (read < 0) {
+				//System.out.println("Client has gone away...");
+				//System.out.println("message received: " + receivedMessage.get());
+				//System.out.println("Message sent: " + sentMessages.get());
+				closeKey(key);
+			}
+
+			//String address = (new StringBuilder(ch.socket().getInetAddress().toString())).append(":")
+			//		.append(ch.socket().getPort()).toString();
 		}
-		
-		//client has gone away...
-		if(read<0) {
-			//System.out.println("Client has gone away...");
-			//System.out.println("message received: " + receivedMessage.get());
-			//System.out.println("Message sent: " + sentMessages.get());
-			closeKey(key);
+		catch (IOException e) {
+			key.cancel();
+			ch.close();
+			return;
 		}
-		
-		//String address = (new StringBuilder(ch.socket().getInetAddress().toString())).append(":")
-		//		.append(ch.socket().getPort()).toString();
-		
 	}
 
 	public void start() throws IOException {

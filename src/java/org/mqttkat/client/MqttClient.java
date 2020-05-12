@@ -228,33 +228,33 @@ public class MqttClient implements Runnable {
 			if (type == GenericMessage.MESSAGE_CONNECT) {	
 				incoming =  MqttConnect.decode(key, flags, rspData);
 			} else if ( type ==  GenericMessage.MESSAGE_CONNACK) {
-				incoming = MqttConnAck.decode(key, flags, rspData);
+				incoming = MqttConnAck.decode(key, rspData);
 			} else if (type == GenericMessage.MESSAGE_PUBLISH) {
 				incoming = MqttPublish.decode(key, flags, rspData);
 			} else if (type == GenericMessage.MESSAGE_PUBACK) {
-				incoming = MqttPubAck.decode(key,  flags, rspData);
+				incoming = MqttPubAck.decode(key, rspData);
 			} else if (type == GenericMessage.MESSAGE_PUBREC) {
-				incoming = MqttPubRec.decode(key, flags, rspData);
+				incoming = MqttPubRec.decode(key, rspData);
 			} else if (type == GenericMessage.MESSAGE_PUBREL) {
-				incoming = MqttPubRel.decode(key,  flags, rspData);
+				incoming = MqttPubRel.decode(key, rspData);
 			} else if (type == GenericMessage.MESSAGE_PUBCOMP) {
-				incoming = MqttPubComp.decode(key,  flags, rspData);
+				incoming = MqttPubComp.decode(key, rspData);
 			} else if (type == GenericMessage.MESSAGE_SUBSCRIBE) {
-				incoming = MqttSubscribe.decode(key, flags, rspData);
+				incoming = MqttSubscribe.decode(key, rspData);
 			} else if( type == GenericMessage.MESSAGE_SUBACK) {
-				incoming = MqttSubAck.decode(key, flags, rspData);
+				incoming = MqttSubAck.decode(key, rspData);
 			} else if (type == GenericMessage.MESSAGE_UNSUBSCRIBE) {
-				incoming = MqttUnsubscribe.decode(key, flags, rspData);
+				incoming = MqttUnsubscribe.decode(key, rspData);
 			} else if ( type == GenericMessage.MESSAGE_UNSUBACK ) {
-				incoming = MqttUnSubAck.decode(key,  flags, rspData);
+				incoming = MqttUnSubAck.decode(key, rspData);
 			} else if (type == GenericMessage.MESSAGE_PINGREQ) {
-				incoming = MqttPingReq.decode(key,  flags);
+				incoming = MqttPingReq.decode(key);
 			} else if (type == GenericMessage.MESSAGE_PINGRESP) {
-				incoming = MqttPingResp.decode(key,  flags);
+				incoming = MqttPingResp.decode(key);
 			} else if (type == GenericMessage.MESSAGE_DISCONNECT) {
-				incoming = MqttDisconnect.decode(key,  flags, rspData);
+				incoming = MqttDisconnect.decode(key);
 			} else if ( type ==  GenericMessage.MESSAGE_AUTHENTICATION) {
-				incoming = MqttAuthenticate.decode(key, flags, rspData);
+				incoming = MqttAuthenticate.decode(key);
 			} else {
 				System.out.println("FAIL!!!!!! INVALID packet sent: " + type);
 			}

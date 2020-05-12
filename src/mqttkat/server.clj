@@ -19,7 +19,7 @@
                   :SUBSCRIBE h/subscribe
                   :UNSUBSCRIBE h/unsubscribe
                   :PINGREQ h/pingreq
-                  :PINGRES h/pingresp
+                  :PINGRESP h/pingresp
                   :DISCONNECT h/disconnect
                   :AUTHENTICATE h/authenticate})
 
