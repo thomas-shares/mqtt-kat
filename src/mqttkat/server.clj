@@ -1,5 +1,7 @@
 (ns mqttkat.server
   (:require [mqttkat.handlers :as h]
+            [mqttkat.handlers.connect :as connect]
+            [mqttkat.handlers.disconnect :as disconnect]
             [mqttkat.util :as util]
             [mqttkat.s :refer [server]])
             ;[clj-async-profiler.core :as prof])
@@ -9,7 +11,7 @@
 
 (set! *warn-on-reflection* true)
 
-(def handler-map {:CONNECT h/connect
+(def handler-map {:CONNECT connect/connect
                   :CONNACK h/connack
                   :PUBLISH h/publish
                   :PUBACK  h/puback
@@ -20,7 +22,7 @@
                   :UNSUBSCRIBE h/unsubscribe
                   :PINGREQ h/pingreq
                   :PINGRESP h/pingresp
-                  :DISCONNECT h/disconnect
+                  :DISCONNECT disconnect/disconnect
                   :AUTHENTICATE h/authenticate})
 
 (defn handler-fn [msg dummy]

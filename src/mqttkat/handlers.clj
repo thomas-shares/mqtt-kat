@@ -1,13 +1,14 @@
 (ns mqttkat.handlers
-  (:use [mqttkat.s :only [server]])
-  (:import [org.mqttkat.server MqttServer]
-           [org.mqttkat.packages MqttConnect MqttPingReq MqttPublish
-            MqttDisconnect MqttSubscribe MqttPubRel MqttPubAck MqttPubRec
-            MqttPubComp MqttSubAck MqttConnAck])
-  (:require [mqttkat.spec :as spec]
+  (:require [mqttkat.s :refer [server]]
+            [overtone.at-at :as at]
+            [mqttkat.spec :as spec]
             [clojurewerkz.triennium.mqtt :as tr]
             [clojure.spec.alpha :as s]
-            [clojure.core.async :as async]))
+            [clojure.core.async :as async])
+  (:import [org.mqttkat.server MqttServer]
+           [org.mqttkat.packages MqttPingReq MqttPublish
+                                 MqttSubscribe MqttPubRel MqttPubAck MqttPubRec
+                                 MqttPubComp MqttSubAck MqttPingResp]))
 
 (defn logger [msg & args]
   (when true
@@ -16,70 +17,66 @@
 (def packet-identifier-queue-size 1024)
 (def clients (atom {}))
 (def inflight (atom {}))
-(def sub2 (atom (tr/make-trie)))
+(def subscriber-trie (atom (tr/make-trie)))
 (def outbound (atom {}))
 (def packet-identifiers (async/chan packet-identifier-queue-size))
+
+(def my-pool (at/mk-pool))
+
+(defn check-timer [key time-out]
+  (let [current-time (System/currentTimeMillis)
+        last-active (:last-active (get @clients key))]
+    (when-not (nil? last-active)
+      (when (< last-active (- current-time time-out))
+        (println "Timer fired for client: " (select-keys (get @clients key) [:last-active :client-id]))))))
+
+(defn add-timer [key time]
+  (let [time-out (* 1500 time)
+        timer (at/every time-out #(check-timer key time-out) my-pool)]
+    (swap! clients assoc-in [key :timer] timer)))
+
+
+
 
 ;; pre-load queue
 (doseq [i (range 1 (inc packet-identifier-queue-size))]
   (async/>!! packet-identifiers i))
-;;  example
-;; {"topic" [key_of_client1, key_of_client1, ..]
-;;  "other_topic" [key_of_clien3]}
-;(defonce subscribers (atom {}))
 
 (defn get-packet-identifier []
   (let [p (async/<!! packet-identifiers)]
-    (logger "get " p)
+    ;(logger "get " p)
    p))
 
 (defn put-packet-identifier [p]
-  (logger "put " p)
+  ;;(logger "put " p)
   (async/>!! packet-identifiers p))
 
-(defn add-client [msg]
-  (let [client-id (:client-id msg)
-        _ (logger client-id)
-        x (some #(and (= (:client-id (second %)) client-id ) %)  @clients)
-        _ (logger (count @clients))]
-    x))
-
-(defn send-message [keys msg]
-  (logger "sending message  from  clj " (:packet-type msg) " " (:packet-identifier msg))
-  ;;(logger (class  keys))
-  (let [s (:server (meta @server))]))
+#_(defn send-message [keys msg]
+    ;;(logger "sending message  from  clj " (:packet-type msg) " " (:packet-identifier msg))
+    ;;(logger (class  keys))
+    (let [s (:server (meta @server))]))
   ;  (.sendMessage ^MqttServer s keys msg)))
 
+(def o (Object.))
+
+(defn update-timestamps [client-keys]
+  (doseq [client-key client-keys]
+    (locking o
+      (swap! clients assoc-in [client-key :last-active] (System/currentTimeMillis)))))
+
 (defn send-buffer [keys buf]
-  (logger "sending buffer  from  clj ")
+  ;;(logger "sending buffer from clj")
   ;;(logger (class  keys))
+  (update-timestamps keys)
   (let [s (:server (meta @server))]
     (.sendMessageBuffer ^MqttServer s keys buf)))
 
-(defn connect [{:keys [protocol-name protocol-version client-key] :as msg}]
-  (logger "clj CONNECT: " protocol-name protocol-version client-key msg)
-  (when-not (= protocol-version 4)
-    (send-buffer [client-key]
-                 (MqttConnAck/encode {:packet-type :CONNACK
-                                      :session-present? false?
-                                      :connect-return-code 0x01}))
-    (send-buffer [client-key]
-                 (MqttDisconnect/encode)))
-  (when-not (= protocol-name "MQTT")
-    (send-buffer [client-key]
-                 (MqttDisconnect/encode)))
-  (add-client msg)
-  (swap! clients assoc client-key (dissoc msg :packet-type))
-  (send-buffer [client-key]
-               (MqttConnAck/encode {:packet-type :CONNACK
-                                    :session-present? false
-                                    :connect-return-code 0x00})))
 
 (defn connack [msg]
   (logger "CONNACK: " msg))
 
 (defn qos-0 [keys topic msg]
-  (logger "respond QOS 0 ")
+  ;;(logger "respond QOS 0 ")
   (send-buffer (mapv #(:client-key %) keys)
     (MqttPublish/encode {:packet-type :PUBLISH
                          :payload (:payload msg)
@@ -88,7 +85,7 @@
                          :retain? false})))
 
 (defn qos-1-send [keys topic msg]
-  (logger "respond qos 1")
+  ;;(logger "respond qos 1")
   (doseq [key (mapv #(:client-key %) keys)]
       (send-buffer [key]
         (MqttPublish/encode {:packet-type :PUBLISH
@@ -100,7 +97,7 @@
 
 
 (defn qos-1 [keys topic msg]
-  (logger  "qos 1 received..." keys)
+  ;;(logger  "qos 1 received..." keys)
   (send-buffer [(:client-key msg)]
     (MqttPubAck/encode {:packet-type :PUBACK
                         :packet-identifier (:packet-identifier msg)}))
@@ -118,21 +115,20 @@
       ;    (swap! outbound assoc (:client-key k) (:packet-identifier msg))))))
 
 (defn qos-2 [keys topic msg]
-  (logger "QOS 2")
+  ;;(logger "QOS 2")
   (swap! inflight assoc [(:client-key msg) (:packet-identifier msg)] {:msg msg :topic topic :keys keys})
   (send-buffer [(:client-key msg)]
     (MqttPubRec/encode {:packet-type :PUBREC
                         :packet-identifier (:packet-identifier msg)})))
 
-
 (defn publish [msg]
-  (logger "clj PUBLISH: " msg)
+  ;;(logger "clj PUBLISH: " msg)
   ;(logger (str "valid publish: " (s/valid? :mqtt/publish msg)))
   ;(s/explain :mqtt/publish msg)
   (let [topic (:topic msg)
         qos (:qos msg)
         ;keys (get @subscribers topic)
-        keys (tr/matching-vals @sub2 topic)
+        keys (tr/matching-vals @subscriber-trie topic)
         _ (logger "Keys: " keys " qos: " qos)]
     (when keys
       (condp = qos
@@ -151,12 +147,10 @@
      (MqttPubRel/encode
        {:packet-type :PUBREL :packet-identifier (:packet-identifier msg)})))
 
-
 (defn qos-2-send [keys topic msg]
   (let [qos-0-keys (filter #(zero? (:qos %)) keys)
         qos-1-keys (filter #(= 1 (:qos %)) keys)
         qos-2-keys (filter #(= 2 (:qos %)) keys)]
-
     (logger (count qos-0-keys) " " (count qos-1-keys) " " (count qos-2-keys))
 
     (when (< 0 (count qos-0-keys))
@@ -172,7 +166,6 @@
                                  :qos 2
                                  :retain? false
                                  :packet-identifier (get-packet-identifier)}))))))
-
 
 (defn pubrel [msg]
   (logger "received (PUBREL: " msg)
@@ -200,28 +193,30 @@
         topics (:topics msg)
         qos (mapv #(long (:qos %)) topics)]
         ;_ (logger qos)]
+    (swap! clients update-in [client-key :subscribed-topics] conj topics)
     (doseq [t topics]
       ;(swap! subscribers add-subscriber (:topic-filter t) client-key)
-      (swap! sub2 tr/insert (:topic-filter t)  {:client-key client-key :qos (:qos t)}))
+      (swap! subscriber-trie tr/insert (:topic-filter t) {:client-key client-key :qos (:qos t)}))
     ;(logger "subscribers: " @sub2)
     (send-buffer [client-key] (MqttSubAck/encode
                                {:packet-type :SUBACK
-                                :packet-identifier  (:packet-identifier msg)
+                                :packet-identifier (:packet-identifier msg)
                                 :response qos}))))
 
 (defn remove-subsciber [m [topic] key]
   (update m topic (fn [v] (filterv #(not= key %) v))))
 
-(defn unsubscribe [msg]
-  (logger "clj UNSCUBSCRIBE: " msg)
+(defn unsubscribe [{:keys [topics client-key] :as msg}]
+  (logger "clj UNSUBSCRIBE: " msg)
   ;(swap! subscribers remove-subsciber (:topics msg) (:client-key msg))
-  (doseq [t (:topics msg)]
-    (swap! sub2 tr/delete (:topic-filter t) (:client-key t))))
+  (swap! clients update-in [client-key :subscribed-topics] disj topics)
+  (doseq [topic topics]
+    (swap! subscriber-trie tr/delete (:topic-filter topic) (:client-key topic))))
 
 
 (defn pingreq [msg]
   (logger "clj PINGREQ: " msg)
-  (send-buffer [(:client-key msg)] (MqttPingReq/encode {:packet-type :PINGRESP})))
+  (send-buffer [(:client-key msg)] (MqttPingResp/encode {:packet-type :PINGRESP})))
 
 (defn pingresp [msg]
   (logger "clj PINGRESP: " msg))
@@ -230,13 +225,7 @@
 (defn remove-client-subscriber [m val]
   (into {} (map (fn [[k v]] (let [nv (filterv #(not= val %) v)] {k nv}))  m)))
 
-(defn disconnect [msg]
-  ;(logger "clj DISCONNECT: " msg)
-  ;(println "count: " (count (get @subscribers "test")))
-  ;(swap! sub2 tr/delete-matching  (:client-key msg))
-  (swap! clients dissoc (:client-key msg)))
-  ;(println "subscribers: " @subscribers)
-  ;(println "count: " (count (get @subscribers "test"))))
+
 
 (defn authenticate [msg]
   (println "AUTHENTICATE: " msg))

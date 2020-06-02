@@ -111,7 +111,7 @@
 
 (defn disconnect [client]
   (reset! subscribe-topics #{})
-  (client/disconnect))
+  (client/disconnect client))
 
 (defn subscribe [client]
   (let [topic-filter (client/subscribe ^MqttClient client)
