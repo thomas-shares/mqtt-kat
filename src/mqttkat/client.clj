@@ -79,10 +79,9 @@
     (.sendMessage ^MqttClient client bufs)))
 
 (defn disconnect [client]
-  (let [map (gen/generate (s/gen :mqtt/disconnect))
-        bufs (MqttDisconnect/encode)]
-    (.sendMessage ^MqttClient client bufs)
-    (reset! *client-atom* nil)))
+    (->> (MqttDisconnect/encode)
+         (.sendMessage ^MqttClient client))
+    (reset! *client-atom* nil))
 
 (defn close [client]
   (.close ^MqttClient client))
