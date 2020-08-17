@@ -6,8 +6,8 @@
 
 (defn disconnect-client [client-key]
   (logger "Disconnecting client " client-key)
-  (swap! clients dissoc client-key)
-  (logger (keys @clients))
+  (swap! *clients* dissoc client-key)
+  (logger (keys @*clients*))
   (let [s (:server (meta @server))]
     (.closeConnection ^MqttServer s client-key)))
 
@@ -16,7 +16,7 @@
   (logger "clj DISCONNECT received: " msg)
   ;(println "count: " (count (get @subscribers "test")))
   ;(swap! sub2 tr/delete-matching  (:client-key msg))
-  (logger "before swap "  (keys @clients))
-  (swap! clients dissoc (:client-key msg))
-  (logger "after swap " (keys @clients))
+  (logger "before swap " (keys @*clients*))
+  (swap! *clients* dissoc (:client-key msg))
+  (logger "after swap " (keys @*clients*))
   (disconnect-client (:client-key msg)))
