@@ -1,5 +1,5 @@
 (ns mqttkat.handlers
-  (:require [mqttkat.s :refer [server]]
+  (:require [mqttkat.s :refer [*server*]]
             [overtone.at-at :as at]
             [mqttkat.spec :as spec]
             [clojurewerkz.triennium.mqtt :as tr]
@@ -29,7 +29,7 @@
       (when (some-> last-active (< (- current-time time-out)))
         (println "Timer fired for client: " (select-keys (get @*clients* key) [:last-active :client-id])))))
 
-(defn add-timer [key time]
+(defn add-timer! [key time]
   (let [time-out (* 1500 time)
         timer (at/every time-out #(check-timer key time-out) my-pool)]
     (swap! *clients* assoc-in [key :timer] timer)))
@@ -53,7 +53,7 @@
 #_(defn send-message [keys msg]
     ;;(logger "sending message  from  clj " (:packet-type msg) " " (:packet-identifier msg))
     ;;(logger (class  keys))
-    (let [s (:server (meta @server))]))
+    (let [s (:server (meta @*server*))]))
   ;  (.sendMessage ^MqttServer s keys msg)))
 
 (def o (Object.))
@@ -67,7 +67,7 @@
   ;;(logger "sending buffer from clj")
   ;;(logger (class  keys))
   (update-timestamps keys)
-  (let [s (:server (meta @server))]
+  (let [s (:server (meta @*server*))]
     (.sendMessageBuffer ^MqttServer s keys buf)))
 
 
@@ -105,9 +105,9 @@
 
     ;;(println (count qos-0-keys) " " (count qos-1-keys))
 
-    (when (<  0 (count qos-0-keys))
+    (when (not-empty qos-0-keys)
       (qos-0 qos-0-keys topic msg))
-    (when (< 0 (count qos-1-keys))
+    (when (not-empty qos-1-keys)
        (qos-1-send qos-1-keys topic msg))))
       ;  (doseq [k qos-1-keys]
       ;    (logger "K " k)
@@ -151,12 +151,11 @@
         qos-1-keys (filter #(= 1 (:qos %)) keys)
         qos-2-keys (filter #(= 2 (:qos %)) keys)]
     (logger (count qos-0-keys) " " (count qos-1-keys) " " (count qos-2-keys))
-
-    (when (< 0 (count qos-0-keys))
+    (when (not-empty qos-0-keys)
       (qos-0 qos-0-keys topic msg))
-    (when (< 0 (count qos-1-keys))
+    (when (not-empty qos-1-keys)
       (qos-1-send qos-1-keys topic msg))
-    (when (< 0 (count qos-2-keys))
+    (when (not-empty qos-2-keys)
       (doseq [key (mapv #(:client-key %) qos-2-keys)]
         (send-buffer [key]
             (MqttPublish/encode {:packet-type :PUBLISH
