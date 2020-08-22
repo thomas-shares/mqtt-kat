@@ -21,7 +21,7 @@
                     (MqttConnAck/encode {:packet-type :CONNACK
                                          :session-present? false?
                                          :connect-return-code 0x01}))
-      (disconnect client-key))
+      (disconnect msg))
     (not= protocol-name "MQTT")
     (do (logger "DISCONNECTING!!!")
       (disconnect-client client-key))

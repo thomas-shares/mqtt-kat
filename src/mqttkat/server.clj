@@ -52,7 +52,7 @@
   (when @*server*
     ;(prof/stop {})
     (println "Server stopping...")
-    (@*server* :timeout 1000)
+    (alter-meta! *server* #(assoc % :timeout 1000))
     (reset! *server* nil)))
 
 (defn -main [& args]
