@@ -1,3 +1,3 @@
 (ns mqttkat.s)
 
-(defonce server (atom nil))
+(defonce ^:dynamic *server* (atom nil))

@@ -3,7 +3,7 @@
             [mqttkat.handlers.connect :as connect]
             [mqttkat.handlers.disconnect :as disconnect]
             [mqttkat.util :as util]
-            [mqttkat.s :refer [server]])
+            [mqttkat.s :refer [*server*]])
             ;[clj-async-profiler.core :as prof])
   (:import [org.mqttkat.server MqttServer]
            [org.mqttkat MqttHandler])
@@ -46,14 +46,14 @@
 (defn start
   ([] (start "0.0.0.0" 1883 (MqttHandler. ^clojure.lang.IFn handler-fn 4)))
   ([ip port handler]
-   (reset! server (run-server ip port handler))))
+   (reset! *server* (run-server ip port handler))))
 
 (defn stop []
-  (when-not (nil? @server)
+  (when @*server*
     ;(prof/stop {})
     (println "Server stopping...")
-    (@server :timeout 1000)
-    (reset! server nil)))
+    (alter-meta! *server* #(assoc % :timeout 1000))
+    (reset! *server* nil)))
 
 (defn -main [& args]
   (start)

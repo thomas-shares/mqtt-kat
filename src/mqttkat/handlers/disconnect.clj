@@ -1,5 +1,5 @@
 (ns mqttkat.handlers.disconnect
-  (:require [mqttkat.s :refer [server]]
+  (:require [mqttkat.s :refer [*server*]]
             [mqttkat.handlers :refer :all])
   (:import [org.mqttkat.packages MqttDisconnect]
            [org.mqttkat.server MqttServer]))
@@ -8,7 +8,7 @@
   (logger "Disconnecting client " client-key)
   (swap! *clients* dissoc client-key)
   (logger (keys @*clients*))
-  (let [s (:server (meta @server))]
+  (let [s (:server (meta @*server*))]
     (.closeConnection ^MqttServer s client-key)))
 
 
