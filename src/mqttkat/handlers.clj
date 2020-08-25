@@ -201,12 +201,13 @@
 (defn remove-subsciber [m [topic] key]
   (update m topic (fn [v] (filterv #(not= key %) v))))
 
-(defn unsubscribe [{:keys [topics client-key] :as msg}]
+(defn unsubscribe
+  [{:keys [topics client-key] :as msg}]
   (logger "clj UNSUBSCRIBE: " msg)
   ;(swap! subscribers remove-subsciber (:topics msg) (:client-key msg))
   (swap! *clients* update-in [client-key :subscribed-topics] disj topics)
-  (doseq [topic topics]
-    (swap! *subscriber-trie* tr/delete (:topic-filter topic) (:client-key topic))))
+  (doseq [{:keys [topic-filter client-key]} topics]
+    (swap! *subscriber-trie* tr/delete topic-filter client-key)))
 
 
 (defn pingreq [msg]
