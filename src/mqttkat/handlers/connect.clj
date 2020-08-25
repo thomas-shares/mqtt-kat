@@ -11,30 +11,46 @@
           _ (logger (count @*clients*))]
       x))
 
+(defn client-contains? [client-key]
+  (contains? @*clients* client-key))
 
+(defn protocol-version-not-valid? [version]
+  (not= version 4))
 
+(defn protocol-name-not-valid? [name]
+  (not= name "MQTT"))
 
+(defn handle-not-valid-protocol-version
+  [{:keys [client-key] :as msg}]
+  (do (send-buffer [client-key] (MqttConnAck/encode {:packet-type :CONNACK
+                                                     :session-present? false
+                                                     :connect-return-code 0x01}))
+      (disconnect msg)))
 
-(defn connect [{:keys [protocol-name protocol-version client-key keep-alive] :as msg}]
+(defn handle-not-valid-protocol-name
+  [client-key]
+  (do (logger "DISCONNECTING!!!")
+      (disconnect-client client-key)))
+
+(defn handle-success
+  [{:keys [client-key keep-alive] :as msg}]
+  (do
+    (swap! *clients* assoc client-key (dissoc msg :packet-type))
+    (when (pos? keep-alive) (add-timer! client-key keep-alive))
+    (send-buffer [client-key] (MqttConnAck/encode {:packet-type :CONNACK
+                                                   :session-present? false
+                                                   :connect-return-code 0x00}))))
+
+(defn connect [{:keys [protocol-name protocol-version client-key] :as msg}]
   (logger "clj CONNECT: " protocol-name protocol-version client-key msg)
   (cond
-    (contains? @*clients* client-key)
+    (client-contains? client-key)
     (disconnect-client client-key)
-    (not= protocol-version 4)
-    (do (send-buffer [client-key]
-                    (MqttConnAck/encode {:packet-type :CONNACK
-                                         :session-present? false?
-                                         :connect-return-code 0x01}))
-      (disconnect msg))
-    (not= protocol-name "MQTT")
-    (do (logger "DISCONNECTING!!!")
-      (disconnect-client client-key))
-    :else (do
-            (swap! *clients* assoc client-key (dissoc msg :packet-type))
-            (when (pos? keep-alive) (add-timer! client-key keep-alive))
-            (send-buffer [client-key] (MqttConnAck/encode {:packet-type :CONNACK
-                                                           :session-present? false
-                                                           :connect-return-code 0x00})))))
+    (protocol-version-not-valid? protocol-version)
+    (handle-not-valid-protocol-version msg)
+    (protocol-name-not-valid? protocol-name)
+    (handle-not-valid-protocol-name client-key)
+    :else (handle-success msg)))
 
 
 
