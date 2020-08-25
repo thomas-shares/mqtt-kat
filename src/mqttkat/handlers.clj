@@ -56,12 +56,9 @@
     (let [s (:server (meta @*server*))]))
   ;  (.sendMessage ^MqttServer s keys msg)))
 
-(def o (Object.))
-
 (defn update-timestamps [client-keys]
   (doseq [client-key client-keys]
-    (locking o
-      (swap! *clients* assoc-in [client-key :last-active] (System/currentTimeMillis)))))
+      (swap! *clients* assoc-in [client-key :last-active] (System/currentTimeMillis))))
 
 (defn send-buffer [keys buf]
   ;;(logger "sending buffer from clj")
