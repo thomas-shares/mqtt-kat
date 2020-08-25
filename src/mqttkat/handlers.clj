@@ -198,8 +198,6 @@
                                 :packet-identifier (:packet-identifier msg)
                                 :response qos}))))
 
-(defn remove-subsciber [m [topic] key]
-  (update m topic (fn [v] (filterv #(not= key %) v))))
 
 (defn unsubscribe
   [{:keys [topics client-key] :as msg}]
@@ -217,9 +215,12 @@
 (defn pingresp [msg]
   (logger "clj PINGRESP: " msg))
 
+(comment
+  (defn remove-subsciber [m [topic] key]
+    (update m topic (fn [v] (filterv #(not= key %) v))))
 
-(defn remove-client-subscriber [m val]
-  (into {} (map (fn [[k v]] (let [nv (filterv #(not= val %) v)] {k nv}))  m)))
+  (defn remove-client-subscriber [m val]
+    (into {} (map (fn [[k v]] (let [nv (filterv #(not= val %) v)] {k nv}))  m))))
 
 
 
