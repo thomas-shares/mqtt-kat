@@ -25,9 +25,9 @@
                   :DISCONNECT disconnect/disconnect
                   :AUTHENTICATE h/authenticate})
 
-(defn handler-fn [msg dummy]
+(defn handler-fn [{:keys [packet-type] :as msg} _]
   ;(println msg)
-  (when-let [packet-type (:packet-type msg)]
+  (when packet-type
     ((packet-type handler-map) msg)))
 
 (defn run-server [ip port handler]
@@ -50,11 +50,11 @@
 
 (defn stop []
   (when @*server*
-    ;(prof/stop {})
-    (println "Server stopping...")
-    (alter-meta! *server* #(assoc % :timeout 1000))
-    (reset! *server* nil)))
+    (do (println "Server stopping...")
+      (alter-meta! *server* #(assoc % :timeout 1000))
+      (reset! *server* nil))))
 
-(defn -main [& args]
+
+(defn -main [& _]
   (start)
   (util/info))
