@@ -25,7 +25,7 @@
 (def channel (async/chan 1))
 
 
-(defn handler-fn [msg]
+(defn handler-fn [msg _]
   ;(println "Posting on async channel: ")
   (clojure.pprint/pprint (dissoc msg :client-key))
   (async/go
@@ -36,12 +36,12 @@
 
 (defn mqtt-fixture [f]
   (println "here...")
-  (server/start "0.0.0.0" 1883 handler)
+  (server/start! "0.0.0.0" 1883 handler)
   (def client (client/client2 "localhost" 1883))
 
   (f)
   (try
-    (server/stop)
+    (server/stop!)
     (Thread/sleep 500)
     (catch Exception e)))
 
@@ -120,17 +120,17 @@
         received-map (async/<!! channel)
         _ (.close ^MqttClient client)]
     (is (= map (dissoc received-map :client-key)))))
-
-(deftest unsuback-packet
-  (let [client (client/client2 "localhost" 1883)
-        map (gen/generate (s/gen :mqtt/unsuback))
-        _ (clojure.pprint/pprint map)
-        bufs (MqttUnSubAck/encode map)
-        _ (.sendMessage ^MqttClient client bufs)
-        received-map (async/<!! channel)
-        _ (println "client: read from channel...")
-        _ (.close ^MqttClient client)]
-    (is (= map (dissoc received-map :client-key)))))
+(comment
+  (deftest unsuback-packet
+    (let [client (client/client2 "localhost" 1883)
+          map (gen/generate (s/gen :mqtt/unsuback))
+          _ (clojure.pprint/pprint map)
+          bufs (MqttUnSubAck/encode map)
+          _ (.sendMessage ^MqttClient client bufs)
+          received-map (async/<!! channel)
+          _ (println "client: read from channel...")
+          _ (.close ^MqttClient client)]
+      (is (= map (dissoc received-map :client-key))))))
 
 
 ;(deftest disconnect-packet

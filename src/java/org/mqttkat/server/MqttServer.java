@@ -2,15 +2,13 @@ package org.mqttkat.server;
 
 import static java.nio.channels.SelectionKey.OP_ACCEPT;
 
-import java.nio.channels.Selector;
-import java.nio.channels.ServerSocketChannel;
+import java.nio.channels.*;
 import java.net.InetSocketAddress;
-import java.nio.channels.SelectionKey;
-import java.nio.channels.SocketChannel;
 
 import java.io.IOException;
 import java.util.Iterator;
 import java.nio.ByteBuffer;
+import java.util.Set;
 
 import clojure.lang.IPersistentMap;
 
@@ -30,6 +28,7 @@ public class MqttServer implements Runnable {
 	private final int port;
 	private final ByteBuffer buf = ByteBuffer.allocate(4096);
 	private final MqttSendExecutor executor;
+	private Thread serverThread  = null;
 
 	public MqttServer(String ip, int port, IHandler handler) throws IOException {
 		this.selector = Selector.open();
@@ -43,7 +42,7 @@ public class MqttServer implements Runnable {
 	}
 
    private void closeKey(final SelectionKey key) {
-	   //System.out.println("closing key: " + key.toString());
+	   System.out.println("closing key: " + key.toString());
 		try {
 			IPersistentMap incoming = MqttDisconnect.decode(key);
 			handler.handle(incoming);
@@ -71,12 +70,14 @@ public class MqttServer implements Runnable {
 
 		try {
 			Iterator<SelectionKey> iter;
-			while (this.serverChannel.isOpen()) {
+			while (this.serverChannel.isOpen() && selector.isOpen()) {
 				selector.select();
-				iter = this.selector.selectedKeys().iterator();
+				Set<SelectionKey> keys = selector.selectedKeys();
+				iter = keys.iterator();
+
 				while (iter.hasNext()) {
 					key = iter.next();
-					iter.remove();
+
 					if (key.isAcceptable()) {
 						this.handleAccept(key);
 					}
@@ -85,12 +86,16 @@ public class MqttServer implements Runnable {
 					}
 				}
 			}
+		} catch (ClosedSelectorException e ) {
+			System.out.println("selector is closed.");
+			e.printStackTrace();
 		} catch (IOException e) {
+			System.out.println("IOException, server of port " + this.port + " terminating. Stack trace:" + e.getLocalizedMessage());
+			e.printStackTrace();
+		} finally {
 			if(key != null ) {
 				key.cancel();
 			}
-			System.out.println("IOException, server of port " + this.port + " terminating. Stack trace:" + e.getLocalizedMessage());
-			e.printStackTrace();
 		}
 	}
 
@@ -248,7 +253,7 @@ public class MqttServer implements Runnable {
 	}
 
 	public void start() throws IOException {
-		Thread serverThread = new Thread(this, THREAD_NAME);
+		serverThread = new Thread(this, THREAD_NAME);
 		serverThread.start();
 	}
 

@@ -1,11 +1,12 @@
 (ns mqttkat.client-generator-2
   (:require [causatum.event-streams :as es]
-            [clojure.test :refer [deftest is]]
+            [clojure.test :refer [deftest is use-fixtures]]
             [mqttkat.client :as client]
             ;;[mqttkat.spec :as mqtt]
             [clojure.spec.alpha :as s]
             [clojure.spec.gen.alpha :as gen]
-            [clojure.core.async :as async])
+            [clojure.core.async :as async]
+            [mqttkat.server :as server])
   (:import  [org.mqttkat MqttHandler MqttStat]
             [org.mqttkat.client MqttClient]))
 
@@ -13,10 +14,27 @@
 
 ;(def channel (async/chan 1))
 
+
 (defn handler-fn [msg chan]
   ;;(println "Posting on async channel: ")
   ;(clojure.pprint/pprint (dissoc msg :client-key))
   (async/go (async/>! chan msg)))
+
+(def handler (MqttHandler. ^clojure.lang.IFn handler-fn 2))
+
+(defn mqtt-fixture [f]
+  (println "here...")
+  (server/start! "0.0.0.0" 1883 handler)
+  (def client (client/client2 "localhost" 1883))
+
+  (f)
+  (try
+    (server/stop!)
+    (Thread/sleep 500)
+    (catch Exception e)))
+
+(use-fixtures :once mqtt-fixture)
+
 
 (def model
   {:graph
@@ -121,7 +139,7 @@
 
 (defn disconnect [client]
   (reset! subscribe-topics #{})
-  (client/disconnect))
+  (client/disconnect client))
 
 (defn subscribe [client]
   (let [topic-filter (client/subscribe ^MqttClient client)
@@ -132,9 +150,6 @@
           ret-count (count (:response msg))]
       (client/logger  "R " msg)
       (is (= c ret-count)))))
-
-
-
 
 
 (deftest simulation
