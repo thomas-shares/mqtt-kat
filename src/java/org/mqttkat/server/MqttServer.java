@@ -2,15 +2,16 @@ package org.mqttkat.server;
 
 import static java.nio.channels.SelectionKey.OP_ACCEPT;
 
-import java.nio.channels.Selector;
-import java.nio.channels.ServerSocketChannel;
+import java.nio.channels.*;
 import java.net.InetSocketAddress;
-import java.nio.channels.SelectionKey;
-import java.nio.channels.SocketChannel;
 
 import java.io.IOException;
 import java.util.Iterator;
 import java.nio.ByteBuffer;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicReference;
 
 import clojure.lang.IPersistentMap;
 
@@ -19,6 +20,20 @@ import org.mqttkat.MqttSendExecutor;
 import org.mqttkat.packages.*;
 
 import static org.mqttkat.MqttStat.*;
+
+
+class PendingKey {
+	public final SelectionKey key;
+	// operation: can be register for write or close the selectionkey
+	public final int Op;
+
+	PendingKey(SelectionKey key, int op) {
+		this.key = key;
+		Op = op;
+	}
+
+	public static final int OP_WRITE = -1;
+}
 
 
 public class MqttServer implements Runnable {
@@ -30,6 +45,19 @@ public class MqttServer implements Runnable {
 	private final int port;
 	private final ByteBuffer buf = ByteBuffer.allocate(4096);
 	private final MqttSendExecutor executor;
+	private Thread serverThread  = null;
+
+	// queue operations from worker threads to the IO thread
+	private final ConcurrentLinkedQueue<PendingKey> pending = new ConcurrentLinkedQueue<PendingKey>();
+
+	private final ConcurrentHashMap<SelectionKey, Boolean> keptAlive = new ConcurrentHashMap<SelectionKey, Boolean>();
+
+	enum Status { STOPPED, RUNNING, STOPPING }
+
+	// Will not set keep-alive headers when STOPPING, allowing reqs to drain
+	private final AtomicReference<Status> status = new AtomicReference<Status> (Status.STOPPED);
+
+
 
 	public MqttServer(String ip, int port, IHandler handler) throws IOException {
 		this.selector = Selector.open();
@@ -42,8 +70,9 @@ public class MqttServer implements Runnable {
 		this.executor = new MqttSendExecutor(selector, 16);
 	}
 
+
    private void closeKey(final SelectionKey key) {
-	   //System.out.println("closing key: " + key.toString());
+	   System.out.println("closing key: " + key.toString());
 		try {
 			IPersistentMap incoming = MqttDisconnect.decode(key);
 			handler.handle(incoming);
@@ -70,27 +99,40 @@ public class MqttServer implements Runnable {
 		SelectionKey key = null;
 
 		try {
+
 			Iterator<SelectionKey> iter;
-			while (this.serverChannel.isOpen()) {
-				selector.select();
-				iter = this.selector.selectedKeys().iterator();
-				while (iter.hasNext()) {
-					key = iter.next();
-					iter.remove();
-					if (key.isAcceptable()) {
-						this.handleAccept(key);
+			while (serverChannel.isOpen() ) {
+				synchronized (this){
+					selector.select();
+					if(!selector.isOpen()) {
+						break;
 					}
-					if (key.isReadable()) {
-						this.handleRead(key);
+					Set<SelectionKey> keys = selector.selectedKeys();
+					iter = keys.iterator();
+
+					while (iter.hasNext()) {
+						key = iter.next();
+
+						if (key.isAcceptable()) {
+							this.handleAccept(key);
+						}
+						if (key.isReadable()) {
+							this.handleRead(key);
+						}
 					}
 				}
+
 			}
+		} catch (ClosedSelectorException e ) {
+			System.out.println("selector is closed.");
+			e.printStackTrace();
 		} catch (IOException e) {
+			System.out.println("IOException, server of port " + this.port + " terminating. Stack trace:" + e.getLocalizedMessage());
+			e.printStackTrace();
+		} finally {
 			if(key != null ) {
 				key.cancel();
 			}
-			System.out.println("IOException, server of port " + this.port + " terminating. Stack trace:" + e.getLocalizedMessage());
-			e.printStackTrace();
 		}
 	}
 
@@ -248,7 +290,7 @@ public class MqttServer implements Runnable {
 	}
 
 	public void start() throws IOException {
-		Thread serverThread = new Thread(this, THREAD_NAME);
+		serverThread = new Thread(this, THREAD_NAME);
 		serverThread.start();
 	}
 

@@ -1,11 +1,12 @@
 (ns mqttkat.client-generator
-  (:require [clojure.test :refer [deftest is]]
+  (:require [clojure.test :refer [deftest is use-fixtures]]
             [mqttkat.client :as client]
             ;;[mqttkat.spec :as mqtt]
             [clojure.spec.alpha :as s]
             [clojure.spec.gen.alpha :as gen]
             [clojure.core.async :as async]
-            [overtone.at-at :as at])
+            [overtone.at-at :as at]
+            [mqttkat.server :as server])
   (:import  [org.mqttkat MqttHandler MqttStat]
             [org.mqttkat.client MqttClient]))
 
@@ -17,6 +18,23 @@
   ;;(println "Posting on async channel: ")
   ;(clojure.pprint/pprint (dissoc msg :client-key))
   (async/go (async/>! chan msg)))
+
+(def handler (MqttHandler. ^clojure.lang.IFn handler-fn 2))
+
+(defn mqtt-fixture [f]
+  (println "here...")
+  (server/start! "0.0.0.0" 1883 handler)
+  (def client (client/client2 "localhost" 1883))
+
+  (f)
+  (try
+    (println "stopping server.")
+    (server/stop!)
+    (Thread/sleep 500)
+    (catch Exception e (println (.printStackTrace e)))))
+
+
+(use-fixtures :once mqtt-fixture)
 
 (defn client []
   (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn handler-fn 2)))

@@ -2,15 +2,10 @@ package org.mqttkat;
 
 import clojure.lang.IPersistentMap;
 import clojure.lang.IFn;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
+
+import java.util.concurrent.*;
 
 import org.mqttkat.server.PrefixThreadFactory;
-
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.ArrayBlockingQueue;
 
 class MqttExecutor implements Runnable{
 	final IFn handler;
@@ -53,7 +48,11 @@ public class MqttHandler implements IHandler {
 		if( incoming ==  null ) {
 			return;
 		}
-		execs.submit(new MqttExecutor(handler, incoming, null));
+		try {
+			execs.submit(new MqttExecutor(handler, incoming, null));
+		} catch (RejectedExecutionException e) {
+			System.out.println ("Handling Fails.");
+		}
 	}
 
 	public void close(int timeoutMs) {
