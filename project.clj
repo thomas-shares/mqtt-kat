@@ -9,10 +9,10 @@
 
   :dependencies
   [[org.clojure/clojure "1.10.1"]
-   [org.clojure/core.async "1.1.587"]
+   [org.clojure/core.async "1.3.610"]
    [org.clojure/spec.alpha "0.2.187"]
    [org.clojure/core.specs.alpha "0.2.44"]
-   [org.clojure/test.check "1.0.0"]
+   [org.clojure/test.check "1.1.0"]
    [org.craigandera/causatum "0.3.0"]
    [clojurewerkz/triennium "1.0.0-beta2"]
    [overtone/at-at "1.2.0"]]
@@ -24,6 +24,7 @@
   :javac-options ["-source" "1.8" "-target" "1.8" "-g"]
   :java-source-paths ["src/java"]
   :test-paths ["test"]
+  :plugins [[lein-ancient "0.6.15"]]
   :jar-exclusions [#"^java.*"] ; exclude the java directory in source path
   :main mqttkat.server
   :aot [mqttkat.server])
