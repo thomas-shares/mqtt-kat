@@ -32,7 +32,7 @@
 
 (defn run-server [ip port handler]
   ;(prof/start {})
-  (let [s (MqttServer. ^String ip ^int port handler)
+  (let [s           (MqttServer. ^String ip ^int port handler)
         stop-server (fn stop-server [& {:keys [timeout] :or {timeout 100}}]
                       (println "meta stop...")
                       (.stop s timeout))]

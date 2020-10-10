@@ -48,9 +48,15 @@ public class MqttHandler implements IHandler {
 		if( incoming ==  null ) {
 			return;
 		}
+
+		Runnable task = new MqttExecutor(handler, incoming, null);
+
 		try {
-			execs.submit(new MqttExecutor(handler, incoming, null));
+			execs.submit(task);
 		} catch (RejectedExecutionException e) {
+			e.printStackTrace();
+			System.out.println("handler : " + handler.toString());
+			System.out.println("incoming : " + incoming.toString());
 			System.out.println ("Handling Fails.");
 		}
 	}
