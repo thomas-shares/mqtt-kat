@@ -152,7 +152,7 @@
 
 (deftest multiple-clients
   (let [;;start-time (System/currentTimeMillis)
-        clients (into [] (take 20 (repeatedly #(client))))]
+        clients (into [] (take 20 (repeatedly #(client/client "localhost" 1883))))]
     (doseq [client clients]
       ;;(println client)
       (at/after 100 #(start-client client) my-pool))
