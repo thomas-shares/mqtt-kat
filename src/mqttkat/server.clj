@@ -58,3 +58,8 @@
 (defn -main [& _]
   (start!)
   (util/info))
+
+
+(comment
+  (start!)
+  (stop!))

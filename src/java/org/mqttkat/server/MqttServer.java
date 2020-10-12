@@ -2,11 +2,8 @@ package org.mqttkat.server;
 
 import static java.nio.channels.SelectionKey.OP_ACCEPT;
 
-import java.nio.channels.Selector;
-import java.nio.channels.ServerSocketChannel;
+import java.nio.channels.*;
 import java.net.InetSocketAddress;
-import java.nio.channels.SelectionKey;
-import java.nio.channels.SocketChannel;
 
 import java.io.IOException;
 import java.util.Iterator;
@@ -43,14 +40,14 @@ public class MqttServer implements Runnable {
 	}
 
    private void closeKey(final SelectionKey key) {
-	   //System.out.println("closing key: " + key.toString());
-		try {
+	   System.out.println("closing key: " + key.toString());
+/*		try {
 			IPersistentMap incoming = MqttDisconnect.decode(key);
 			handler.handle(incoming);
 		} catch (IOException e) {
         	System.out.println(e.getMessage());
 		}
-        try {
+  */      try {
             key.channel().close();
         } catch (Exception e) {
         	System.out.println(e.getMessage());
@@ -91,6 +88,10 @@ public class MqttServer implements Runnable {
 			}
 			System.out.println("IOException, server of port " + this.port + " terminating. Stack trace:" + e.getLocalizedMessage());
 			e.printStackTrace();
+		}
+		catch ( ClosedSelectorException e) {
+			return ;
+			// Here we are stopping...
 		}
 	}
 
