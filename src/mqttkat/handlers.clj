@@ -9,7 +9,7 @@
                                  MqttPubComp MqttSubAck MqttPingResp]))
 
 (defn logger [msg & args]
-  (when false
+  (when true
     (println msg args)))
 
 (def packet-identifier-queue-size 1024)
@@ -131,7 +131,7 @@
   (when-let [keys (tr/matching-vals @*subscriber-trie* topic)]
     (do
       (logger "Keys: " keys " qos: " qos)
-      (case qos
+      (case (long qos)
             0 (qos-0 keys topic msg)
             1 (qos-1 keys topic msg)
             2 (qos-2 keys topic msg)))))

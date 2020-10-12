@@ -15,7 +15,7 @@
 (def o (Object.))
 
 (defn logger [msg & args]
-  (when false
+  (when true
     (locking 0
       (println msg args))))
 
