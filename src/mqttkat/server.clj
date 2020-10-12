@@ -26,13 +26,13 @@
                   :AUTHENTICATE h/authenticate})
 
 (defn default-handler-fn [{:keys [packet-type] :as msg} _]
-  ;(println msg)
+  (println "message is received. " msg)
   (when packet-type
     ((packet-type handler-map) msg)))
 
 (defn run-server [ip port handler]
   ;(prof/start {})
-  (let [s (MqttServer. ^String ip ^int port handler)
+  (let [s           (MqttServer. ^String ip ^int port handler)
         stop-server (fn stop-server [& {:keys [timeout] :or {timeout 100}}]
                       (println "meta stop...")
                       (.stop s timeout))]
@@ -43,6 +43,8 @@
 
 (defn start!
   ([] (start! "0.0.0.0" 1883 (MqttHandler. ^clojure.lang.IFn default-handler-fn 4)))
+  ([ip port]
+   (start! ip port (MqttHandler. ^clojure.lang.IFn default-handler-fn 4)))
   ([ip port handler]
    (reset! *server* (run-server ip port handler))))
 
