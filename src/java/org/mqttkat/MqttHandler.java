@@ -11,7 +11,7 @@ class MqttExecutor implements Runnable{
 	final IFn handler;
 	final IPersistentMap incoming;
 	final Object asyncChannel;
-	
+
 	public MqttExecutor(IFn handler, IPersistentMap incoming, Object asyncChannel) {
 		this.handler = handler;
 		this.incoming = incoming;
@@ -73,6 +73,14 @@ public class MqttHandler implements IHandler {
 		if( incoming ==  null ) {
 			return;
 		}
-		execs.submit(new MqttExecutor(handler, incoming, asyncChannel)); 
-	}
+		Runnable task = new MqttExecutor(handler, incoming, asyncChannel);
+
+		try {
+			execs.submit(task);
+		} catch (RejectedExecutionException e) {
+			e.printStackTrace();
+			System.out.println("handler : " + handler.toString());
+			System.out.println("incoming : " + incoming.toString());
+			System.out.println ("Handling Fails.");
+		}	}
 }

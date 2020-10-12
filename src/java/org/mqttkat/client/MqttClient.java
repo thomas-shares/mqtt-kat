@@ -48,7 +48,7 @@ public class MqttClient implements Runnable {
 	private List<ChangeRequest> pendingChanges = new LinkedList<ChangeRequest>();
 	// The buffer into which we'll read data when it's available
 	private ByteBuffer readBuffer = ByteBuffer.allocate(4096);
-	
+
 	public MqttClient(String host, int port, int threadPoolSize, IHandler handler, Object asyncChannel) throws IOException {
 		log("Creating client...");
 		this.handler = handler;
@@ -58,7 +58,7 @@ public class MqttClient implements Runnable {
 		socketChannel.configureBlocking(false);
 
 		this.asyncChannel = asyncChannel;
-		
+
 		selector = Selector.open();
 		//this.executor = new MqttSendExecutor(selector, threadPoolSize);
 
@@ -70,7 +70,7 @@ public class MqttClient implements Runnable {
 	public Object getChannel() {
 		return this.asyncChannel;
 	}
-	
+
 	public void sendMessage(ByteBuffer buffer) throws IOException {
 		sentMessages.incrementAndGet();
 		sentBytes.addAndGet(buffer.limit());
@@ -90,7 +90,7 @@ public class MqttClient implements Runnable {
 			ChangeRequest changeRequest =  new ChangeRequest(socketChannel, ChangeRequest.REGISTER, SelectionKey.OP_WRITE);
 			this.pendingChanges.add(changeRequest);
 		}
-				
+
 		// Finally, wake up our selecting thread so it can make the required changes
 		this.selector.wakeup();
 		//System.out.println("woken up...");
@@ -124,7 +124,7 @@ public class MqttClient implements Runnable {
 				// Wait for an event one of the registered channels
 				int x = this.selector.select();
 				//System.out.println("selected..." + this.selector.selectedKeys().size() + "  " + x);
-				
+
 				// Iterate over the set of keys for which events are available
 				Iterator<SelectionKey> selectedKeys = this.selector.selectedKeys().iterator();
 				while (selectedKeys.hasNext()) {
@@ -193,13 +193,13 @@ public class MqttClient implements Runnable {
 		int i = 0 ;
 		//System.out.println("read " + numRead);
 		do {
- 
+
 			//System.out.println("start " + i);
 
 			byte type = (byte) ((data[i] & 0xff) >> 4);
 			byte flags = (byte) (data[i] &= 0x0f);
-			
-	
+
+
 			byte digit;
 			int multiplier = 1;
 			int msgLength = 0;
@@ -211,21 +211,21 @@ public class MqttClient implements Runnable {
 				multiplier *= 128;
 			} while ((digit & 0x80) != 0);
 			//System.out.println(msgLength);
-	
+
 			byte[] rspData = new byte[msgLength];
 			System.arraycopy(data, i, rspData, 0, msgLength);
 	 		i += msgLength;
-			
+
 			//for(byte q :rspData) {
 			//	System.out.print(q + " ");
 			//}
 			//System.out.println("\n");
-			
-	
-			
+
+
+
 			SelectionKey key = null;
 			IPersistentMap incoming = null;
-			if (type == GenericMessage.MESSAGE_CONNECT) {	
+			if (type == GenericMessage.MESSAGE_CONNECT) {
 				incoming =  MqttConnect.decode(key, flags, rspData);
 			} else if ( type ==  GenericMessage.MESSAGE_CONNACK) {
 				incoming = MqttConnAck.decode(key, rspData);
@@ -258,7 +258,7 @@ public class MqttClient implements Runnable {
 			} else {
 				System.out.println("FAIL!!!!!! INVALID packet sent: " + type);
 			}
-	
+
 			if( incoming != null ) {
 				handler.handle(incoming, this.asyncChannel);
 				receivedMessages.incrementAndGet();
@@ -266,7 +266,7 @@ public class MqttClient implements Runnable {
 			}
 		} while( i < numRead );
 	}
-	
+
 	private void write(SelectionKey key) throws IOException {
 		SocketChannel socketChannel = (SocketChannel) key.channel();
 

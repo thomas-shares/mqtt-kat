@@ -15,16 +15,16 @@
 ;(def channel (async/chan 1))
 
 (defn handler-fn [msg chan]
-  ;;(println "Posting on async channel: ")
+  ;;(println "Posting on async channel CLIENT: " msg chan)
   ;(clojure.pprint/pprint (dissoc msg :client-key))
   (async/go (async/>! chan msg)))
 
 (def handler (MqttHandler. ^clojure.lang.IFn handler-fn 2))
 
 (defn mqtt-fixture [f]
-  (println "here...")
-  (server/start! "0.0.0.0" 1883 handler)
-  (def client (client/client2 "localhost" 1883))
+  (println "pre-fixture...")
+  (server/start!)
+  ;;(def client (client/client2 "localhost" 1883))
 
   (f)
   (try
@@ -152,10 +152,10 @@
 
 (deftest multiple-clients
   (let [;;start-time (System/currentTimeMillis)
-        clients (into [] (take 20 (repeatedly #(client/client "localhost" 1883))))]
+        clients (into [] (take 1 (repeatedly #(client/client "localhost" 1883 handler))))]
     (doseq [client clients]
       ;;(println client)
       (at/after 100 #(start-client client) my-pool))
-    (Thread/sleep 10000)
+    (Thread/sleep 5000)
     ;(at/show-schedule my-pool)
     (println "done sleeping....")))

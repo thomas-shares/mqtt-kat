@@ -19,7 +19,7 @@
     (locking 0
       (println msg args))))
 
-(defn handler-fn [msg]
+(defn handler-fn [msg _]
   (println "clj handler: " msg))
 
 (defn client
@@ -28,13 +28,15 @@
    (when (nil? @*client-atom*)
       (let [ch (async/chan 1)
             client (MqttClient. ^String host ^int port 2 handler ^Object ch)]
-        ;(reset! client-atom client)
+        (reset! *client-atom* client)
         client))))
 
 (defn client2 [host port]
-  (let [ch (async/chan 1)
-        client (MqttClient. ^String host ^int port 2 (MqttHandler. ^clojure.lang.IFn handler-fn 2) ch)]
-    (reset! *client-atom* client)))
+  (when (nil? @*client-atom*)
+    (let [ch (async/chan 1)
+          client (MqttClient. ^String host ^int port 2 (MqttHandler. ^clojure.lang.IFn handler-fn 2) ^Object ch)]
+      (reset! *client-atom* client)
+      client)))
 
 (defn connect
   ([client] (let [map (gen/generate (s/gen :mqtt/connect))
