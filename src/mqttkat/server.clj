@@ -26,7 +26,7 @@
                   :AUTHENTICATE h/authenticate})
 
 (defn default-handler-fn [{:keys [packet-type] :as msg} _]
-  ;(println msg)
+  (println "message is received. " msg)
   (when packet-type
     ((packet-type handler-map) msg)))
 
@@ -43,6 +43,8 @@
 
 (defn start!
   ([] (start! "0.0.0.0" 1883 (MqttHandler. ^clojure.lang.IFn default-handler-fn 4)))
+  ([ip port]
+   (start! ip port (MqttHandler. ^clojure.lang.IFn default-handler-fn 4)))
   ([ip port handler]
    (reset! *server* (run-server ip port handler))))
 
