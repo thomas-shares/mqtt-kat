@@ -12,7 +12,7 @@ import clojure.lang.Keyword;
 import clojure.lang.PersistentArrayMap;
 
 public class MqttConnAck extends GenericMessage{
-	
+
 	public static IPersistentMap decode(SelectionKey key, byte[] data) {
 		Map<Keyword, Object> m = new TreeMap<Keyword, Object>();
 		m.put(PACKET_TYPE, intern("CONNACK"));

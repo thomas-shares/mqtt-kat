@@ -23,10 +23,8 @@
 (def handler (MqttHandler. ^clojure.lang.IFn handler-fn 2))
 
 (defn mqtt-fixture [f]
-  (println "here...")
-  (server/start! "0.0.0.0" 1883 handler)
-  (def client (client/client2 "localhost" 1883))
-
+  (println "pre-fixture")
+  (server/start!)
   (f)
   (try
     (server/stop!)
@@ -157,11 +155,11 @@
     ;; calling Causatum's event-stream function with our model and an initial seed
     ;; state.
    (let [start-time (System/currentTimeMillis)
-         client-numbers 2
+         client-numbers 1
          client (client)]
          ;clients (take client-numbers (repeatedly (client)))
          ;streams (take client-numbers (repeatedly (es/event-stream model [{:rtime 0, :state :connect}])))]
-     (doseq [{state :state} (take 110000   (es/event-stream model [{:rtime 0, :state :connect}]))]
+     (doseq [{state :state} (take 1000   (es/event-stream model [{:rtime 0, :state :connect}]))]
        ;;(println "State:" state)
        ;;(Thread/sleep 10)
        (({:connect connect, :publish publish, :disconnect disconnect, :connack connack :subscribe subscribe} state) client))

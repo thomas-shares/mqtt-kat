@@ -15,7 +15,7 @@
              MqttDisconnect MqttPingResp MqttSubscribe MqttSubAck
              MqttUnsubscribe MqttUnSubAck MqttConnAck]))
 
-  
+
 ;(deftest subscription
 ;  (is (= {"test" [:key]} (add-subscriber {} "test" :key))))
 
@@ -27,7 +27,7 @@
 
 (defn handler-fn [msg _]
   ;(println "Posting on async channel: ")
-  (clojure.pprint/pprint (dissoc msg :client-key))
+  ;(clojure.pprint/pprint (dissoc msg :client-key))
   (async/go
     (async/>!! channel msg)))
   ;(println "done posting..."))
@@ -41,8 +41,8 @@
 
   (f)
   (try
-    (server/stop!)
     (Thread/sleep 500)
+    (server/stop!)
     (catch Exception e)))
 
 

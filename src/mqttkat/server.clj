@@ -28,7 +28,7 @@
                   :AUTHENTICATE h/authenticate})
 
 (defn default-handler-fn [{:keys [packet-type] :as msg} _]
-  (println "message is received. " msg)
+  ;;(println "message is received. " msg)
   (when packet-type
     ((packet-type handler-map) msg)))
 
@@ -61,3 +61,8 @@
 (defn -main [& _]
   (start!)
   (util/info))
+
+
+(comment
+  (start!)
+  (stop!))

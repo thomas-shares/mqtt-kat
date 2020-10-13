@@ -25,6 +25,7 @@
   :java-source-paths ["src/java"]
   :test-paths ["test"]
   :plugins [[lein-ancient "0.6.15"]]
+            ;[lein-virgil "0.1.9"]]
   :jar-exclusions [#"^java.*"] ; exclude the java directory in source path
   :main mqttkat.server
   :aot [mqttkat.server])

@@ -51,6 +51,3 @@
     (protocol-name-not-valid? protocol-name)
     (handle-not-valid-protocol-name client-key)
     :else (handle-success msg)))
-
-
-
