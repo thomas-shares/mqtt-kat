@@ -25,12 +25,20 @@
   (let [current-time (System/currentTimeMillis)
         last-active  (:last-active (get @*clients* key))]
     (when (some-> last-active (< (- current-time time-out)))
-      (println "Timer fired for client: " (select-keys (get @*clients* key) [:last-active :client-id])))))
+      (println "Timer fired for client: "
+               (select-keys (get @*clients* key) [:last-active :client-id])))))
 
-(defn add-timer! [key time]
+(defn add-timer!
+  [key time]
   (let [time-out (* 1500 time)
         timer    (at/every time-out #(check-timer key time-out) my-pool)]
     (swap! *clients* assoc-in [key :timer] timer)))
+
+(defn remove-timer! [key]
+  (let [timer (get-in @*clients* [key :timer])]
+    (at/kill timer)
+    (swap! *clients* update [key :timer] nil)))
+
 
 
 ;; pre-load queue
@@ -131,7 +139,7 @@
   (when-let [keys (tr/matching-vals @*subscriber-trie* topic)]
     (do
       (logger "Keys: " keys " qos: " qos)
-      (case qos
+      (case (long qos)
             0 (qos-0 keys topic msg)
             1 (qos-1 keys topic msg)
             2 (qos-2 keys topic msg)))))
