@@ -34,9 +34,18 @@
 (defn client2 [host port]
   (when (nil? @*client-atom*)
     (let [ch (async/chan 1)
-          client (MqttClient. ^String host ^int port 2 (MqttHandler. ^clojure.lang.IFn handler-fn 2) ^Object ch)]
+          client (MqttClient. ^String host
+                              ^int port 2
+                              (MqttHandler. ^clojure.lang.IFn handler-fn 2)
+                              ^Object ch)]
       (reset! *client-atom* client)
       client)))
+
+(defn close-client []
+  (do
+    (-> @*client-atom*
+        (.close))
+    (reset! *client-atom* nil)))
 
 (defn connect
   ([client] (let [map (gen/generate (s/gen :mqtt/connect))
