@@ -39,7 +39,7 @@ public class MqttHandler implements IHandler {
 
     public MqttHandler(IFn handler, int thread) {
       this.handler = handler;
-      PrefixThreadFactory factory = new PrefixThreadFactory("prefix");
+      PrefixThreadFactory factory = new PrefixThreadFactory("p\"user-id-site-id-flow-control\"refix");
       BlockingQueue<Runnable> queue = new LinkedBlockingQueue<Runnable>();
       this.execs = new ThreadPoolExecutor(thread, thread, 0, TimeUnit.MILLISECONDS, queue, factory);
     }
@@ -52,7 +52,8 @@ public class MqttHandler implements IHandler {
 		Runnable task = new MqttExecutor(handler, incoming, null);
 
 		try {
-			execs.submit(task);
+			if(!execs.isShutdown() && !execs.isTerminated())
+				execs.submit(task);
 		} catch (RejectedExecutionException e) {
 			e.printStackTrace();
 			System.out.println("handler : " + handler.toString());
