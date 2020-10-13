@@ -39,7 +39,7 @@ public class MqttHandler implements IHandler {
 
     public MqttHandler(IFn handler, int thread) {
       this.handler = handler;
-      PrefixThreadFactory factory = new PrefixThreadFactory("p\"user-id-site-id-flow-control\"refix");
+      PrefixThreadFactory factory = new PrefixThreadFactory("prefix");
       BlockingQueue<Runnable> queue = new LinkedBlockingQueue<Runnable>();
       this.execs = new ThreadPoolExecutor(thread, thread, 0, TimeUnit.MILLISECONDS, queue, factory);
     }
