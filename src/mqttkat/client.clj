@@ -11,7 +11,6 @@
 
 (set! *warn-on-reflection* true)
 
-(def ^:dynamic *client-atom* (atom nil))
 (def o (Object.))
 
 (defn logger [msg & args]
@@ -25,27 +24,7 @@
 (defn client
   ([host port] (client host port (MqttHandler. ^clojure.lang.IFn handler-fn 2)))
   ([host port handler]
-   (when (nil? @*client-atom*)
-      (let [ch (async/chan 1)
-            client (MqttClient. ^String host ^int port 2 handler ^Object ch)]
-        (reset! *client-atom* client)
-        client))))
-
-(defn client2 [host port]
-  (when (nil? @*client-atom*)
-    (let [ch (async/chan 1)
-          client (MqttClient. ^String host
-                              ^int port 2
-                              (MqttHandler. ^clojure.lang.IFn handler-fn 2)
-                              ^Object ch)]
-      (reset! *client-atom* client)
-      client)))
-
-(defn close-client []
-  (do
-    (-> @*client-atom*
-        (.close))
-    (reset! *client-atom* nil)))
+   client (MqttClient. ^String host ^int port 2 handler ^Object (async/chan 1))))
 
 (defn connect
   ([client] (let [map (gen/generate (s/gen :mqtt/connect))
@@ -72,7 +51,7 @@
       (select-keys map [:qos :payload :packet-identifier])))
   ([topic msg qos]
    (let [bufs (MqttPublish/encode {:packet-type :PUBLISH :qos qos :topic topic :payload msg :retain? false :duplicate? false})]
-     (.sendMessage ^MqttClient @*client-atom* bufs))))
+     (.sendMessage ^MqttClient client bufs))))
 
 (defn subscribe [client]
   (let [map (gen/generate (s/gen :mqtt/subscribe))
@@ -83,7 +62,6 @@
      (.sendMessage ^MqttClient client buf)
     map))
 
-
 (defn pingreq [client]
   (let [map (gen/generate (s/gen :mqtt/pinreq))
         bufs (MqttPingReq/encode map)]
@@ -91,8 +69,7 @@
 
 (defn disconnect [client]
     (->> (MqttDisconnect/encode)
-         (.sendMessage ^MqttClient client))
-    (reset! *client-atom* nil))
+         (.sendMessage ^MqttClient client)))
 
 (defn close [client]
   (.close ^MqttClient client))

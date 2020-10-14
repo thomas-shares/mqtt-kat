@@ -48,11 +48,11 @@
   (println "connecting client...")
   (alter-var-root
     (var client)
-    (fn [_] (client/client2 "localhost" 1883)))
+    (fn [_] (client/client "localhost" 1883 handler)))
   (when-not client
     (println "connecting fail..."))
   (f)
-  (client/close-client))
+  (client/close client))
 
 
 (use-fixtures :once mqtt-fixture)
