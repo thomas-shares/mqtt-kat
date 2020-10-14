@@ -52,7 +52,8 @@ public class MqttHandler implements IHandler {
 		Runnable task = new MqttExecutor(handler, incoming, null);
 
 		try {
-			execs.submit(task);
+			if(!execs.isShutdown() && !execs.isTerminated())
+				execs.submit(task);
 		} catch (RejectedExecutionException e) {
 			e.printStackTrace();
 			System.out.println("handler : " + handler.toString());

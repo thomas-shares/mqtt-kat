@@ -28,26 +28,28 @@ public class MqttServer implements Runnable {
 	private final ByteBuffer buf = ByteBuffer.allocate(4096);
 	private final MqttSendExecutor executor;
 
-	public MqttServer(String ip, int port, IHandler handler) throws IOException {
-		this.selector = Selector.open();
-		this.serverChannel = ServerSocketChannel.open();
-		this.handler = handler;
-		this.serverChannel.configureBlocking(false);
-		this.serverChannel.socket().bind(new InetSocketAddress(ip, port));
-		this.serverChannel.register(selector, OP_ACCEPT);
-		this.port = port;
-		this.executor = new MqttSendExecutor(selector, 16);
-	}
+    public MqttServer(String ip, int port, IHandler handler) throws IOException {
+        this.selector = Selector.open();
+        this.serverChannel = ServerSocketChannel.open();
+        this.handler = handler;
+        this.serverChannel.configureBlocking(false);
+        this.serverChannel.socket().bind(new InetSocketAddress(ip, port));
+        this.serverChannel.register(selector, OP_ACCEPT);
+        this.port = port;
+        this.executor = new MqttSendExecutor(selector, 16);
+    }
 
    private void closeKey(final SelectionKey key) {
 	   System.out.println("closing key: " + key.toString());
-/*		try {
+
+
+       try {
 			IPersistentMap incoming = MqttDisconnect.decode(key);
 			handler.handle(incoming);
 		} catch (IOException e) {
         	System.out.println(e.getMessage());
 		}
-  */      try {
+      try {
             key.channel().close();
         } catch (Exception e) {
         	System.out.println(e.getMessage());

@@ -3,7 +3,9 @@
             [mqttkat.handlers.connect :as connect]
             [mqttkat.handlers.disconnect :as disconnect]
             [mqttkat.util :as util]
-            [mqttkat.s :refer [*server*]])
+            [mqttkat.s :refer [*server*]]
+            [overtone.at-at :as at])
+
   ;[clj-async-profiler.core :as prof])
   (:import [org.mqttkat.server MqttServer]
            [org.mqttkat MqttHandler])
@@ -51,6 +53,7 @@
 (defn stop! []
   (when (@*server*)
     (do (println "Server stopping...")
+        (at/stop-and-reset-pool! h/my-pool)
         (alter-meta! *server* #(assoc % :timeout 1000))
         (reset! *server* nil))))
 
