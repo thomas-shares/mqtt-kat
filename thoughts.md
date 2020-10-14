@@ -2,6 +2,52 @@
 
 In this file will go my thoughts and ramblings about this project and what I have done and what I might do next.
 
+## 20201014
+
+Thanks to jocatelo I picked this project up again. He has provided me with quite a few PR's and that got me going again as well. Thinks have been cleaned up and several bugs removed and all the tests now pass!!! Woohoooo. I also just ran an MQTT load generator aginst the server:
+
+```
+./mqttloader -b tcp://127.0.0.1:1883 -v 3 -p 15 -s 15 -m 200
+
+Measurement started: 2020-10-14 14:18:10.908 CEST
+Measurement ended: 2020-10-14 14:18:16.297 CEST
+
+-----Publisher-----
+Maximum throughput[msg/s]: 3000
+Average throughput[msg/s]: 3000.00
+Number of published messages: 3000
+Per second throughput[msg/s]: 3000
+
+-----Subscriber-----
+Maximum throughput[msg/s]: 45000
+Average throughput[msg/s]: 45000.00
+Number of received messages: 45000
+Per second throughput[msg/s]: 45000
+Maximum latency[ms]: 231
+Average latency[ms]: 116.81
+```
+And when I run the same command against Mosquitto I get the following results:
+
+```
+Measurement started: 2020-10-14 14:24:09.264 CEST
+Measurement ended: 2020-10-14 14:24:14.585 CEST
+
+-----Publisher-----
+Maximum throughput[msg/s]: 3000
+Average throughput[msg/s]: 3000.00
+Number of published messages: 3000
+Per second throughput[msg/s]: 3000
+
+-----Subscriber-----
+Maximum throughput[msg/s]: 45000
+Average throughput[msg/s]: 45000.00
+Number of received messages: 45000
+Per second throughput[msg/s]: 45000
+Maximum latency[ms]: 159
+Average latency[ms]: 71.26
+```
+We see that the latency lower is  on average and the max latency is lower as well. Something to investigate.
+
 ## 20190204
 
 I was getting exceptions that queues are getting full and I have replaced them with unbounded queues for the moment. (But they are bounded of course by the heap size eventually). Wild cards seem to work as well at the moment thanks to the triennium library.

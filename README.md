@@ -9,17 +9,13 @@ The idea is to see if a MQTT Broker could be as scalable as http-kit and handle 
 Well... with the latest push it can actually forward a `PUBLISH`ed message to multiple clients that have `SUBSCRIBE`d to a particular topic. I have tested this with three subscribers concurrently.
 
 ## Are there any bugs?
-
 Yes!
 
 Loads. Too many to mention actually. But here are a few I know of:
 
-* Two or more clients with the same client-id can connect simultaneously.
 * Disconnecting clients in error cases is not fully implemented.
-* Declining `CONNECT` packages is needed.
-* `UNSUBSCRIBE` is not handled.
-* Nothing is done for pings, no time out and subsequent disconnect.
 * At the moment the message flows for good path QOS 0, 1 and 2 is in place. But there is no error recovery if one of the packets gets lost. So no resending of packets.
+* Also latency is rather high, to be investigated.
 
 ## What about the name?
 

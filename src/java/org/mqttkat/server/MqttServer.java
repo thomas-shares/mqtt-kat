@@ -25,7 +25,7 @@ public class MqttServer implements Runnable {
 	private final ServerSocketChannel serverChannel;
 	private final IHandler handler;
 	private final int port;
-	private final ByteBuffer buf = ByteBuffer.allocate(4096);
+	private final ByteBuffer buf = ByteBuffer.allocate(8096);
 	private final MqttSendExecutor executor;
 
     public MqttServer(String ip, int port, IHandler handler) throws IOException {
