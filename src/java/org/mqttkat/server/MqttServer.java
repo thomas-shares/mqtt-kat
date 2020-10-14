@@ -92,8 +92,7 @@ public class MqttServer implements Runnable {
 			e.printStackTrace();
 		}
 		catch ( ClosedSelectorException e) {
-			return ;
-			// Here we are stopping...
+			// Here we are stopping...  so no need to do anything
 		}
 	}
 
@@ -110,10 +109,10 @@ public class MqttServer implements Runnable {
 		SocketChannel ch = (SocketChannel) key.channel();
 		try {
 			buf.clear();
-			int read = 0;
+			int read;
 			//byte[] remainAndPayload = null;
-			byte type = 0;
-			byte flags = 0;
+			byte type;
+			byte flags;
 			while ((read = ch.read(buf)) > 0) {
 				buf.flip();
 				// byte[] bytes = new byte[buf.limit()];
@@ -124,7 +123,7 @@ public class MqttServer implements Runnable {
 
 					//System.out.println("byte 0: "  + Integer.toBinaryString( (int) bytes[0]));
 					type = (byte) ((bytes[0] & 0xff) >> 4);
-					flags = (byte) (bytes[0] &= 0x0f);
+					flags = bytes[0] &= 0x0f;
 	/*
 
 				if (type == GenericMessage.MESSAGE_CONNECT) {
@@ -250,7 +249,7 @@ public class MqttServer implements Runnable {
 		}
 	}
 
-	public void start() throws IOException {
+	public void start() {
 		Thread serverThread = new Thread(this, THREAD_NAME);
 		serverThread.start();
 	}
@@ -290,6 +289,7 @@ public class MqttServer implements Runnable {
 		return this.serverChannel.socket().getLocalPort();
 	}
 
+/*
 	public void tryWrite(final SelectionKey key, ByteBuffer... buffers) {
 		 SocketChannel ch = (SocketChannel) key.channel();
 		 try {
@@ -298,6 +298,7 @@ public class MqttServer implements Runnable {
 		 } catch (IOException ignored) {
 		 }
 	  }
+*/
 
 //	public void sendMessage( final clojure.lang.PersistentVector keys, final Map<Keyword, ?> message) throws IOException {
 //		ByteBuffer buffer = MqttEncode.mqttEncoder(message);
@@ -314,10 +315,8 @@ public class MqttServer implements Runnable {
 //	}
 
 	public void sendMessageBuffer( final clojure.lang.PersistentVector keys, final ByteBuffer buffer) {
-		Iterator<SelectionKey> it = keys.iterator();
-
-		while(it.hasNext() ) {
-			SelectionKey key = it.next();
+		for (Object o : keys) {
+			SelectionKey key = (SelectionKey) o;
 			ByteBuffer copyBuf = buffer.duplicate();
 			executor.submit(copyBuf, key);
 			sentMessages.getAndIncrement();
