@@ -21,9 +21,10 @@
 
 (def my-pool (at/mk-pool))
 
+
 (defn check-timer [key time-out]
   (let [current-time (System/currentTimeMillis)
-        last-active  (:last-active (get @*clients* key))]
+        last-active  @(:last-active (get @*clients* key))]
     (when (some-> last-active (< (- current-time time-out)))
       (println "Timer fired for client: "
                (select-keys (get @*clients* key) [:last-active :client-id])))))
@@ -32,7 +33,8 @@
   [key time]
   (let [time-out (* 1500 time)
         timer    (at/every time-out #(check-timer key time-out) my-pool)]
-    (swap! *clients* assoc-in [key :timer] timer)))
+    (swap! *clients* assoc-in [key :timer] timer)
+    (swap! *clients* assoc-in [key :last-active] (volatile! (System/currentTimeMillis)))))
 
 (defn remove-timer! [key]
   (let [timer (get-in @*clients* [key :timer])]
@@ -60,7 +62,9 @@
 
 (defn update-timestamps [client-keys]
   (doseq [client-key client-keys]
-    (swap! *clients* assoc-in [client-key :last-active] (System/currentTimeMillis))))
+    ;;(println (- (System/currentTimeMillis) @(get-in @*clients* [client-key :last-active])))
+    ;;(swap! *clients* assoc-in [client-key :last-active] (System/currentTimeMillis))))
+    (vreset! (get-in @*clients* [client-key :last-active]) (System/currentTimeMillis))))
 
 (defn send-buffer [keys buf]
   ;;(logger "sending buffer from clj")

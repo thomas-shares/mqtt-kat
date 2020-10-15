@@ -15,13 +15,15 @@
    [org.clojure/test.check "1.1.0"]
    [org.craigandera/causatum "0.3.0"]
    [clojurewerkz/triennium "1.0.0-beta2"]
-   [overtone/at-at "1.2.0"]]
+   [overtone/at-at "1.2.0"]
+   ;;[djblue/portal "0.6.1"]
+   [com.clojure-goes-fast/clj-async-profiler "0.4.1"]]
 
   :jvm-opts
   ["-Dclojure.compiler.disable-locals-clearing=true"
    "-Xms512m" "-Xmx4G" "-Djdk.attach.allowAttachSelf" "-XX:+UnlockDiagnosticVMOptions" "-XX:+DebugNonSafepoints"]
 
-  :javac-options ["-source" "1.8" "-target" "1.8" "-g"]
+  :javac-options ["-Xlint:unchecked" "-source" "1.8" "-target" "1.8" "-g"]
   :java-source-paths ["src/java"]
   :test-paths ["test"]
   :plugins [[lein-ancient "0.6.15"]]
