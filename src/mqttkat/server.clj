@@ -65,4 +65,8 @@
 
 (comment
   (start!)
-  (stop!))
+  (stop!)
+
+  (do
+    (stop!)
+    (start!)))

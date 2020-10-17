@@ -20,26 +20,47 @@
 (def packet-identifiers (async/chan packet-identifier-queue-size))
 
 (def my-pool (at/mk-pool))
+(declare publish-will)
+(declare remove-timer!)
+(declare qos-0)
+(declare qos-1-send)
+(declare qos-2-send)
 
 
 (defn check-timer [key time-out]
   (let [current-time (System/currentTimeMillis)
         last-active  @(:last-active (get @*clients* key))]
-    (when (some-> last-active (< (- current-time time-out)))
-      (println "Timer fired for client: "
-               (select-keys (get @*clients* key) [:last-active :client-id])))))
+    ;(println "timer fired: " time-out (- current-time last-active))
+    (when (some-> (* 0.9 last-active) (<= (- current-time time-out)))
+      (logger "Timer fired for client: "
+               (select-keys (get @*clients* key) [:last-active :client-id]))
+      (remove-timer! key)
+      (when (contains? (get @*clients* key) :will)
+        (let [will-topic (get-in @*clients* [key :will :will-topic])
+              will-qos   (get-in @*clients* [key :will :will-qos])
+              will-message   (get-in @*clients* [key :will :will-message])]
+          (publish-will {:topic will-topic :qos will-qos :payload will-message}))))))
+
+(defn publish-will [{:keys [topic qos] :as msg}]
+  (when-let [keys (tr/matching-vals @*subscriber-trie* topic)]
+    (do
+      (case (long qos)
+        0 (qos-0 keys topic msg)
+        1 (qos-1-send  keys topic msg)
+        2 (qos-2-send keys topic msg)))))
+
 
 (defn add-timer!
   [key time]
   (let [time-out (* 1500 time)
-        timer    (at/every time-out #(check-timer key time-out) my-pool)]
-    (swap! *clients* assoc-in [key :timer] timer)
-    (swap! *clients* assoc-in [key :last-active] (volatile! (System/currentTimeMillis)))))
+        timer    (at/every time-out #(check-timer key time-out) my-pool :initial-delay time-out)]
+    (swap! *clients* assoc-in [key :last-active] (volatile! (System/currentTimeMillis)))
+    (swap! *clients* assoc-in [key :timer] timer)))
 
 (defn remove-timer! [key]
   (if-let [timer (get-in @*clients* [key :timer])]
     (at/kill timer)
-    (swap! *clients* update [key :timer] nil)))
+    (swap! *clients* update-in [key :timer] nil)))
 
 
 
@@ -55,7 +76,7 @@
   (async/>!! packet-identifiers p))
 
 #_(defn send-message [keys msg]
-    ;;(logger "sending message  from  clj " (:packet-type msg) " " (:packet-identifier msg))
+    (logger "sending message  from  clj " (:packet-type msg) " " (:packet-identifier msg))
     ;;(logger (class  keys))
     (let [s (:server (meta @*server*))]))
 ;  (.sendMessage ^MqttServer s keys msg)))
@@ -136,17 +157,17 @@
                (MqttPubRec/encode {:packet-type       :PUBREC
                                    :packet-identifier packet-identifier})))
 
+
 (defn publish [{:keys [topic qos] :as msg}]
-  ;;(logger "clj PUBLISH: " msg)
+  ;;(println "clj PUBLISH: " msg)
   ;(logger (str "valid publish: " (s/valid? :mqtt/publish msg)))
   ;(s/explain :mqtt/publish msg)
   (when-let [keys (tr/matching-vals @*subscriber-trie* topic)]
     (do
-      (logger "Keys: " keys " qos: " qos)
       (case (long qos)
-            0 (qos-0 keys topic msg)
-            1 (qos-1 keys topic msg)
-            2 (qos-2 keys topic msg)))))
+        0 (qos-0 keys topic msg)
+        1 (qos-1 keys topic msg)
+        2 (qos-2 keys topic msg)))))
 
 (defn puback [{:keys [packet-identifier]}]
   (logger "received PUBACK: " packet-identifier)
