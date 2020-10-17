@@ -37,7 +37,7 @@
     (swap! *clients* assoc-in [key :last-active] (volatile! (System/currentTimeMillis)))))
 
 (defn remove-timer! [key]
-  (let [timer (get-in @*clients* [key :timer])]
+  (if-let [timer (get-in @*clients* [key :timer])]
     (at/kill timer)
     (swap! *clients* update [key :timer] nil)))
 
@@ -62,9 +62,9 @@
 
 (defn update-timestamps [client-keys]
   (doseq [client-key client-keys]
-    ;;(println (- (System/currentTimeMillis) @(get-in @*clients* [client-key :last-active])))
-    ;;(swap! *clients* assoc-in [client-key :last-active] (System/currentTimeMillis))))
-    (vreset! (get-in @*clients* [client-key :last-active]) (System/currentTimeMillis))))
+    (when (contains? (get-in @*clients* [client-key]) :last-active)
+      ;;(swap! *clients* assoc-in [client-key :last-active] (System/currentTimeMillis))))
+      (vreset! (get-in @*clients* [client-key :last-active]) (System/currentTimeMillis)))))
 
 (defn send-buffer [keys buf]
   ;;(logger "sending buffer from clj")
