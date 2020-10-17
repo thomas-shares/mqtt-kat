@@ -1,5 +1,5 @@
 (ns mqttkat.handlers.disconnect
-  (:require [mqttkat.s :refer [*server*]]
+  (:require [mqttkat.interfaces :refer [*server*]]
             [mqttkat.handlers :refer :all])
   (:import [org.mqttkat.server MqttServer]))
 

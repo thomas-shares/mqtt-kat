@@ -1,5 +1,5 @@
 (ns mqttkat.handlers
-  (:require [mqttkat.s :refer [*server*]]
+  (:require [mqttkat.interfaces :refer [*server*]]
             [overtone.at-at :as at]
             [clojurewerkz.triennium.mqtt :as tr]
             [clojure.core.async :as async])

@@ -19,14 +19,14 @@ import static org.mqttkat.MqttStat.*;
 
 
 public class MqttServer implements Runnable {
-	static final String THREAD_NAME = "server-loop";
+    static final String THREAD_NAME = "server-loop";
 
-	private final Selector selector;
-	private final ServerSocketChannel serverChannel;
-	private final IHandler handler;
-	private final int port;
-	private final ByteBuffer buf = ByteBuffer.allocate(8096);
-	private final MqttSendExecutor executor;
+    private final Selector selector;
+    private final ServerSocketChannel serverChannel;
+    private final IHandler handler;
+    private final int port;
+    private final ByteBuffer buf = ByteBuffer.allocate(8096);
+    private final MqttSendExecutor executor;
 
     public MqttServer(String ip, int port, IHandler handler) throws IOException {
         this.selector = Selector.open();
@@ -39,91 +39,90 @@ public class MqttServer implements Runnable {
         this.executor = new MqttSendExecutor(selector, 16);
     }
 
-   private void closeKey(final SelectionKey key) {
-	   System.out.println("closing key: " + key.toString());
+    private void closeKey(final SelectionKey key) {
+        System.out.println("closing key: " + key.toString());
 
 
-       try {
-			IPersistentMap incoming = MqttDisconnect.decode(key);
-			handler.handle(incoming);
-		} catch (IOException e) {
-        	System.out.println(e.getMessage());
-		}
-      try {
+        try {
+            IPersistentMap incoming = MqttDisconnect.decode(key);
+            handler.handle(incoming);
+        } catch (IOException e) {
+            System.out.println(e.getMessage());
+        }
+        try {
             key.channel().close();
         } catch (Exception e) {
-        	System.out.println(e.getMessage());
+            System.out.println(e.getMessage());
         }
     }
 
     public void closeConnection(final SelectionKey key) {
-		try {
-			key.channel().close();
-		} catch (Exception e) {
-			System.out.println(e.getMessage());
-		}
-	}
+        try {
+            key.channel().close();
+        } catch (Exception e) {
+            System.out.println(e.getMessage());
+        }
+    }
 
-	public void run() {
-		System.out.println("Server starting on port " + this.port);
-		SelectionKey key = null;
+    public void run() {
+        System.out.println("Server starting on port " + this.port);
+        SelectionKey key = null;
 
-		try {
-			Iterator<SelectionKey> iter;
-			while (this.serverChannel.isOpen()) {
-				selector.select();
-				iter = this.selector.selectedKeys().iterator();
-				while (iter.hasNext()) {
-					key = iter.next();
-					iter.remove();
-					if (key.isAcceptable()) {
-						this.handleAccept(key);
-					}
-					if (key.isReadable()) {
-						this.handleRead(key);
-					}
-				}
-			}
-		} catch (IOException e) {
-			if(key != null ) {
-				key.cancel();
-			}
-			System.out.println("IOException, server of port " + this.port + " terminating. Stack trace:" + e.getLocalizedMessage());
-			e.printStackTrace();
-		}
-		catch ( ClosedSelectorException e) {
-			// Here we are stopping...  so no need to do anything
-		}
-	}
+        try {
+            Iterator<SelectionKey> iter;
+            while (this.serverChannel.isOpen()) {
+                selector.select();
+                iter = this.selector.selectedKeys().iterator();
+                while (iter.hasNext()) {
+                    key = iter.next();
+                    iter.remove();
+                    if (key.isAcceptable()) {
+                        this.handleAccept(key);
+                    }
+                    if (key.isReadable()) {
+                        this.handleRead(key);
+                    }
+                }
+            }
+        } catch (IOException e) {
+            if (key != null) {
+                key.cancel();
+            }
+            System.out.println("IOException, server of port " + this.port + " terminating. Stack trace:" + e.getLocalizedMessage());
+            e.printStackTrace();
+        } catch (ClosedSelectorException e) {
+            // Here we are stopping...  so no need to do anything
+        }
+    }
 
-	private void handleAccept(SelectionKey key) throws IOException {
-		SocketChannel sc = ((ServerSocketChannel) key.channel()).accept();
-		String address = (new StringBuilder(sc.socket().getInetAddress().toString())).append(":")
-				.append(sc.socket().getPort()).toString();
-		sc.configureBlocking(false);
-		sc.register(selector, SelectionKey.OP_READ, address);
-		//System.out.println("Server accepted Client connection from: " + address);
-	}
+    private void handleAccept(SelectionKey key) throws IOException {
+        SocketChannel sc = ((ServerSocketChannel) key.channel()).accept();
+        String address = (new StringBuilder(sc.socket().getInetAddress().toString())).append(":")
+                .append(sc.socket().getPort()).toString();
+        sc.configureBlocking(false);
+        sc.register(selector, SelectionKey.OP_READ, address);
+        //System.out.println("Server accepted Client connection from: " + address);
+    }
 
-	private void handleRead(SelectionKey key) throws IOException {
-		SocketChannel ch = (SocketChannel) key.channel();
-		try {
-			buf.clear();
-			int read;
-			//byte[] remainAndPayload = null;
-			byte type;
-			byte flags;
-			while ((read = ch.read(buf)) > 0) {
-				buf.flip();
-				// byte[] bytes = new byte[buf.limit()];
-				// buf.get(bytes);
-				do {
-					byte[] bytes = new byte[1];
-					buf.get(bytes, 0, 1);
+    private void handleRead(SelectionKey key) throws IOException {
+        SocketChannel ch = (SocketChannel) key.channel();
+        try {
+            buf.clear();
+            int read;
+            //byte[] remainAndPayload = null;
+            byte type;
+            byte flags;
+            while ((read = ch.read(buf)) > 0) {
+                buf.flip();
+                // byte[] bytes = new byte[buf.limit()];
+                // buf.get(bytes);
+                do {
+                    byte[] bytes = new byte[1];
+                    buf.get(bytes, 0, 1);
 
-					//System.out.println("byte 0: "  + Integer.toBinaryString( (int) bytes[0]));
-					type = (byte) ((bytes[0] & 0xff) >> 4);
-					flags = bytes[0] &= 0x0f;
+                    //System.out.println("byte 0: "  + Integer.toBinaryString( (int) bytes[0]));
+                    type = (byte) ((bytes[0] & 0xff) >> 4);
+                    flags = bytes[0] &= 0x0f;
 	/*
 
 				if (type == GenericMessage.MESSAGE_CONNECT) {
@@ -161,104 +160,104 @@ public class MqttServer implements Runnable {
 					System.out.println("FAIL!!!!!! INVALID packet sent: " + type);
 				}
 	*/
-					byte digit;
-					int multiplier = 1;
-					//System.out.println( "limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity() );
-					int msgLength = 0;
+                    byte digit;
+                    int multiplier = 1;
+                    //System.out.println( "limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity() );
+                    int msgLength = 0;
 
-					do {
-						digit = buf.get(); // bytes[0];
-						msgLength += ((digit & 0x7F) * multiplier);
-						multiplier *= 128;
-					} while ((digit & 0x80) != 0);
+                    do {
+                        digit = buf.get(); // bytes[0];
+                        msgLength += ((digit & 0x7F) * multiplier);
+                        multiplier *= 128;
+                    } while ((digit & 0x80) != 0);
 
-					//System.out.println("msgLenght: " + msgLength);
+                    //System.out.println("msgLenght: " + msgLength);
 
-					byte[] remainAndPayload = new byte[msgLength];
+                    byte[] remainAndPayload = new byte[msgLength];
 
-					//System.out.println( "limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity() + " remainLength: " +  remainAndPayload.length);
-					buf.get(remainAndPayload, 0, msgLength);
-					//System.out.println( "limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity());
+                    //System.out.println( "limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity() + " remainLength: " +  remainAndPayload.length);
+                    buf.get(remainAndPayload, 0, msgLength);
+                    //System.out.println( "limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity());
 
-					//for(int i=0; i < msgLength ;i++ ){
-					//	System.out.print(" " + remainAndPayload[i]);
-					//}
-					//System.out.print("\n");
+                    //for(int i=0; i < msgLength ;i++ ){
+                    //	System.out.print(" " + remainAndPayload[i]);
+                    //}
+                    //System.out.print("\n");
 
-					IPersistentMap incoming = null;
-					if (type == GenericMessage.MESSAGE_CONNECT) {
-						incoming = MqttConnect.decode(key, flags, remainAndPayload);
-					} else if (type == GenericMessage.MESSAGE_CONNACK) {
-						incoming = MqttConnAck.decode(key, remainAndPayload);
-					} else if (type == GenericMessage.MESSAGE_PUBLISH) {
-						incoming = MqttPublish.decode(key, flags, remainAndPayload);
-					} else if (type == GenericMessage.MESSAGE_PUBACK) {
-						incoming = MqttPubAck.decode(key, remainAndPayload);
-					} else if (type == GenericMessage.MESSAGE_PUBREC) {
-						incoming = MqttPubRec.decode(key, remainAndPayload);
-					} else if (type == GenericMessage.MESSAGE_PUBREL) {
-						incoming = MqttPubRel.decode(key, remainAndPayload);
-					} else if (type == GenericMessage.MESSAGE_PUBCOMP) {
-						incoming = MqttPubComp.decode(key, remainAndPayload);
-					} else if (type == GenericMessage.MESSAGE_SUBSCRIBE) {
-						incoming = MqttSubscribe.decode(key, remainAndPayload);
-					} else if (type == GenericMessage.MESSAGE_SUBACK) {
-						incoming = MqttSubAck.decode(key, remainAndPayload);
-					} else if (type == GenericMessage.MESSAGE_UNSUBSCRIBE) {
-						incoming = MqttUnsubscribe.decode(key, remainAndPayload);
-					} else if (type == GenericMessage.MESSAGE_UNSUBACK) {
-						incoming = MqttUnSubAck.decode(key, remainAndPayload);
-					} else if (type == GenericMessage.MESSAGE_PINGREQ) {
-						incoming = MqttPingReq.decode(key);
-					} else if (type == GenericMessage.MESSAGE_PINGRESP) {
-						incoming = MqttPingResp.decode(key);
-					} else if (type == GenericMessage.MESSAGE_DISCONNECT) {
-						incoming = MqttDisconnect.decode(key);
-						//closeKey(key);
-					} else if (type == GenericMessage.MESSAGE_AUTHENTICATION) {
-						incoming = MqttAuthenticate.decode(key);
-					} else {
-						System.out.println("FAIL!!!!!! INVALID packet sent: " + type);
-						closeKey(key);
-					}
+                    IPersistentMap incoming = null;
+                    if (type == GenericMessage.MESSAGE_CONNECT) {
+                        incoming = MqttConnect.decode(key, flags, remainAndPayload);
+                    } else if (type == GenericMessage.MESSAGE_CONNACK) {
+                        incoming = MqttConnAck.decode(key, remainAndPayload);
+                    } else if (type == GenericMessage.MESSAGE_PUBLISH) {
+                        incoming = MqttPublish.decode(key, flags, remainAndPayload);
+                    } else if (type == GenericMessage.MESSAGE_PUBACK) {
+                        incoming = MqttPubAck.decode(key, remainAndPayload);
+                    } else if (type == GenericMessage.MESSAGE_PUBREC) {
+                        incoming = MqttPubRec.decode(key, remainAndPayload);
+                    } else if (type == GenericMessage.MESSAGE_PUBREL) {
+                        incoming = MqttPubRel.decode(key, remainAndPayload);
+                    } else if (type == GenericMessage.MESSAGE_PUBCOMP) {
+                        incoming = MqttPubComp.decode(key, remainAndPayload);
+                    } else if (type == GenericMessage.MESSAGE_SUBSCRIBE) {
+                        incoming = MqttSubscribe.decode(key, remainAndPayload);
+                    } else if (type == GenericMessage.MESSAGE_SUBACK) {
+                        incoming = MqttSubAck.decode(key, remainAndPayload);
+                    } else if (type == GenericMessage.MESSAGE_UNSUBSCRIBE) {
+                        incoming = MqttUnsubscribe.decode(key, remainAndPayload);
+                    } else if (type == GenericMessage.MESSAGE_UNSUBACK) {
+                        incoming = MqttUnSubAck.decode(key, remainAndPayload);
+                    } else if (type == GenericMessage.MESSAGE_PINGREQ) {
+                        incoming = MqttPingReq.decode(key);
+                    } else if (type == GenericMessage.MESSAGE_PINGRESP) {
+                        incoming = MqttPingResp.decode(key);
+                    } else if (type == GenericMessage.MESSAGE_DISCONNECT) {
+                        incoming = MqttDisconnect.decode(key);
+                        //closeKey(key);
+                    } else if (type == GenericMessage.MESSAGE_AUTHENTICATION) {
+                        incoming = MqttAuthenticate.decode(key);
+                    } else {
+                        System.out.println("FAIL!!!!!! INVALID packet sent: " + type);
+                        closeKey(key);
+                    }
 
-					if (incoming != null) {
-						handler.handle(incoming);
-						receivedBytes.getAndAdd(msgLength);
-						receivedMessages.getAndIncrement();
-					}
-				} while (buf.limit() > buf.position());
+                    if (incoming != null) {
+                        handler.handle(incoming);
+                        receivedBytes.getAndAdd(msgLength);
+                        receivedMessages.getAndIncrement();
+                    }
+                } while (buf.limit() > buf.position());
 
-				buf.clear();
-			}
+                buf.clear();
+            }
 
-			//client has gone away...
-			if (read < 0) {
-				//System.out.println("Client has gone away...");
-				//System.out.println("message received: " + receivedMessage.get());
-				//System.out.println("Message sent: " + sentMessages.get());
-				closeKey(key);
-			}
+            //client has gone away...
+            if (read < 0) {
+                //System.out.println("Client has gone away...");
+                //System.out.println("message received: " + receivedMessage.get());
+                //System.out.println("Message sent: " + sentMessages.get());
+                closeKey(key);
+            }
 
-			//String address = (new StringBuilder(ch.socket().getInetAddress().toString())).append(":")
-			//		.append(ch.socket().getPort()).toString();
-		}
-		catch (IOException e) {
-			key.cancel();
-			ch.close();
-		}
-	}
+            //String address = (new StringBuilder(ch.socket().getInetAddress().toString())).append(":")
+            //		.append(ch.socket().getPort()).toString();
+        } catch (IOException e) {
+            key.cancel();
+            ch.close();
+        }
+    }
 
-	public void start() {
-		Thread serverThread = new Thread(this, THREAD_NAME);
-		serverThread.start();
-	}
+    public MqttServer start() {
+        Thread serverThread = new Thread(this, THREAD_NAME);
+        serverThread.start();
+        return this;
+    }
 
-	public void stop(int timeout) {
-		try {
-			serverChannel.close(); // stop accept any request
-		} catch (IOException ignore) {
-		}
+    public MqttServer stop(int timeout) {
+        try {
+            serverChannel.close(); // stop accept any request
+        } catch (IOException ignore) {
+        }
         handler.close(timeout);
 
         // close socket, notify on-close handlers
@@ -283,11 +282,13 @@ public class MqttServer implements Runnable {
             } catch (IOException ignore) {
             }
         }
-	}
 
-	public int getPort() {
-		return this.serverChannel.socket().getLocalPort();
-	}
+        return this;
+    }
+
+    public int getPort() {
+        return this.serverChannel.socket().getLocalPort();
+    }
 
 /*
 	public void tryWrite(final SelectionKey key, ByteBuffer... buffers) {
@@ -314,13 +315,13 @@ public class MqttServer implements Runnable {
 //		}
 //	}
 
-	public void sendMessageBuffer( final clojure.lang.PersistentVector keys, final ByteBuffer buffer) {
-		for (Object o : keys) {
-			SelectionKey key = (SelectionKey) o;
-			ByteBuffer copyBuf = buffer.duplicate();
-			executor.submit(copyBuf, key);
-			sentMessages.getAndIncrement();
-			sentBytes.getAndAdd(buffer.limit());
-		}
-	}
+    public void sendMessageBuffer(final clojure.lang.PersistentVector keys, final ByteBuffer buffer) {
+        for (Object o : keys) {
+            SelectionKey key = (SelectionKey) o;
+            ByteBuffer copyBuf = buffer.duplicate();
+            executor.submit(copyBuf, key);
+            sentMessages.getAndIncrement();
+            sentBytes.getAndAdd(buffer.limit());
+        }
+    }
 }

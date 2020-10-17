@@ -1,0 +1,5 @@
+{:broker/service {:port 1883
+                  :ip "0.0.0.0"
+                  :stop-timeout 100}
+ :broker/profiler {:port 8080
+                   :enabled? false}}
