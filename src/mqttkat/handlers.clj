@@ -90,9 +90,14 @@
 (defn send-buffer [keys buf]
   ;;(logger "sending buffer from clj")
   ;;(logger (class  keys))
-  (update-timestamps keys)
-  (let [{s :server} (meta @*server*)]
-    (.sendMessageBuffer ^MqttServer s keys buf)))
+  (if-not @*server*
+    (logger "server is null.")
+    (do
+      (update-timestamps keys)
+      (.sendMessageBuffer ^MqttServer @*server* keys buf))))
+
+
+
 
 
 (defn connack [msg]

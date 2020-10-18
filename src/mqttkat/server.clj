@@ -30,10 +30,17 @@
 
 
 (def config
-  (some-> env
-          :config-file
-          slurp
-          ig/read-string))
+  (if-let [c (some-> env
+                     :config-file
+                     slurp
+                     ig/read-string)]
+    c
+    {:broker/service {:port 1883
+                      :ip "0.0.0.0"
+                      :stop-timeout 100}
+     :broker/profiler {:port 8080
+                       :enabled? false}}))
+
 
 
 (defn default-handler-fn [{:keys [packet-type] :as msg} _]

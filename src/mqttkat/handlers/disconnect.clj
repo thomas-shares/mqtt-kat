@@ -8,8 +8,7 @@
     (logger "Disconnecting client " client-key)
     (swap! *clients* dissoc client-key)
     (logger (keys @*clients*))
-    (let [{s :server} (meta @*server*)]
-      (.closeConnection ^MqttServer s client-key))))
+    (.closeConnection ^MqttServer  @*server* client-key)))
 
 (defn disconnect
   [{:keys [client-key] :as msg}]
