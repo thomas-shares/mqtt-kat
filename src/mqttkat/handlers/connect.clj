@@ -41,8 +41,8 @@
                                                    :session-present? false
                                                    :connect-return-code 0x00}))))
 
-(defn connect [{:keys [protocol-name protocol-version client-key] :as msg}]
-  (logger "clj CONNECT: " protocol-name protocol-version client-key msg)
+(defn connect [{:keys [protocol-name protocol-version client-key client-id] :as msg}]
+  ;(logger "clj CONNECT: " protocol-name protocol-version client-key msg)
   (cond
     (client-contains? client-key)
     (disconnect-client client-key)
