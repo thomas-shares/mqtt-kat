@@ -7,16 +7,19 @@
            [org.mqttkat.packages MqttPublish
                                  MqttPubRel MqttPubAck MqttPubRec
                                  MqttPubComp MqttSubAck MqttPingResp]))
+(def o Object)
 
 (defn logger [msg & args]
   (when true
-    (println msg args)))
+    (locking o
+      (println msg args))))
 
 (def packet-identifier-queue-size 1024)
 (def ^:dynamic *clients* (atom {}))
 (def ^:dynamic *inflight* (atom {}))
 (def ^:dynamic *subscriber-trie* (atom (tr/make-trie)))
 (def ^:dynamic *outbound* (atom {}))
+(def ^:dynamic *retained* (atom {}))
 (def packet-identifiers (async/chan packet-identifier-queue-size))
 
 (def my-pool (at/mk-pool))
@@ -166,10 +169,15 @@
                                    :packet-identifier packet-identifier})))
 
 
-(defn publish [{:keys [topic qos] :as msg}]
+(defn publish [{:keys [topic qos retain? payload] :as msg}]
   (logger "clj PUBLISH: " msg)
   ;(logger (str "valid publish: " (s/valid? :mqtt/publish msg)))
   ;(s/explain :mqtt/publish msg)
+  (when retain?
+    (logger "publish with retain: " topic qos (empty? payload))
+    (if (empty? payload)
+      (swap! *retained* dissoc topic)
+      (swap! *retained* assoc topic {:qos qos :payload payload})))
   (when-let [keys (tr/matching-vals @*subscriber-trie* topic)]
     (do
       (case (long qos)
@@ -226,8 +234,21 @@
     (update-in subscribers [topic] conj key)
     (assoc subscribers topic [key])))
 
+(defn process-retained-messages [key]
+  (logger "process retained!")
+  (when-let [topics (keys @*retained*)]
+    (logger "topics that have been retained: " topics)
+    (doseq [topic topics]
+      (when-let [keys (tr/matching-vals @*subscriber-trie* topic)]
+        (do
+          (case (long (get-in @*retained* [topic :qos]))
+            0 (qos-0 keys topic (get-in @*retained* [topic :payload]))
+            1 (qos-1-send keys topic (get-in @*retained* [topic :payload]))
+            2 (qos-2-send keys topic (get-in @*retained* [topic :payload]))))))))
+
 (defn subscribe [{:keys [client-key topics packet-identifier] :as msg}]
   (logger "clj SUBSCRIBE:" msg)
+  (logger "Subscribe retain : " @*retained*)
   (do
     (swap! *clients* update-in [client-key :subscribed-topics] conj topics)
     (doseq [{:keys [topic-filter qos]} topics]
@@ -238,7 +259,8 @@
                  (MqttSubAck/encode
                    {:packet-type       :SUBACK
                     :packet-identifier packet-identifier
-                    :response          (mapv #(long (:qos %)) topics)}))))
+                    :response          (mapv #(long (:qos %)) topics)}))
+    (process-retained-messages client-key)))
 
 
 (defn unsubscribe
