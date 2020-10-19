@@ -25,7 +25,7 @@
   (do (send-buffer [client-key] (MqttConnAck/encode {:packet-type :CONNACK
                                                      :session-present? false
                                                      :connect-return-code 0x01}))
-      (disconnect msg)))
+      (disconnect-client client-key)))
 
 (defn handle-not-valid-protocol-name
   [client-key]
@@ -35,14 +35,14 @@
 (defn handle-success
   [{:keys [client-key keep-alive] :as msg}]
   (do
-    (swap! *clients* assoc client-key (dissoc msg :packet-type))
+    (add-client! msg)
     (when (pos? keep-alive) (add-timer! client-key keep-alive))
     (send-buffer [client-key] (MqttConnAck/encode {:packet-type :CONNACK
                                                    :session-present? false
                                                    :connect-return-code 0x00}))))
 
 (defn connect [{:keys [protocol-name protocol-version client-key client-id] :as msg}]
-  ;(logger "clj CONNECT: " protocol-name protocol-version client-key msg)
+  (logger "clj CONNECT: " msg)
   (cond
     (client-contains? client-key)
     (disconnect-client client-key)

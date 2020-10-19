@@ -39,10 +39,8 @@ public class MqttServer implements Runnable {
         this.executor = new MqttSendExecutor(selector, 16);
     }
 
-   private void closeKey(final SelectionKey key) {
+   public void closeKey(final SelectionKey key) {
 	   System.out.println("closing key: " + key.toString());
-
-
        try {
 			IPersistentMap incoming = MqttDisconnect.decode(key);
 			handler.handle(incoming);
@@ -50,15 +48,21 @@ public class MqttServer implements Runnable {
         	System.out.println(e.getMessage());
 		}
       try {
-            key.channel().close();
+		  if(key.channel().isOpen()) {
+			  key.channel().close();
+		  }
         } catch (Exception e) {
         	System.out.println(e.getMessage());
         }
     }
 
+    // this one is needed for just closing the connection. The CLJ layer has done
+	// everything needed already
     public void closeConnection(final SelectionKey key) {
 		try {
-			key.channel().close();
+			if(key.channel().isOpen()) {
+				key.channel().close();
+			}
 		} catch (Exception e) {
 			System.out.println(e.getMessage());
 		}
@@ -214,7 +218,6 @@ public class MqttServer implements Runnable {
 						incoming = MqttPingResp.decode(key);
 					} else if (type == GenericMessage.MESSAGE_DISCONNECT) {
 						incoming = MqttDisconnect.decode(key);
-						//closeKey(key);
 					} else if (type == GenericMessage.MESSAGE_AUTHENTICATION) {
 						incoming = MqttAuthenticate.decode(key);
 					} else {

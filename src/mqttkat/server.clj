@@ -53,7 +53,7 @@
   (when (@*server*)
     (do (println "Server stopping...")
         (prof/stop {})
-        (at/stop-and-reset-pool! h/my-pool)
+        (at/stop-and-reset-pool! h/my-pool :strategy :kill)
         (alter-meta! *server* #(assoc % :timeout 1000))
         (reset! *server* nil))))
 
