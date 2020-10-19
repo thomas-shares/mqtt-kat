@@ -50,7 +50,7 @@
       (handle-will-if-present key)
       ;; once we have sent the will message remove the will from the client,
       ;; so that it won't get send again.
-      (swap! *clients* assoc-in [key :will] nil)
+      (swap! *clients* assoc-in [key] dissoc :will)
       (.closeKey ^MqttServer @*server* key))))
 
 
