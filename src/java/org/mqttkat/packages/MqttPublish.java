@@ -87,8 +87,10 @@ public class MqttPublish extends GenericMessage {
 			}
 		} else {
 			byte[] payloadBytes = (byte[])obj;
-			for(int i = 0; i < payloadBytes.length; i++) {
-				bytes[length++] = payloadBytes[i];
+			if( payloadBytes != null ) {
+				for(int i = 0; i < payloadBytes.length; i++) {
+					bytes[length++] = payloadBytes[i];
+				}
 			}
 		}
 
