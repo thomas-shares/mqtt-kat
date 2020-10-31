@@ -7,41 +7,24 @@
            [org.mqttkat.packages MqttPublish
                                  MqttPubRel MqttPubAck MqttPubRec
                                  MqttPubComp MqttSubAck MqttPingResp]))
-(def o Object)
 
 (defn logger [msg & args]
-  (when true
-    (locking o
-      (println msg args))))
+  (when false
+    (println msg args)))
 
 (def packet-identifier-queue-size 1024)
 (def ^:dynamic *clients* (atom {}))
 (def ^:dynamic *inflight* (atom {}))
 (def ^:dynamic *subscriber-trie* (atom (tr/make-trie)))
 (def ^:dynamic *outbound* (atom {}))
-(def ^:dynamic *retained* (atom {}))
 (def packet-identifiers (async/chan packet-identifier-queue-size))
 
 (def my-pool (at/mk-pool))
+(declare publish-will)
+(declare remove-timer!)
 (declare qos-0)
 (declare qos-1-send)
 (declare qos-2-send)
-
-(defn publish-will [{:keys [topic qos] :as msg}]
-  (logger "Sending will messag on topic: " topic)
-  (when-let [keys (tr/matching-vals @*subscriber-trie* topic)]
-    (do
-      (case (long qos)
-        0 (qos-0 keys topic msg)
-        1 (qos-1-send  keys topic msg)
-        2 (qos-2-send keys topic msg)))))
-
-(defn handle-will-if-present [key]
-  (when (contains? (get @*clients* key) :will)
-    (let [will-topic (get-in @*clients* [key :will :will-topic])
-          will-qos   (get-in @*clients* [key :will :will-qos])
-          will-message   (get-in @*clients* [key :will :will-message])]
-      (publish-will {:topic will-topic :qos will-qos :payload will-message}))))
 
 
 (defn check-timer [key time-out]
@@ -49,12 +32,22 @@
         last-active  @(:last-active (get @*clients* key))]
     ;(println "timer fired: " time-out (- current-time last-active))
     (when (some-> (* 0.9 last-active) (<= (- current-time time-out)))
-      (logger "Timer fired for client: " key)
-      (handle-will-if-present key)
-      ;; once we have sent the will message remove the will from the client,
-      ;; so that it won't get send again.
-      (swap! *clients* assoc-in [key] dissoc :will)
-      (.closeKey ^MqttServer @*server* key))))
+      (logger "Timer fired for client: "
+               (select-keys (get @*clients* key) [:last-active :client-id]))
+      (remove-timer! key)
+      (when (contains? (get @*clients* key) :will)
+        (let [will-topic (get-in @*clients* [key :will :will-topic])
+              will-qos   (get-in @*clients* [key :will :will-qos])
+              will-message   (get-in @*clients* [key :will :will-message])]
+          (publish-will {:topic will-topic :qos will-qos :payload will-message}))))))
+
+(defn publish-will [{:keys [topic qos] :as msg}]
+  (when-let [keys (tr/matching-vals @*subscriber-trie* topic)]
+    (do
+      (case (long qos)
+        0 (qos-0 keys topic msg)
+        1 (qos-1-send  keys topic msg)
+        2 (qos-2-send keys topic msg)))))
 
 
 (defn add-timer!
@@ -65,15 +58,11 @@
     (swap! *clients* assoc-in [key :timer] timer)))
 
 (defn remove-timer! [key]
-  (when-let [timer (get-in @*clients* [key :timer])]
+  (if-let [timer (get-in @*clients* [key :timer])]
     (at/kill timer)
-    (swap! *clients* assoc-in [key :timer] nil)))
+    (swap! *clients* update-in [key :timer] nil)))
 
-(defn add-client! [{:keys [client-key] :as msg}]
-  (swap! *clients* assoc client-key (dissoc msg :packet-type)))
 
-(defn remove-client! [key]
-  (swap! *clients* dissoc key))
 
 ;; pre-load queue
 (doseq [i (range 1 (inc packet-identifier-queue-size))]
@@ -174,15 +163,10 @@
                                    :packet-identifier packet-identifier})))
 
 
-(defn publish [{:keys [topic qos retain? payload] :as msg}]
-  (logger "clj PUBLISH: " msg)
+(defn publish [{:keys [topic qos] :as msg}]
+  ;;(println "clj PUBLISH: " msg)
   ;(logger (str "valid publish: " (s/valid? :mqtt/publish msg)))
   ;(s/explain :mqtt/publish msg)
-  (when retain?
-    (logger "publish with retain: " topic qos (empty? payload))
-    (if (empty? payload)
-      (swap! *retained* dissoc topic)
-      (swap! *retained* assoc topic {:qos qos :payload payload})))
   (when-let [keys (tr/matching-vals @*subscriber-trie* topic)]
     (do
       (case (long qos)
@@ -239,21 +223,8 @@
     (update-in subscribers [topic] conj key)
     (assoc subscribers topic [key])))
 
-(defn process-retained-messages [key]
-  (logger "process retained!")
-  (when-let [topics (keys @*retained*)]
-    (logger "topics that have been retained: " topics)
-    (doseq [topic topics]
-      (when-let [keys (tr/matching-vals @*subscriber-trie* topic)]
-        (do
-          (case (long (get-in @*retained* [topic :qos]))
-            0 (qos-0 keys topic (get-in @*retained* [topic :payload]))
-            1 (qos-1-send keys topic (get-in @*retained* [topic :payload]))
-            2 (qos-2-send keys topic (get-in @*retained* [topic :payload]))))))))
-
 (defn subscribe [{:keys [client-key topics packet-identifier] :as msg}]
   (logger "clj SUBSCRIBE:" msg)
-  (logger "Subscribe retain : " @*retained*)
   (do
     (swap! *clients* update-in [client-key :subscribed-topics] conj topics)
     (doseq [{:keys [topic-filter qos]} topics]
@@ -264,8 +235,7 @@
                  (MqttSubAck/encode
                    {:packet-type       :SUBACK
                     :packet-identifier packet-identifier
-                    :response          (mapv #(long (:qos %)) topics)}))
-    (process-retained-messages client-key)))
+                    :response          (mapv #(long (:qos %)) topics)}))))
 
 
 (defn unsubscribe

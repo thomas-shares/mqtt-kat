@@ -3,9 +3,11 @@
             [mqttkat.handlers.connect :as connect]
             [mqttkat.handlers.disconnect :as disconnect]
             [mqttkat.util :as util]
-            [mqttkat.s :refer [*server*]]
+            [mqttkat.interfaces :refer [*system* *server*]]
             [overtone.at-at :as at]
-            [clj-async-profiler.core :as prof])
+            [clj-async-profiler.core :as prof]
+            [environ.core :refer [env]]
+            [integrant.core :as ig])
   (:import [org.mqttkat.server MqttServer]
            [org.mqttkat MqttHandler])
   (:gen-class))
@@ -26,37 +28,69 @@
                   :DISCONNECT   disconnect/disconnect
                   :AUTHENTICATE h/authenticate})
 
+
+(def config
+  (if-let [c (some-> env
+                     :config-file
+                     slurp
+                     ig/read-string)]
+    c
+    {:broker/service {:port 1883
+                      :ip "0.0.0.0"
+                      :stop-timeout 100}
+     :broker/profiler {:port 8080
+                       :enabled? false}}))
+
+
+
 (defn default-handler-fn [{:keys [packet-type] :as msg} _]
   ;;(println "message is received. " msg)
   (when packet-type
     ((packet-type handler-map) msg)))
 
-(defn run-server [ip port handler]
-  (prof/serve-files 8080)
-  (let [s           (MqttServer. ^String ip ^int port handler)
-        stop-server (fn stop-server [& {:keys [timeout] :or {timeout 100}}]
-                      (println "meta stop...")
-                      (.stop s timeout))]
-    (.start s)
-    (with-meta stop-server {:local-port (.getPort s)
-                            :server     s})))
+(defmethod ig/init-key :broker/service
+  [_ {:keys [port ip] :or {port 1883 ip "0.0.0.0"} :as opts}]
+  (let [h (MqttHandler. ^clojure.lang.IFn default-handler-fn 4)
+        s (-> (MqttServer. ^String ip ^int port h)
+              (.start))]
+    (assoc opts :server s)))
 
+(defmethod ig/init-key :broker/profiler
+  [_ {:keys [port :enabled?] :or {port 8080}}]
+  (when :enabled?
+    (prof/serve-files port)))
+
+(defmethod ig/halt-key! :broker/service
+  [_ {:keys [server stop-timeout] :or {stop-timeout 1000}}]
+  (do
+    (let [^MqttServer server server]
+      (.stop server stop-timeout))
+    (at/stop-and-reset-pool! h/my-pool)))
+
+
+(defmethod ig/halt-key! :broker/profiler
+  [_ _]
+  (when-not (= (prof/status) "Profiler is not active\n")
+    (prof/stop)))
 
 (defn start!
-  ([] (start! "0.0.0.0" 1883 (MqttHandler. ^clojure.lang.IFn default-handler-fn 4)))
-  ([ip port]
-   (start! ip port (MqttHandler. ^clojure.lang.IFn default-handler-fn 4)))
-  ([ip port handler]
-   (reset! *server* (run-server ip port handler))))
+  ([] (do
+        (dosync
+          (ref-set *system* (ig/init config)))
+        (reset! *server* (get-in @*system* [:broker/service :server]))))
+  ([config-keys]
+   (do
+     (dosync
+       (ref-set *system* (ig/init-key config config-keys)))
+     (reset! *server* (get-in @*system* [:broker/service :server])))))
 
-(defn stop! []
-  (when (@*server*)
-    (do (println "Server stopping...")
-        (prof/stop {})
-        (at/stop-and-reset-pool! h/my-pool :strategy :kill)
-        (alter-meta! *server* #(assoc % :timeout 1000))
-        (reset! *server* nil))))
-
+(defn stop!
+  ([]
+   (do
+     (println "Server stopping...")
+     (ig/halt! @*system*)
+     (dosync (ref-set *system* nil))
+     (reset! *server* nil))))
 
 (defn -main [& _]
   (start!)
