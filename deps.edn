@@ -1,0 +1,14 @@
+;; deps.edn
+{:paths ["src/java/org/mqttkat" "src/mqttkat"]
+ :deps  {org.clojure/clojure {:mvn/version "1.11.1"}
+         org.clojure/core.async {:mvn/version "1.5.648"}
+         org.clojure/spec.alpha {:mvn/version "0.3.218"}
+         org.clojure/core.specs.alpha {:mvn/version "0.2.62"}
+         clojurewerkz/triennium {:mvn/version "1.0.0-beta2"}
+         io.github.thomas-shares/at-at {:git/sha "669733e914d2ec80be1239ce84bf8c4e48b18d3e"}}
+ :aliases {:test {:extra-paths ["test"] ; can also run clojure -X:test
+                  :extra-deps {org.clojure/test.check {:mvn/version "1.1.1"}
+                               io.github.cognitect-labs/test-runner {:git/tag "v0.5.0" :git/sha "48c3c67"}
+                               com.clojure-goes-fast/clj-async-profiler {:mvn/version "0.5.1"}
+                               org.craigandera/causatum {:mvn/version "0.3.0"}
+                               badigeon/badigeon {:mvn/version "1.7"}}}}}

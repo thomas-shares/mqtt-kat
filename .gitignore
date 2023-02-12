@@ -16,3 +16,7 @@ pom.xml.asc
 /.settings
 /.idea
 *.iml
+.calva
+.clj-kondo
+.cpcache
+.lsp
