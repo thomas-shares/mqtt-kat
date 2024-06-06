@@ -165,5 +165,7 @@
        (({:connect connect, :publish publish, :disconnect disconnect, :connack connack :subscribe subscribe} state) client))
      (let [time (/ (- (System/currentTimeMillis) start-time) 1000.0)]
        (println
-         "sent per sec "(/ (MqttStat/sentMessages) time)
-         "received per sec " (/ (MqttStat/receivedMessages) time)))))
+         "sent per sec "(/ #_{:clj-kondo/ignore [:java-static-field-call]}
+                           (MqttStat/sentMessages) time)
+         "received per sec " (/ #_{:clj-kondo/ignore [:java-static-field-call]}
+                                (MqttStat/receivedMessages) time)))))

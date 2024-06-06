@@ -5,7 +5,8 @@
             [mqttkat.util :as util]
             [mqttkat.s :refer [*server*]]
             [overtone.at-at :as at]
-            [clj-async-profiler.core :as prof])
+            ;;[clj-async-profiler.core :as prof]
+            [virgil :as virgil])
   (:import [org.mqttkat.server MqttServer]
            [org.mqttkat MqttHandler])
   (:gen-class))
@@ -32,7 +33,7 @@
     ((packet-type handler-map) msg)))
 
 (defn run-server [ip port handler]
-  (prof/serve-files 8080)
+  #_(prof/serve-files 8080)
   (let [s           (MqttServer. ^String ip ^int port handler)
         stop-server (fn stop-server [& {:keys [timeout] :or {timeout 100}}]
                       (println "meta stop...")
@@ -52,7 +53,7 @@
 (defn stop! []
   (when (@*server*)
     (do (println "Server stopping...")
-        (prof/stop {})
+        ;;(prof/stop {})
         (at/stop-and-reset-pool! h/my-pool :strategy :kill)
         (alter-meta! *server* #(assoc % :timeout 1000))
         (reset! *server* nil))))
@@ -66,6 +67,10 @@
 (comment
   (start!)
   (stop!)
+
+
+
+  (virgil/watch-and-recompile ["src/java"] :verbose true)
 
   (do
     (stop!)

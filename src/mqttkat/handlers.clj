@@ -110,7 +110,7 @@
   (logger "CONNACK: " msg))
 
 (defn qos-0 [keys topic {:keys [payload]}]
-  ;;(logger "respond QOS 0 ")
+  (logger "respond QOS 0 ")
   (send-buffer (mapv :client-key keys)
                (MqttPublish/encode {:packet-type :PUBLISH
                                     :payload     payload
@@ -119,7 +119,7 @@
                                     :retain?     false})))
 
 (defn qos-1-send [keys topic {:keys [payload]}]
-  ;;(logger "respond qos 1")
+  (logger "respond qos 1")
   (doseq [key (mapv :client-key keys)]
     (send-buffer [key]
                  (MqttPublish/encode {:packet-type       :PUBLISH
@@ -289,4 +289,4 @@
 
 
 (defn authenticate [msg]
-  (println "AUTHENTICATE: " msg))
+  (logger "AUTHENTICATE: " msg))
