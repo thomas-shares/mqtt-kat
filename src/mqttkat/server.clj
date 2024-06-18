@@ -2,6 +2,7 @@
   (:require [mqttkat.handlers :as h]
             [mqttkat.handlers.connect :as connect]
             [mqttkat.handlers.disconnect :as disconnect]
+            [mqttkat.handlers.connack :as connack]
             [mqttkat.util :as util]
             [mqttkat.s :refer [*server*]]
             [overtone.at-at :as at]
@@ -14,7 +15,7 @@
 (set! *warn-on-reflection* true)
 
 (def handler-map {:CONNECT      connect/connect
-                  :CONNACK      h/connack
+                  :CONNACK      connack/connack
                   :PUBLISH      h/publish
                   :PUBACK       h/puback
                   :PUBREC       h/pubrec
@@ -42,7 +43,6 @@
     (with-meta stop-server {:local-port (.getPort s)
                             :server     s})))
 
-
 (defn start!
   ([] (start! "0.0.0.0" 1883 (MqttHandler. ^clojure.lang.IFn default-handler-fn 4)))
   ([ip port]
@@ -52,23 +52,19 @@
 
 (defn stop! []
   (when (@*server*)
-    (do (println "Server stopping...")
-        ;;(prof/stop {})
-        (at/stop-and-reset-pool! h/my-pool :strategy :kill)
-        (alter-meta! *server* #(assoc % :timeout 1000))
-        (reset! *server* nil))))
-
+    (println "Server stopping...")
+    ;;(prof/stop {})
+    (at/stop-and-reset-pool! h/my-pool :strategy :kill)
+    (alter-meta! *server* #(assoc % :timeout 1000))
+    (reset! *server* nil)))
 
 (defn -main [& _]
   (start!)
   (util/info))
 
-
 (comment
   (start!)
   (stop!)
-
-
 
   (virgil/watch-and-recompile ["src/java"] :verbose true)
 

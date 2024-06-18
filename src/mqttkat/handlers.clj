@@ -5,8 +5,8 @@
             [clojure.core.async :as async])
   (:import [org.mqttkat.server MqttServer]
            [org.mqttkat.packages MqttPublish
-                                 MqttPubRel MqttPubAck MqttPubRec
-                                 MqttPubComp MqttSubAck MqttPingResp]))
+            MqttPubRel MqttPubAck MqttPubRec
+            MqttPubComp MqttSubAck MqttPingResp]))
 (def o Object)
 
 (defn logger [msg & args]
@@ -43,7 +43,6 @@
           will-message   (get-in @*clients* [key :will :will-message])]
       (publish-will {:topic will-topic :qos will-qos :payload will-message}))))
 
-
 (defn check-timer [key time-out]
   (let [current-time (System/currentTimeMillis)
         last-active  @(:last-active (get @*clients* key))]
@@ -51,11 +50,14 @@
     (when (some-> (* 0.9 last-active) (<= (- current-time time-out)))
       (logger "Timer fired for client: " key)
       (handle-will-if-present key)
+      ;; TODO
+      ;; Remove Timer!!!
       ;; once we have sent the will message remove the will from the client,
       ;; so that it won't get send again.
-      (swap! *clients* assoc-in [key] dissoc :will)
-      (.closeKey ^MqttServer @*server* key))))
-
+      #_(swap! *clients* assoc-in [key] dissoc :will)
+      (logger "about to close")
+      (.closeKey ^MqttServer @*server* key)
+      (logger "closed...."))))
 
 (defn add-timer!
   [key time]
@@ -105,10 +107,6 @@
   (let [{s :server} (meta @*server*)]
     (.sendMessageBuffer ^MqttServer s keys buf)))
 
-
-(defn connack [msg]
-  (logger "CONNACK: " msg))
-
 (defn qos-0 [keys topic {:keys [payload]}]
   (logger "respond QOS 0 ")
   (send-buffer (mapv :client-key keys)
@@ -144,7 +142,6 @@
 (defn qos-1-or-2? [m]
   ((some-fn qos-1? qos-2?) m))
 
-
 (defn qos-1 [keys topic {:keys [client-key packet-identifier] :as msg}]
   ;;(logger  "qos 1 received..." keys)
   (send-buffer [client-key]
@@ -167,7 +164,6 @@
   (send-buffer [client-key]
                (MqttPubRec/encode {:packet-type       :PUBREC
                                    :packet-identifier packet-identifier})))
-
 
 (defn publish [{:keys [topic qos retain? payload] :as msg}]
   (logger "clj PUBLISH: " msg)
@@ -194,7 +190,7 @@
   (logger "received PUBREC: " msg)
   (send-buffer [client-key]
                (MqttPubRel/encode
-                 {:packet-type :PUBREL :packet-identifier packet-identifier})))
+                {:packet-type :PUBREL :packet-identifier packet-identifier})))
 
 (defn qos-2-send [keys topic {:keys [payload] :as msg}]
   (some-> (filter qos-0? keys)
@@ -223,7 +219,6 @@
   (let [{:keys [keys topic msg]} (get @*inflight* [client-key packet-identifier])]
     (qos-2-send keys topic msg)
     (swap! *inflight* dissoc [client-key packet-identifier])))
-
 
 (defn pubcomp [{:keys [packet-identifier] :as msg}]
   (logger "received PUBCOMP: " msg)
@@ -257,11 +252,10 @@
     ;(logger "subscribers: " @sub2)
     (send-buffer [client-key]
                  (MqttSubAck/encode
-                   {:packet-type       :SUBACK
-                    :packet-identifier packet-identifier
-                    :response          (mapv #(long (:qos %)) topics)}))
+                  {:packet-type       :SUBACK
+                   :packet-identifier packet-identifier
+                   :response          (mapv #(long (:qos %)) topics)}))
     (process-retained-messages client-key)))
-
 
 (defn unsubscribe
   [{:keys [topics client-key] :as msg}]
@@ -270,7 +264,6 @@
   (swap! *clients* update-in [client-key :subscribed-topics] disj topics)
   (doseq [{:keys [topic-filter client-key]} topics]
     (swap! *subscriber-trie* tr/delete topic-filter client-key)))
-
 
 (defn pingreq [{:keys [client-key] :as msg}]
   (logger "clj PINGREQ: " msg)
@@ -285,8 +278,6 @@
 
   (defn remove-client-subscriber [m val]
     (into {} (map (fn [[k v]] (let [nv (filterv #(not= val %) v)] {k nv})) m))))
-
-
 
 (defn authenticate [msg]
   (logger "AUTHENTICATE: " msg))

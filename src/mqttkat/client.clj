@@ -6,8 +6,8 @@
   (:import [org.mqttkat.client MqttClient]
            [org.mqttkat MqttHandler]
            [org.mqttkat.packages MqttConnect MqttPingReq MqttPublish
-             MqttDisconnect MqttSubscribe MqttPubRel MqttPubAck MqttPubRec
-             MqttPubComp]))
+            MqttDisconnect MqttSubscribe MqttPubRel MqttPubAck MqttPubRec
+            MqttPubComp]))
 
 (set! *warn-on-reflection* true)
 
@@ -22,6 +22,7 @@
   (println "clj handler: " msg))
 
 (defn client
+  ([] (client "localhost" 1883))
   ([host port] (client host port (MqttHandler. ^clojure.lang.IFn handler-fn 2)))
   ([host port handler]
    client (MqttClient. ^String host ^int port 2 handler ^Object (async/chan 1))))
@@ -31,7 +32,7 @@
                   _ (logger "S " map " " client)
                   buf (MqttConnect/encode (assoc map :keep-alive 60))]
                   ;ch (async/chan 1)]
-                (.sendMessage ^MqttClient client buf))))
+              (.sendMessage ^MqttClient client buf))))
 
 ;  ([host port] (client host port (MqttHandler. ^clojure.lang.IFn handler-fn 2)));
 ;  ([host port handler]
@@ -47,8 +48,8 @@
          map (assoc map :topic topic)
          _ (logger "S " map " " client)
          buf (MqttPublish/encode map)]
-      (.sendMessage ^MqttClient client buf)
-      (select-keys map [:qos :payload :packet-identifier])))
+     (.sendMessage ^MqttClient client buf)
+     (select-keys map [:qos :payload :packet-identifier])))
   ([topic msg qos]
    (let [bufs (MqttPublish/encode {:packet-type :PUBLISH :qos qos :topic topic :payload msg :retain? false :duplicate? false})]
      (.sendMessage ^MqttClient client bufs))))
@@ -59,7 +60,7 @@
         map (assoc map :topics filtered)
         _ (logger "S " map " " client)
         buf (MqttSubscribe/encode map)]
-     (.sendMessage ^MqttClient client buf)
+    (.sendMessage ^MqttClient client buf)
     map))
 
 (defn pingreq [client]
@@ -68,8 +69,8 @@
     (.sendMessage ^MqttClient client bufs)))
 
 (defn disconnect [client]
-    (->> (MqttDisconnect/encode)
-         (.sendMessage ^MqttClient client)))
+  (->> (MqttDisconnect/encode)
+       (.sendMessage ^MqttClient client)))
 
 (defn close [client]
   (.close ^MqttClient client))
