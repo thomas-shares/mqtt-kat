@@ -49,7 +49,8 @@ public class MqttClient implements Runnable {
 	// The buffer into which we'll read data when it's available
 	private ByteBuffer readBuffer = ByteBuffer.allocate(4096);
 
-	public MqttClient(String host, int port, int threadPoolSize, IHandler handler, Object asyncChannel) throws IOException {
+	public MqttClient(String host, int port, int threadPoolSize, IHandler handler, Object asyncChannel)
+			throws IOException {
 		log("Creating client...");
 		this.handler = handler;
 
@@ -60,7 +61,7 @@ public class MqttClient implements Runnable {
 		this.asyncChannel = asyncChannel;
 
 		selector = Selector.open();
-		//this.executor = new MqttSendExecutor(selector, threadPoolSize);
+		// this.executor = new MqttSendExecutor(selector, threadPoolSize);
 
 		Thread t = new Thread(this, "mqtt-client");
 		t.setDaemon(true);
@@ -84,16 +85,17 @@ public class MqttClient implements Runnable {
 				this.pendingData.put(socketChannel, queue);
 			}
 			queue.add(buffer);
-			//System.out.println( "queue size: " + queue.size());
+			// System.out.println( "queue size: " + queue.size());
 		}
-		synchronized(this.pendingChanges) {
-			ChangeRequest changeRequest =  new ChangeRequest(socketChannel, ChangeRequest.REGISTER, SelectionKey.OP_WRITE);
+		synchronized (this.pendingChanges) {
+			ChangeRequest changeRequest = new ChangeRequest(socketChannel, ChangeRequest.REGISTER,
+					SelectionKey.OP_WRITE);
 			this.pendingChanges.add(changeRequest);
 		}
 
 		// Finally, wake up our selecting thread so it can make the required changes
 		this.selector.wakeup();
-		//System.out.println("woken up...");
+		// System.out.println("woken up...");
 	}
 
 	public void run() {
@@ -103,33 +105,34 @@ public class MqttClient implements Runnable {
 
 				synchronized (this.pendingChanges) {
 					Iterator<?> changes = this.pendingChanges.iterator();
-					//System.out.println("changes..." + changes.hasNext());
+					// System.out.println("changes..." + changes.hasNext());
 					while (changes.hasNext()) {
 						ChangeRequest change = (ChangeRequest) changes.next();
 						switch (change.type) {
-						case ChangeRequest.CHANGEOPS:
-							//System.out.println("OPS...");
+							case ChangeRequest.CHANGEOPS:
+								// System.out.println("OPS...");
 
-							SelectionKey key = change.socket.keyFor(this.selector);
-							key.interestOps(change.ops);
-							break;
-						case ChangeRequest.REGISTER:
-							//System.out.println("REGISTER...");
-							change.socket.register(this.selector, change.ops);
-							break;
+								SelectionKey key = change.socket.keyFor(this.selector);
+								key.interestOps(change.ops);
+								break;
+							case ChangeRequest.REGISTER:
+								// System.out.println("REGISTER...");
+								change.socket.register(this.selector, change.ops);
+								break;
 						}
 					}
 					this.pendingChanges.clear();
 				}
 				// Wait for an event one of the registered channels
 				int x = this.selector.select();
-				//System.out.println("selected..." + this.selector.selectedKeys().size() + "  " + x);
+				// System.out.println("selected..." + this.selector.selectedKeys().size() + " "
+				// + x);
 
 				// Iterate over the set of keys for which events are available
 				Iterator<SelectionKey> selectedKeys = this.selector.selectedKeys().iterator();
 				while (selectedKeys.hasNext()) {
 					SelectionKey key = (SelectionKey) selectedKeys.next();
-					//System.out.println("key: " + key.toString());
+					// System.out.println("key: " + key.toString());
 
 					selectedKeys.remove();
 
@@ -141,17 +144,17 @@ public class MqttClient implements Runnable {
 					if (key.isConnectable()) {
 						this.finishConnection(key);
 					} else if (key.isReadable()) {
-						//System.out.println("ready for read...");
+						// System.out.println("ready for read...");
 						this.read(key);
-						//System.out.println("done read in loop");
+						// System.out.println("done read in loop");
 					} else if (key.isWritable()) {
-						//System.out.println("ready for write...");
+						// System.out.println("ready for write...");
 						this.write(key);
 					}
 				}
-			}  catch (Exception e) {
-				//System.out.println(e.getMessage());
-			//	e.printStackTrace();
+			} catch (Exception e) {
+				// System.out.println(e.getMessage());
+				// e.printStackTrace();
 			}
 		}
 	}
@@ -186,48 +189,46 @@ public class MqttClient implements Runnable {
 		this.handleResponse(this.readBuffer.array(), numRead);
 	}
 
-	private void handleResponse( byte[] data, int numRead) throws IOException {
+	private void handleResponse(byte[] data, int numRead) throws IOException {
 		// Make a correctly sized copy of the data before handing it
 		// to the client this can be multiple MQTT packets...
 
-		int i = 0 ;
-		//System.out.println("read " + numRead);
+		int i = 0;
+		// System.out.println("read " + numRead);
 		do {
 
-			//System.out.println("start " + i);
+			// System.out.println("start " + i);
 
 			byte type = (byte) ((data[i] & 0xff) >> 4);
 			byte flags = (byte) (data[i] &= 0x0f);
 
-
 			byte digit;
 			int multiplier = 1;
 			int msgLength = 0;
-			//System.out.println( "limit: " + buf.limit() + " position: " + buf.position() + " capacity: " + buf.capacity() );
+			// System.out.println( "limit: " + buf.limit() + " position: " + buf.position()
+			// + " capacity: " + buf.capacity() );
 			i++;
 			do {
-				digit =  data[i++];
+				digit = data[i++];
 				msgLength += ((digit & 0x7F) * multiplier);
 				multiplier *= 128;
 			} while ((digit & 0x80) != 0);
-			//System.out.println(msgLength);
+			// System.out.println(msgLength);
 
 			byte[] rspData = new byte[msgLength];
 			System.arraycopy(data, i, rspData, 0, msgLength);
-	 		i += msgLength;
+			i += msgLength;
 
-			//for(byte q :rspData) {
-			//	System.out.print(q + " ");
-			//}
-			//System.out.println("\n");
-
-
+			// for(byte q :rspData) {
+			// System.out.print(q + " ");
+			// }
+			// System.out.println("\n");
 
 			SelectionKey key = null;
 			IPersistentMap incoming = null;
 			if (type == GenericMessage.MESSAGE_CONNECT) {
-				incoming =  MqttConnect.decode(key, flags, rspData);
-			} else if ( type ==  GenericMessage.MESSAGE_CONNACK) {
+				incoming = MqttConnect.decode(key, flags, rspData);
+			} else if (type == GenericMessage.MESSAGE_CONNACK) {
 				incoming = MqttConnAck.decode(key, rspData);
 			} else if (type == GenericMessage.MESSAGE_PUBLISH) {
 				incoming = MqttPublish.decode(key, flags, rspData);
@@ -241,11 +242,11 @@ public class MqttClient implements Runnable {
 				incoming = MqttPubComp.decode(key, rspData);
 			} else if (type == GenericMessage.MESSAGE_SUBSCRIBE) {
 				incoming = MqttSubscribe.decode(key, rspData);
-			} else if( type == GenericMessage.MESSAGE_SUBACK) {
+			} else if (type == GenericMessage.MESSAGE_SUBACK) {
 				incoming = MqttSubAck.decode(key, rspData);
 			} else if (type == GenericMessage.MESSAGE_UNSUBSCRIBE) {
 				incoming = MqttUnsubscribe.decode(key, rspData);
-			} else if ( type == GenericMessage.MESSAGE_UNSUBACK ) {
+			} else if (type == GenericMessage.MESSAGE_UNSUBACK) {
 				incoming = MqttUnSubAck.decode(key, rspData);
 			} else if (type == GenericMessage.MESSAGE_PINGREQ) {
 				incoming = MqttPingReq.decode(key);
@@ -253,18 +254,18 @@ public class MqttClient implements Runnable {
 				incoming = MqttPingResp.decode(key);
 			} else if (type == GenericMessage.MESSAGE_DISCONNECT) {
 				incoming = MqttDisconnect.decode(key);
-			} else if ( type ==  GenericMessage.MESSAGE_AUTHENTICATION) {
+			} else if (type == GenericMessage.MESSAGE_AUTHENTICATION) {
 				incoming = MqttAuthenticate.decode(key);
 			} else {
 				System.out.println("FAIL!!!!!! INVALID packet sent: " + type);
 			}
 
-			if( incoming != null ) {
+			if (incoming != null) {
 				handler.handle(incoming, this.asyncChannel);
 				receivedMessages.incrementAndGet();
 				receivedBytes.addAndGet(msgLength);
 			}
-		} while( i < numRead );
+		} while (i < numRead);
 	}
 
 	private void write(SelectionKey key) throws IOException {
@@ -276,12 +277,12 @@ public class MqttClient implements Runnable {
 			// Write until there's not more data ...
 			while (!queue.isEmpty()) {
 				ByteBuffer buffer = (ByteBuffer) queue.get(0);
-					//log("buf: " + buf.toString());
-					socketChannel.write(buffer);
-					if (buffer.remaining() > 0) {
-						// ... or the socket's buffer fills up
-						break;
-					}
+				// log("buf: " + buf.toString());
+				socketChannel.write(buffer);
+				if (buffer.remaining() > 0) {
+					// ... or the socket's buffer fills up
+					break;
+				}
 				queue.remove(0);
 			}
 
@@ -313,11 +314,12 @@ public class MqttClient implements Runnable {
 	}
 
 	public void close() throws IOException {
-		//System.out.println("Client stopping...");
+		System.out.println("Client stopping...");
 
-		running = false;
-		if (selector != null) {
+		if (selector != null && running == true) {
 			selector.close();
+			running = false;
+			socketChannel.close();
 		}
 	}
 }
