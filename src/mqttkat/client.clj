@@ -96,3 +96,12 @@
         _ (logger "S " map)
         buf (MqttPubComp/encode map)]
     (.sendMessage ^MqttClient client buf)))
+
+(defn send-message [client msg]
+  (let [buffer (case (:packet-type msg)
+                 :CONNECT (MqttConnect/encode msg)
+                 :PUBLISH (MqttPublish/encode msg)
+                 :SUBSCRIBE (MqttSubscribe/encode msg)
+                 :DISCONNECT (MqttDisconnect/encode)
+                 :PUBACK (MqttPubAck/encode msg))]
+    (.sendMessage ^MqttClient client buffer)))
