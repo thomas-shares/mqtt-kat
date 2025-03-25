@@ -322,4 +322,8 @@ public class MqttClient implements Runnable {
 			socketChannel.close();
 		}
 	}
+
+	public boolean isConnected() {
+		return this.socketChannel.isOpen();
+	}
 }

@@ -33,7 +33,7 @@
 
 (defn handle-success
   [{:keys [client-key keep-alive] :as msg}]
-  (logger "success here now....")
+  ;;(logger "success here now....")
   (do
     (add-client! msg)
     (when (pos? keep-alive)

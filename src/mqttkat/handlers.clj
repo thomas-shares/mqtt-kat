@@ -27,12 +27,12 @@
 (declare qos-1-send)
 (declare qos-2-send)
 
-(defn publish-will [{:keys [topic qos] :as msg}]
+(defn publish-will [{:keys [topic qos retain] :as msg}]
   (logger "Sending will messag on topic: " topic)
   (when-let [keys (tr/matching-vals @*subscriber-trie* topic)]
     (do
       (case (long qos)
-        0 (qos-0 keys topic msg)
+        0 (qos-0 keys topic msg retain)
         1 (qos-1-send  keys topic msg)
         2 (qos-2-send keys topic msg)))))
 
@@ -40,8 +40,9 @@
   (when (contains? (get @*clients* key) :will)
     (let [will-topic (get-in @*clients* [key :will :will-topic])
           will-qos   (get-in @*clients* [key :will :will-qos])
-          will-message   (get-in @*clients* [key :will :will-message])]
-      (publish-will {:topic will-topic :qos will-qos :payload will-message}))))
+          will-message   (get-in @*clients* [key :will :will-message])
+          will-retain (get-in @*clients* [key :will :will-retain])]
+      (publish-will {:topic will-topic :qos will-qos :payload will-message :retain will-retain}))))
 
 (defn check-timer [key time-out]
   (let [current-time (System/currentTimeMillis)
@@ -50,21 +51,23 @@
     (when (some-> (* 0.9 last-active) (<= (- current-time time-out)))
       (logger "Timer fired for client: " key)
       (handle-will-if-present key)
-      ;; TODO
+      ;; TODO 
       ;; Remove Timer!!!
       ;; once we have sent the will message remove the will from the client,
       ;; so that it won't get send again.
       #_(swap! *clients* assoc-in [key] dissoc :will)
       (logger "about to close")
-      (.closeKey ^MqttServer @*server* key)
+      (.closeConnection ^MqttServer @*server* key)
       (logger "closed...."))))
 
 (defn add-timer!
   [key time]
+  (logger "adding client to timer" time)
   (let [time-out (* 1500 time)
         timer    (at/every time-out #(check-timer key time-out) my-pool :initial-delay time-out)]
     (swap! *clients* assoc-in [key :last-active] (volatile! (System/currentTimeMillis)))
-    (swap! *clients* assoc-in [key :timer] timer)))
+    (swap! *clients* assoc-in [key :timer] timer))
+  (logger @*clients*))
 
 (defn remove-timer! [key]
   (when-let [timer (get-in @*clients* [key :timer])]
@@ -107,14 +110,14 @@
   (let [{s :server} (meta @*server*)]
     (.sendMessageBuffer ^MqttServer s keys buf)))
 
-(defn qos-0 [keys topic {:keys [payload]}]
-  (logger "respond QOS 0 ")
+(defn qos-0 [keys topic {:keys [payload]} retain]
+  (logger "respond QOS 0 " topic)
   (send-buffer (mapv :client-key keys)
                (MqttPublish/encode {:packet-type :PUBLISH
                                     :payload     payload
                                     :topic       topic
                                     :qos         0
-                                    :retain?     false})))
+                                    :retain?     retain})))
 
 (defn qos-1-send [keys topic {:keys [payload]}]
   (logger "respond qos 1")
@@ -177,7 +180,7 @@
   (when-let [keys (tr/matching-vals @*subscriber-trie* topic)]
     (do
       (case (long qos)
-        0 (qos-0 keys topic msg)
+        0 (qos-0 keys topic msg false)
         1 (qos-1 keys topic msg)
         2 (qos-2 keys topic msg)))))
 
@@ -195,7 +198,7 @@
 (defn qos-2-send [keys topic {:keys [payload] :as msg}]
   (some-> (filter qos-0? keys)
           (seq)
-          (qos-0 topic msg))
+          (qos-0 topic msg false))
   (some-> (filter qos-1? keys)
           (seq)
           (qos-1-send topic msg))
@@ -235,11 +238,11 @@
     (logger "topics that have been retained: " topics)
     (doseq [topic topics]
       (when-let [keys (tr/matching-vals @*subscriber-trie* topic)]
-        (do
+        (let [payload (get-in @*retained* [topic :payload])]
           (case (long (get-in @*retained* [topic :qos]))
-            0 (qos-0 keys topic (get-in @*retained* [topic :payload]))
-            1 (qos-1-send keys topic (get-in @*retained* [topic :payload]))
-            2 (qos-2-send keys topic (get-in @*retained* [topic :payload]))))))))
+            0 (qos-0 keys topic payload true)
+            1 (qos-1-send keys topic payload )
+            2 (qos-2-send keys topic payload )))))))
 
 (defn subscribe [{:keys [client-key topics packet-identifier] :as msg}]
   (logger "clj SUBSCRIBE:" msg)

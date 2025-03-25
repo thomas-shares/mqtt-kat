@@ -105,3 +105,6 @@
                  :DISCONNECT (MqttDisconnect/encode)
                  :PUBACK (MqttPubAck/encode msg))]
     (.sendMessage ^MqttClient client buffer)))
+
+(defn connected? [client]
+  (.isConnected ^MqttClient client))

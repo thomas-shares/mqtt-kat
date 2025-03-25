@@ -8,14 +8,14 @@
   :global-vars {*warn-on-reflection* true}
 
   :dependencies
-  [[org.clojure/clojure "1.11.3"]
+  [[org.clojure/clojure "1.12.0"]
    [org.clojure/core.async "1.6.681"]
    [org.clojure/spec.alpha "0.5.238"]
    [org.clojure/core.specs.alpha "0.4.74"]
    [org.clojure/test.check "1.1.1"]
    [org.craigandera/causatum "0.3.0"]
    [clojurewerkz/triennium "1.0.0-beta2"]
-   [overtone/at-at "1.3.58"]
+   [overtone/at-at "1.4.65"]
    ;;[djblue/portal "0.6.1"]
    [io.zalky/cues  "0.2.1"]
    ]
@@ -34,8 +34,8 @@
   :aot [mqttkat.server]
   :profiles 
     {:dev 
-      {:dependencies [[djblue/portal "0.55.1"]
-                      [com.clojure-goes-fast/clj-async-profiler "1.2.2"]
+      {:dependencies [[djblue/portal "0.58.2"]
+                      [com.clojure-goes-fast/clj-async-profiler "1.4.0"]
                       [virgil "0.3.0"]]}}
   
   )

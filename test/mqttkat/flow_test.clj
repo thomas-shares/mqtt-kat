@@ -30,7 +30,7 @@
 
 ;;(use-fixtures :each server)
 
-#_(deftest connect-test
+(deftest connect-test
     (let [ch (chan 1)
           client (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn (fn [msg _] (go (>! ch msg))) 1))
           connect-msg {:packet-type :CONNECT
@@ -42,7 +42,7 @@
       (client/send-message client connect-msg)
       (is (= :CONNACK (:packet-type (first (alts!! [ch (timeout 1000)])))))))
 
-#_(deftest retain-test
+(deftest retain-test
     (let [ch (chan 1)
           payload "this is a retained message"
           client (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn (fn [msg _] (go (>! ch msg))) 1))
@@ -58,7 +58,8 @@
         (logger msg)
         (let [type (:packet-type msg)]
           (if (= type :PUBLISH)
-            (do (is (= :PUBLISH type))
+            (do #_(println (String. (:payload msg) "UTF-8") "xxx")
+                (is (= :PUBLISH type))
                 (is (true? (:retain? msg)))
                 (is (zero? (:qos msg)))
                 (is (= "retain-topic/test1" (:topic msg)))
@@ -66,7 +67,7 @@
             (do (is (= :SUBACK type))
                 (recur (first (alts!! [ch (timeout 2000)])))))))))
 
-#_(deftest last-will-test
+(deftest last-will-test
     (let [will-topic "will-topic"
           will-message "will message"
           ch-a (chan)
@@ -101,13 +102,14 @@
       (is (= :SUBACK (:packet-type (first (alts!! [ch-b (timeout 1000)])))))
       (.close ^MqttClient client-a)
       (let [msg (first (alts!! [ch-b (timeout 1000)]))]
+        (logger msg)
         (is (= :PUBLISH (:packet-type msg)))
         (is (= will-topic (:topic msg)))
         (is (= will-message (String. (:payload msg) "UTF-8")))
         (is (= 0 (:qos msg))))
-      (.close client-b)))
+      (.close ^MqttClient client-b)))
 
-#_(deftest last-will-test-ad-retain
+(deftest last-will-test-ad-retain
     (let [will-topic "will-topic"
           will-message "will message"
           ch-a (chan)
@@ -132,7 +134,7 @@
                          :client-id "sub-client"}
           subscribe-msg {:packet-type :SUBSCRIBE
                          :topics [{:qos 0
-                                   :topic-filter "will-topic"}]
+                                   :topic-filter will-topic}]
                          :packet-identifier 1}]
       (client/send-message  client-a connect-a-msg)
       (is (= :CONNACK (:packet-type (first (alts!! [ch-a (timeout 1000)])))))
@@ -148,9 +150,9 @@
         (is (:retain? msg))
         (is (= will-message (String. (:payload msg) "UTF-8")))
         (is (= 0 (:qos msg))))
-      (.close client-b)))
+      (.close ^MqttClient client-b)))
 
-#_(deftest zero-length-client-id-clean-session-false
+(deftest zero-length-client-id-clean-session-false
     (let [ch (chan)
           client (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn (fn [msg _] (logger msg) (go (>! ch msg))) 1))
           connect-msg {:packet-type :CONNECT
@@ -164,7 +166,7 @@
         (is (= :CONNACK (:packet-type msg)))
         (is (= 0x02 (:connect-return-code msg))))))
 
-#_(deftest zero-length-client-id-clean-session-true
+(deftest zero-length-client-id-clean-session-true
     (let [ch (chan)
           client (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn (fn [msg _] (logger msg) (go (>! ch msg))) 1))
           connect-msg  {:packet-type :CONNECT

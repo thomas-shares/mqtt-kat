@@ -237,3 +237,30 @@ Thomass-MacBook-Pro:mqtt-kat thomasvanderveen$ mosquitto -v
 1589297420: Received DISCONNECT from myclientid
 1589297420: Client myclientid disconnected.
 ```
+
+
+
+
+
+NEW PROBLEM:
+
+Timer fired for client:  (#object[sun.nio.ch.SelectionKeyImpl 0x349a1fcf channel=java.nio.channels.SocketChannel[connected local=/127.0.0.1:1883 remote=/127.0.0.1:54866], selector=sun.nio.ch.EPollSelectorImpl@7a9f2c36, interestOps=1, readyOps=1])
+about to close nil
+java.lang.ClassCastException: class clojure.lang.AFunction$1 cannot be cast to class org.mqttkat.server.MqttServer (clojure.lang.AFunction$1 and org.mqttkat.server.MqttServer are in unnamed module of loader 'app') thrown by at-at task: [1][RECUR] created: Wed 03:38:41s, period: 90000ms
+java.lang.ClassCastException: class clojure.lang.AFunction$1 cannot be cast to class org.mqttkat.server.MqttServer (clojure.lang.AFunction$1 and org.mqttkat.server.MqttServer are in unnamed module of loader 'app')
+        at mqttkat.handlers$check_timer.invokeStatic(handlers.clj:59)
+        at mqttkat.handlers$check_timer.invoke(handlers.clj:46)
+        at mqttkat.handlers$add_timer_BANG_$fn__8599.invoke(handlers.clj:65)
+        at clojure.lang.AFn.applyToHelper(AFn.java:152)
+        at clojure.lang.AFn.applyTo(AFn.java:144)
+        at clojure.core$apply.invokeStatic(core.clj:667)
+        at clojure.core$apply.invoke(core.clj:662)
+        at overtone.at_at$wrap_fun_with_exception_handler$fn__335.doInvoke(at_at.clj:99)
+        at clojure.lang.RestFn.invoke(RestFn.java:400)
+        at clojure.lang.AFn.run(AFn.java:22)
+        at java.base/java.util.concurrent.Executors$RunnableAdapter.call(Executors.java:572)
+        at java.base/java.util.concurrent.FutureTask.runAndReset(FutureTask.java:358)
+        at java.base/java.util.concurrent.ScheduledThreadPoolExecutor$ScheduledFutureTask.run(ScheduledThreadPoolExecutor.java:305)
+        at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)
+        at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642)
+        at java.base/java.lang.Thread.run(Thread.java:1583)
