@@ -9,7 +9,7 @@
 
   :dependencies
   [[org.clojure/clojure "1.12.0"]
-   [org.clojure/core.async "1.6.681"]
+   [org.clojure/core.async "1.8.741"]
    [org.clojure/spec.alpha "0.5.238"]
    [org.clojure/core.specs.alpha "0.4.74"]
    [org.clojure/test.check "1.1.1"]
@@ -34,8 +34,8 @@
   :aot [mqttkat.server]
   :profiles 
     {:dev 
-      {:dependencies [[djblue/portal "0.58.2"]
-                      [com.clojure-goes-fast/clj-async-profiler "1.4.0"]
-                      [virgil "0.3.0"]]}}
+      {:dependencies [[djblue/portal "0.58.5"]
+                      [com.clojure-goes-fast/clj-async-profiler "1.6.1"]
+                      [virgil "0.4.0"]]}}
   
   )

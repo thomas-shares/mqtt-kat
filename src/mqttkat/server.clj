@@ -7,12 +7,13 @@
             [mqttkat.s :refer [*server*]]
             [overtone.at-at :as at]
             ;;[clj-async-profiler.core :as prof]
-            [virgil :as virgil])
+            #_[virgil :as virgil])
   (:import [org.mqttkat.server MqttServer]
            [org.mqttkat MqttHandler])
   (:gen-class))
 
 (set! *warn-on-reflection* true)
+;;(virgil/watch-and-recompile ["src/java"] :verbose true)
 
 (def handler-map {:CONNECT      connect/connect
                   :CONNACK      connack/connack

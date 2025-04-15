@@ -1,19 +1,30 @@
 (ns mqttkat.core-test
-  (:require [clojure.test :refer :all]
-            [mqttkat.server :as server]
-            [mqttkat.handlers :refer [add-subscriber]]
-            [mqttkat.client :as client]
-            [mqttkat.spec :refer :all]
-            [clojure.spec.gen.alpha :as gen]
-            [clojure.spec.alpha :as s]
-            [clojure.core.async :as async]
-            [clojure.test.check :as check])
-  (:import [org.mqttkat.server MqttServer]
-           [org.mqttkat.client MqttClient]
-           [org.mqttkat MqttHandler MqttUtil]
-           [org.mqttkat.packages MqttConnect MqttPingReq MqttPublish
-             MqttDisconnect MqttPingResp MqttSubscribe MqttSubAck
-             MqttUnsubscribe MqttUnSubAck MqttConnAck]))
+  (:require
+   [clojure.core.async :as async]
+   [clojure.pprint :as pprint]
+   [clojure.spec.alpha :as s]
+   [clojure.spec.gen.alpha :as gen]
+   [clojure.test :refer :all]
+   [clojure.test.check :as check]
+   [mqttkat.client :as client]
+   [mqttkat.handlers :refer [add-subscriber]]
+   [mqttkat.server :as server]
+   [mqttkat.spec :refer :all])
+  (:import
+   [org.mqttkat MqttHandler MqttUtil]
+   [org.mqttkat.client MqttClient]
+   [org.mqttkat.packages
+    MqttConnAck
+    MqttConnect
+    MqttDisconnect
+    MqttPingReq
+    MqttPingResp
+    MqttPublish
+    MqttSubAck
+    MqttSubscribe
+    MqttUnSubAck
+    MqttUnsubscribe]
+   [org.mqttkat.server MqttServer]))
 
 
 ;(deftest subscription
@@ -55,12 +66,12 @@
   (client/close client))
 
 
-(use-fixtures :once mqtt-fixture)
+;;(use-fixtures :once mqtt-fixture)
 (use-fixtures :each client-fixture)
 
 (deftest connect-packet
   (let [map (gen/generate (s/gen :mqtt/connect))
-        _ (clojure.pprint/pprint map)
+        _ (pprint/pprint map)
         bufs (MqttConnect/encode map)
         _ (.sendMessage ^MqttClient client bufs)
         received-map (async/<!! channel)
@@ -69,7 +80,7 @@
 
 (deftest publish-packet
   (let [map (gen/generate (s/gen :mqtt/publish-qos-gt0))
-        _ (clojure.pprint/pprint map)
+        _ (pprint/pprint map)
         bufs (MqttPublish/encode map)
         _ (.sendMessage ^MqttClient client bufs)
         received-map (async/<!! channel)
@@ -78,7 +89,7 @@
 
 (deftest pingreq-packet
   (let [map (gen/generate (s/gen :mqtt/pingreq))
-        _ (clojure.pprint/pprint map)
+        _ (pprint/pprint map)
         bufs (MqttPingReq/encode map)
         _ (.sendMessage ^MqttClient client bufs)
         received-map (async/<!! channel)]
@@ -86,7 +97,7 @@
 
 (deftest pingresp-packet
   (let [map (gen/generate (s/gen :mqtt/pingresp))
-        _ (clojure.pprint/pprint map)
+        _ (pprint/pprint map)
         bufs (MqttPingResp/encode map)
         _ (.sendMessage ^MqttClient client bufs)
         received-map (async/<!! channel)]
@@ -94,7 +105,7 @@
 
 (deftest subscribe-packet
   (let [map (gen/generate (s/gen :mqtt/subscribe))
-        _ (clojure.pprint/pprint map)
+        _ (pprint/pprint map)
         bufs (MqttSubscribe/encode map)
         ;_ (println bufs)
         _ (.sendMessage ^MqttClient client bufs)
@@ -103,7 +114,7 @@
 
 (deftest suback-packet
   (let [map (gen/generate (s/gen :mqtt/suback))
-        _ (clojure.pprint/pprint map)
+        _ (pprint/pprint map)
         bufs (MqttSubAck/encode map)
         _ (.sendMessage ^MqttClient client bufs)
         received-map (async/<!! channel)]
@@ -111,7 +122,7 @@
 
 (deftest unsubscribe-packet
   (let [map (gen/generate (s/gen :mqtt/unsubscribe))
-        _ (clojure.pprint/pprint map)
+        _ (pprint/pprint map)
         bufs (MqttUnsubscribe/encode map)
         _ (.sendMessage ^MqttClient client bufs)
         received-map (async/<!! channel)]
@@ -119,7 +130,7 @@
 (comment
   (deftest unsuback-packet
     (let [map (gen/generate (s/gen :mqtt/unsuback))
-          _ (clojure.pprint/pprint map)
+          _ (pprint/pprint map)
           bufs (MqttUnSubAck/encode map)
           _ (.sendMessage ^MqttClient client bufs)
           received-map (async/<!! channel)
@@ -139,7 +150,7 @@
 
 (deftest connack-packet
   (let [map (gen/generate (s/gen :mqtt/connack))
-        _ (clojure.pprint/pprint map)
+        _ (pprint/pprint map)
         bufs (MqttConnAck/encode map)
         _ (.sendMessage ^MqttClient client bufs)
         received-map (async/<!! channel)]

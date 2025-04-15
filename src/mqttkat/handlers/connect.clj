@@ -1,5 +1,5 @@
 (ns mqttkat.handlers.connect
-  (:require [mqttkat.handlers :refer [logger *clients* send-buffer add-client! add-timer!]]
+  (:require [mqttkat.handlers :refer [logger *clients* *wills* send-buffer add-client! add-timer!]]
             [mqttkat.handlers.disconnect :refer :all])
   (:import [org.mqttkat.packages MqttConnAck]))
 
@@ -55,6 +55,8 @@
 
 (defn connect [{:keys [protocol-name protocol-version client-key client-id clean-session?] :as msg}]
   (logger "clj CONNECT: " msg)
+  (when (contains? msg :will)
+    (logger "there is a will!" (str (:will msg))))
   (cond
     (protocol-name-not-valid? protocol-name) (disconnect-client client-key)
     (protocol-version-not-valid? protocol-version) (handle-not-valid-protocol-version msg)

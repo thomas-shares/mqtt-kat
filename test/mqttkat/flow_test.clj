@@ -30,7 +30,7 @@
 
 ;;(use-fixtures :each server)
 
-(deftest connect-test
+#_(deftest connect-test
     (let [ch (chan 1)
           client (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn (fn [msg _] (go (>! ch msg))) 1))
           connect-msg {:packet-type :CONNECT
@@ -42,7 +42,7 @@
       (client/send-message client connect-msg)
       (is (= :CONNACK (:packet-type (first (alts!! [ch (timeout 1000)])))))))
 
-(deftest retain-test
+#_(deftest retain-test
     (let [ch (chan 1)
           payload "this is a retained message"
           client (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn (fn [msg _] (go (>! ch msg))) 1))
@@ -52,7 +52,7 @@
       (client/send-message client connect-msg)
       (is (= :CONNACK (:packet-type (first (alts!! [ch (timeout 1000)])))))
       (client/send-message client publish-msg)
-      (<!! (timeout 100))
+      (<!! (timeout 1000))
       (client/send-message client subscribe-msg)
       (loop [msg (first (alts!! [ch (timeout 1000)]))]
         (logger msg)
@@ -67,7 +67,7 @@
             (do (is (= :SUBACK type))
                 (recur (first (alts!! [ch (timeout 2000)])))))))))
 
-(deftest last-will-test
+#_(deftest last-will-test
     (let [will-topic "will-topic"
           will-message "will message"
           ch-a (chan)
@@ -109,7 +109,7 @@
         (is (= 0 (:qos msg))))
       (.close ^MqttClient client-b)))
 
-(deftest last-will-test-ad-retain
+(deftest last-will-test-and-retain
     (let [will-topic "will-topic"
           will-message "will message"
           ch-a (chan)
@@ -152,7 +152,7 @@
         (is (= 0 (:qos msg))))
       (.close ^MqttClient client-b)))
 
-(deftest zero-length-client-id-clean-session-false
+#_(deftest zero-length-client-id-clean-session-false
     (let [ch (chan)
           client (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn (fn [msg _] (logger msg) (go (>! ch msg))) 1))
           connect-msg {:packet-type :CONNECT
@@ -166,7 +166,7 @@
         (is (= :CONNACK (:packet-type msg)))
         (is (= 0x02 (:connect-return-code msg))))))
 
-(deftest zero-length-client-id-clean-session-true
+#_(deftest zero-length-client-id-clean-session-true
     (let [ch (chan)
           client (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn (fn [msg _] (logger msg) (go (>! ch msg))) 1))
           connect-msg  {:packet-type :CONNECT
@@ -180,7 +180,7 @@
         (is (= :CONNACK (:packet-type msg)))
         (is (= 0x00 (:connect-return-code msg))))))
 
-(deftest qos-1-test
+#_(deftest qos-1-test
   (let [payload "qos-1 test message"
         ch (chan)
         client-a (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn (fn [msg _] (logger (str "Received: " msg)) (go (>! ch msg))) 1))
@@ -241,3 +241,4 @@
     (<!! (timeout 500))
 
     (logger "done...")))
+

@@ -1,0 +1,134 @@
+  
+  lein test mqttkat.flow-test
+  Creating client...
+  Creating client...
+  Client loop started running...
+  Client loop started running...
+  Client stopping...
+  {:client-key nil, :connect-return-code 0, :packet-type :CONNACK, :session-present? false} nil
+  {:client-key nil, :packet-identifier 1, :packet-type :SUBACK, :response [0]} nil
+  {:client-key nil, :packet-type :PUBLISH, :payload #object[[B 0x1039f555 [B@1039f555], :qos 0, :retain? true, :topic will-topic} nil
+  Client stopping...
+  Creating client...
+  Client loop started running...
+  Creating client...
+  Client loop started running...
+  Creating client...
+  Client loop started running...
+  Received: {:client-key nil, :connect-return-code 0, :packet-type :CONNACK, :session-present? true} nil
+  Received: {:client-key nil, :packet-identifier 2, :packet-type :SUBACK, :response [1]} nil
+  Received: {:client-key nil, :packet-identifier 666, :packet-type :PUBACK} nil
+  Received: {:client-key nil, :duplicate? false, :packet-identifier 4, :packet-type :PUBLISH, :payload #object["[B" 0x3cb76266 "[B@3cb76266"], :qos 1, :retain? false, :topic "qos-1-topic/test1"} nil
+  asdg ([{:client-key nil, :packet-identifier 666, :packet-type :PUBACK} {:client-key nil, :duplicate? false, :packet-identifier 4, :packet-type :PUBLISH, :payload #object[[B 0x3cb76266 [B@3cb76266], :qos 1, :retain? false, :topic qos-1-topic/test1}])
+  TESTING client-a nil
+  Client stopping...
+  disconnect client-a nil
+  Received: {:client-key nil, :connect-return-code 0, :packet-type :CONNACK, :session-present? true} nil
+  Received: {:client-key nil, :duplicate? true, :packet-identifier 4, :packet-type :PUBLISH, :payload #object["[B" 0x4cae1f89 "[B@4cae1f89"], :qos 1, :retain? false, :topic "qos-1-topic/test1"} nil
+  done... nil
+  Creating client...
+  Client loop started running...
+  {:client-key nil, :connect-return-code 2, :packet-type :CONNACK, :session-present? false} nil
+  Creating client...
+  Client loop started running...
+  {:client-key nil, :packet-identifier 1, :packet-type :SUBACK, :response [0]} nil
+  {:client-key nil, :packet-type :PUBLISH, :payload #object[[B 0x56cc9f29 [B@56cc9f29], :qos 0, :retain? true, :topic retain-topic/test1} nil
+  Creating client...
+  Client loop started running...
+  Creating client...
+  Client loop started running...
+  {:client-key nil, :connect-return-code 0, :packet-type :CONNACK, :session-present? false} nil
+  {:client-key nil, :packet-identifier 1, :packet-type :SUBACK, :response [0]} nil
+  Client stopping...
+  {:client-key nil, :packet-type :PUBLISH, :payload #object[[B 0x25a92200 [B@25a92200], :qos 0, :retain? true, :topic will-topic} nil
+  {:client-key nil, :packet-type :PUBLISH, :payload #object[[B 0x2196a26d [B@2196a26d], :qos 0, :retain? false, :topic will-topic} nil
+  {:client-key nil, :packet-type :PUBLISH, :payload #object[[B 0x25a92200 [B@25a92200], :qos 0, :retain? true, :topic will-topic} nil
+  Client stopping...
+  Creating client...
+  Client loop started running...
+  {:client-key nil, :connect-return-code 0, :packet-type :CONNACK, :session-present? false} nil
+  
+  Ran 7 tests containing 36 assertions.
+  0 failures, 0 errors.
+
+
+lein test mqttkat.flow-test
+Creating client...
+Client loop started running...
+Creating client...
+Client loop started running...
+Client stopping...
+{:client-key nil, :connect-return-code 0, :packet-type :CONNACK, :session-present? false} nil
+{:client-key nil, :packet-identifier 1, :packet-type :SUBACK, :response [0]} nil
+
+lein test :only mqttkat.flow-test/last-will-test-ad-retain
+
+FAIL in (last-will-test-ad-retain) (flow_test.clj:148)
+expected: (= :PUBLISH (:packet-type msg))
+  actual: (not (= :PUBLISH nil))
+
+lein test :only mqttkat.flow-test/last-will-test-ad-retain
+
+FAIL in (last-will-test-ad-retain) (flow_test.clj:149)
+expected: (= will-topic (:topic msg))
+  actual: (not (= "will-topic" nil))
+
+lein test :only mqttkat.flow-test/last-will-test-ad-retain
+
+FAIL in (last-will-test-ad-retain) (flow_test.clj:150)
+expected: (:retain? msg)
+  actual: nil
+
+lein test :only mqttkat.flow-test/last-will-test-ad-retain
+
+ERROR in (last-will-test-ad-retain) (String.java:1401)
+expected: (= will-message (String. (:payload msg) "UTF-8"))
+  actual: java.lang.NullPointerException: Cannot read the array length because "bytes" is null
+ at java.lang.String.<init> (String.java:1401)
+    jdk.internal.reflect.DirectConstructorHandleAccessor.newInstance (DirectConstructorHandleAccessor.java:62)
+    java.lang.reflect.Constructor.newInstanceWithCaller (Constructor.java:502)
+    java.lang.reflect.Constructor.newInstance (Constructor.java:486)
+
+
+
+
+nil
+nil
+nil
+nil
+clj CONNECT:  ({:clean-session? true, :client-id will-client, :client-key #object[sun.nio.ch.SelectionKeyImpl 0x557d8eb6 channel=java.nio.channels.SocketChannel[connected local=/127.0.0.1:1883 remote=/127.0.0.1:35448], selector=sun.nio.ch.EPollSelectorImpl@340a5ae9, interestOps=1, readyOps=1], :keep-alive 100, :packet-type :CONNECT, :protocol-name MQTT, :protocol-version 4, :will #object[java.util.TreeMap 0x13d81ca1 {:will-message=will message, :will-qos=0, :will-retain=true, :will-topic=will-topic}]})
+adding client to timer (100)
+{#object[sun.nio.ch.SelectionKeyImpl 0x557d8eb6 channel=java.nio.channels.SocketChannel[connected local=/127.0.0.1:1883 remote=/127.0.0.1:35448], selector=sun.nio.ch.EPollSelectorImpl@340a5ae9, interestOps=1, readyOps=1] {:client-id will-client, :will #object[java.util.TreeMap 0x13d81ca1 {:will-message=will message, :will-qos=0, :will-retain=true, :will-topic=will-topic}], :protocol-version 4, :timer #<RecurringJob id: 1, created-at: Tue 08:57:22s, ms-period: 150000, initial-delay: 150000, desc: "", scheduled? true>, :protocol-name MQTT, :keep-alive 100, :clean-session? true, :last-active #object[clojure.lang.Volatile 0x7b83c5d8 {:status :ready, :val 1744743442389}], :client-key #object[sun.nio.ch.SelectionKeyImpl 0x557d8eb6 channel=java.nio.channels.SocketChannel[connected local=/127.0.0.1:1883 remote=/127.0.0.1:35448], selector=sun.nio.ch.EPollSelectorImpl@340a5ae9, interestOps=1, readyOps=1]}} nil
+closing key: channel=java.nio.channels.SocketChannel[connected local=/127.0.0.1:1883 remote=/127.0.0.1:35448], selector=sun.nio.ch.EPollSelectorImpl@340a5ae9, interestOps=1, readyOps=1
+Disconnecting client  (#object[sun.nio.ch.SelectionKeyImpl 0x557d8eb6 channel=java.nio.channels.SocketChannel[closed], selector=sun.nio.ch.EPollSelectorImpl@340a5ae9, interestOps=1, readyOps=1])
+Sending will messag on topic:  (will-topic)
+respond QOS 0  (will-topic)
+clj CONNECT:  ({:clean-session? true, :client-id sub-client, :client-key #object[sun.nio.ch.SelectionKeyImpl 0x37c4e511 channel=java.nio.channels.SocketChannel[connected local=/127.0.0.1:1883 remote=/127.0.0.1:35450], selector=sun.nio.ch.EPollSelectorImpl@340a5ae9, interestOps=1, readyOps=1], :keep-alive 100, :packet-type :CONNECT, :protocol-name MQTT, :protocol-version 4})
+adding client to timer (100)
+{#object[sun.nio.ch.SelectionKeyImpl 0x37c4e511 channel=java.nio.channels.SocketChannel[connected local=/127.0.0.1:1883 remote=/127.0.0.1:35450], selector=sun.nio.ch.EPollSelectorImpl@340a5ae9, interestOps=1, readyOps=1] {:clean-session? true, :client-id sub-client, :client-key #object[sun.nio.ch.SelectionKeyImpl 0x37c4e511 channel=java.nio.channels.SocketChannel[connected local=/127.0.0.1:1883 remote=/127.0.0.1:35450], selector=sun.nio.ch.EPollSelectorImpl@340a5ae9, interestOps=1, readyOps=1], :keep-alive 100, :protocol-name MQTT, :protocol-version 4, :last-active #object[clojure.lang.Volatile 0x6c7ad00c {:status :ready, :val 1744743442523}], :timer #<RecurringJob id: 2, created-at: Tue 08:57:22s, ms-period: 150000, initial-delay: 150000, desc: "", scheduled? true>}} nil
+clj SUBSCRIBE: ({:client-key #object[sun.nio.ch.SelectionKeyImpl 0x37c4e511 channel=java.nio.channels.SocketChannel[connected local=/127.0.0.1:1883 remote=/127.0.0.1:35450], selector=sun.nio.ch.EPollSelectorImpl@340a5ae9, interestOps=1, readyOps=1], :packet-identifier 1, :packet-type :SUBSCRIBE, :topics [{:qos 0, :topic-filter will-topic}]})
+Subscribe retain :  ({})
+process retained! nil
+closing key: channel=java.nio.channels.SocketChannel[connected local=/127.0.0.1:1883 remote=/127.0.0.1:35450], selector=sun.nio.ch.EPollSelectorImpl@340a5ae9, interestOps=1, readyOps=1
+Disconnecting client  (#object[sun.nio.ch.SelectionKeyImpl 0x37c4e511 channel=java.nio.channels.SocketChannel[closed], selector=sun.nio.ch.EPollSelectorImpl@340a5ae9, invalid])
+clj CONNECT:  ({:clean-session? true, :client-id connect-test-client, :client-key #object[sun.nio.ch.SelectionKeyImpl 0x5c848129 channel=java.nio.channels.SocketChannel[connected local=/127.0.0.1:1883 remote=/127.0.0.1:35464], selector=sun.nio.ch.EPollSelectorImpl@340a5ae9, interestOps=1, readyOps=1], :keep-alive 100, :packet-type :CONNECT, :protocol-name MQTT, :protocol-version 4})
+adding client to timer (100)
+{#object[sun.nio.ch.SelectionKeyImpl 0x5c848129 channel=java.nio.channels.SocketChannel[connected local=/127.0.0.1:1883 remote=/127.0.0.1:35464], selector=sun.nio.ch.EPollSelectorImpl@340a5ae9, interestOps=1, readyOps=1] {:clean-session? true, :client-id connect-test-client, :client-key #object[sun.nio.ch.SelectionKeyImpl 0x5c848129 channel=java.nio.channels.SocketChannel[connected local=/127.0.0.1:1883 remote=/127.0.0.1:35464], selector=sun.nio.ch.EPollSelectorImpl@340a5ae9, interestOps=1, readyOps=1], :keep-alive 100, :protocol-name MQTT, :protocol-version 4, :last-active #object[clojure.lang.Volatile 0x7edfc1da {:status :ready, :val 1744743443572}], :timer #<RecurringJob id: 3, created-at: Tue 08:57:23s, ms-period: 150000, initial-delay: 150000, desc: "", scheduled? true>}} nil
+clj CONNECT:  ({:clean-session? false, :client-id qos-1-test, :client-key #object[sun.nio.ch.SelectionKeyImpl 0x298a68b3 channel=java.nio.channels.SocketChannel[connected local=/127.0.0.1:1883 remote=/127.0.0.1:35480], selector=sun.nio.ch.EPollSelectorImpl@340a5ae9, interestOps=1, readyOps=1], :keep-alive 100, :packet-type :CONNECT, :protocol-name MQTT, :protocol-version 4})
+adding client to timer (100)
+{#object[sun.nio.ch.SelectionKeyImpl 0x5c848129 channel=java.nio.channels.SocketChannel[connected local=/127.0.0.1:1883 remote=/127.0.0.1:35464], selector=sun.nio.ch.EPollSelectorImpl@340a5ae9, interestOps=1, readyOps=1] {:clean-session? true, :client-id connect-test-client, :client-key #object[sun.nio.ch.SelectionKeyImpl 0x5c848129 channel=java.nio.channels.SocketChannel[connected local=/127.0.0.1:1883 remote=/127.0.0.1:35464], selector=sun.nio.ch.EPollSelectorImpl@340a5ae9, interestOps=1, readyOps=1], :keep-alive 100, :protocol-name MQTT, :protocol-version 4, :last-active #object[clojure.lang.Volatile 0x7edfc1da {:status :ready, :val 1744743443573}], :timer #<RecurringJob id: 3, created-at: Tue 08:57:23s, ms-period: 150000, initial-delay: 150000, desc: "", scheduled? true>}, #object[sun.nio.ch.SelectionKeyImpl 0x298a68b3 channel=java.nio.channels.SocketChannel[connected local=/127.0.0.1:1883 remote=/127.0.0.1:35480], selector=sun.nio.ch.EPollSelectorImpl@340a5ae9, interestOps=1, readyOps=1] {:clean-session? false, :client-id qos-1-test, :client-key #object[sun.nio.ch.SelectionKeyImpl 0x298a68b3 channel=java.nio.channels.SocketChannel[connected local=/127.0.0.1:1883 remote=/127.0.0.1:35480], selector=sun.nio.ch.EPollSelectorImpl@340a5ae9, interestOps=1, readyOps=1], :keep-alive 100, :protocol-name MQTT, :protocol-version 4, :last-active #object[clojure.lang.Volatile 0x266019ce {:status :ready, :val 1744743443578}], :timer #<RecurringJob id: 4, created-at: Tue 08:57:23s, ms-period: 150000, initial-delay: 150000, desc: "", scheduled? true>}} nil
+clj SUBSCRIBE: ({:client-key #object[sun.nio.ch.SelectionKeyImpl 0x298a68b3 channel=java.nio.channels.SocketChannel[connected local=/127.0.0.1:1883 remote=/127.0.0.1:35480], selector=sun.nio.ch.EPollSelectorImpl@340a5ae9, interestOps=1, readyOps=1], :packet-identifier 2, :packet-type :SUBSCRIBE, :topics [{:qos 1, :topic-filter qos-1-topic/test1}]})
+Subscribe retain :  ({})
+process retained! nil
+clj PUBLISH:  ({:client-key #object[sun.nio.ch.SelectionKeyImpl 0x298a68b3 channel=java.nio.channels.SocketChannel[connected local=/127.0.0.1:1883 remote=/127.0.0.1:35480], selector=sun.nio.ch.EPollSelectorImpl@340a5ae9, interestOps=1, readyOps=1], :duplicate? false, :packet-identifier 666, :packet-type :PUBLISH, :payload #object[[B 0x6c6c3d60 [B@6c6c3d60], :qos 1, :retain? false, :topic qos-1-topic/test1})
+respond qos 1 nil
+closing key: channel=java.nio.channels.SocketChannel[connected local=/127.0.0.1:1883 remote=/127.0.0.1:35480], selector=sun.nio.ch.EPollSelectorImpl@340a5ae9, interestOps=1, readyOps=1
+Disconnecting client  (#object[sun.nio.ch.SelectionKeyImpl 0x298a68b3 channel=java.nio.channels.SocketChannel[closed], selector=sun.nio.ch.EPollSelectorImpl@340a5ae9, invalid])
+clj CONNECT:  ({:clean-session? false, :client-id qos-1-test, :client-key #object[sun.nio.ch.SelectionKeyImpl 0x5eca909f channel=java.nio.channels.SocketChannel[connected local=/127.0.0.1:1883 remote=/127.0.0.1:35482], selector=sun.nio.ch.EPollSelectorImpl@340a5ae9, interestOps=1, readyOps=1], :keep-alive 100, :packet-type :CONNECT, :protocol-name MQTT, :protocol-version 4})
+adding client to timer (100)
+{#object[sun.nio.ch.SelectionKeyImpl 0x5c848129 channel=java.nio.channels.SocketChannel[connected local=/127.0.0.1:1883 remote=/127.0.0.1:35464], selector=sun.nio.ch.EPollSelectorImpl@340a5ae9, interestOps=1, readyOps=1] {:clean-session? true, :client-id connect-test-client, :client-key #object[sun.nio.ch.SelectionKeyImpl 0x5c848129 channel=java.nio.channels.SocketChannel[connected local=/127.0.0.1:1883 remote=/127.0.0.1:35464], selector=sun.nio.ch.EPollSelectorImpl@340a5ae9, interestOps=1, readyOps=1], :keep-alive 100, :protocol-name MQTT, :protocol-version 4, :last-active #object[clojure.lang.Volatile 0x7edfc1da {:status :ready, :val 1744743443573}], :timer #<RecurringJob id: 3, created-at: Tue 08:57:23s, ms-period: 150000, initial-delay: 150000, desc: "", scheduled? true>}, #object[sun.nio.ch.SelectionKeyImpl 0x5eca909f channel=java.nio.channels.SocketChannel[connected local=/127.0.0.1:1883 remote=/127.0.0.1:35482], selector=sun.nio.ch.EPollSelectorImpl@340a5ae9, interestOps=1, readyOps=1] {:clean-session? false, :client-id qos-1-test, :client-key #object[sun.nio.ch.SelectionKeyImpl 0x5eca909f channel=java.nio.channels.SocketChannel[connected local=/127.0.0.1:1883 remote=/127.0.0.1:35482], selector=sun.nio.ch.EPollSelectorImpl@340a5ae9, interestOps=1, readyOps=1], :keep-alive 100, :protocol-name MQTT, :protocol-version 4, :last-active #object[clojure.lang.Volatile 0x4d682578 {:status :ready, :val 1744743443733}], :timer #<RecurringJob id: 5, created-at: Tue 08:57:23s, ms-period: 150000, initial-delay: 150000, desc: "", scheduled? true>}} nil
+nil
+closing key: channel=java.nio.channels.SocketChannel[connected local=/127.0.0.1:1883 remote=/127.0.0.1:35482], selector=sun.nio.ch.EPollSelectorImpl@340a5ae9, interestOps=1, readyOps=1
+closing key: channel=java.nio.channels.SocketChannel[connected local=/127.0.0.1:1883 remote=/127.0.0.1:35464], selector=sun.nio.ch.EPollSelectorImpl@340a5ae9, interestOps=1, readyOps=1
+Disconnecting client  (#object[sun.nio.ch.SelectionKeyImpl 0x5eca909f channel=java.nio.channels.SocketChannel[closed], selector=sun.nio.ch.EPollSelectorImpl@340a5ae9, invalid])
+Disconnecting client  (#object[sun.nio.ch.SelectionKeyImpl 0x5c848129 channel=java.nio.channels.SocketChannel[closed], selector=sun.nio.ch.EPollSelectorImpl@340a5ae9, invalid])

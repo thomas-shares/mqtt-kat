@@ -20,6 +20,7 @@
 (def ^:dynamic *subscriber-trie* (atom (tr/make-trie)))
 (def ^:dynamic *outbound* (atom {}))
 (def ^:dynamic *retained* (atom {}))
+(def ^:dynamic *wills* (atom {}))
 (def packet-identifiers (async/chan packet-identifier-queue-size))
 
 (def my-pool (at/mk-pool))
@@ -111,7 +112,7 @@
     (.sendMessageBuffer ^MqttServer s keys buf)))
 
 (defn qos-0 [keys topic {:keys [payload]} retain]
-  (logger "respond QOS 0 " topic)
+  (logger "--> respond QOS 0 " topic retain payload)
   (send-buffer (mapv :client-key keys)
                (MqttPublish/encode {:packet-type :PUBLISH
                                     :payload     payload
@@ -152,7 +153,7 @@
                                    :packet-identifier packet-identifier}))
   (some-> (filter qos-0? keys)
           (seq)
-          (qos-0 topic msg))
+          (qos-0 topic msg false))
   (some-> (filter qos-1-or-2? keys)
           (seq)
           (qos-1-send topic msg)))
@@ -238,11 +239,12 @@
     (logger "topics that have been retained: " topics)
     (doseq [topic topics]
       (when-let [keys (tr/matching-vals @*subscriber-trie* topic)]
-        (let [payload (get-in @*retained* [topic :payload])]
+        (let [payload (get-in @*retained* [topic :payload])
+              _ (logger (String. payload "UTF-8"))]
           (case (long (get-in @*retained* [topic :qos]))
-            0 (qos-0 keys topic payload true)
-            1 (qos-1-send keys topic payload )
-            2 (qos-2-send keys topic payload )))))))
+            0 (qos-0 keys topic {:payload payload} true)
+            1 (qos-1-send keys topic {:payload payload})
+            2 (qos-2-send keys topic {:payload payload})))))))
 
 (defn subscribe [{:keys [client-key topics packet-identifier] :as msg}]
   (logger "clj SUBSCRIBE:" msg)
