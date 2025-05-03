@@ -7,7 +7,7 @@
            [org.mqttkat MqttHandler]
            [org.mqttkat.packages MqttConnect MqttPingReq MqttPublish
             MqttDisconnect MqttSubscribe MqttPubRel MqttPubAck MqttPubRec
-            MqttPubComp]))
+            MqttPubComp MqttUnsubscribe]))
 
 (set! *warn-on-reflection* true)
 
@@ -103,7 +103,8 @@
                  :PUBLISH (MqttPublish/encode msg)
                  :SUBSCRIBE (MqttSubscribe/encode msg)
                  :DISCONNECT (MqttDisconnect/encode)
-                 :PUBACK (MqttPubAck/encode msg))]
+                 :PUBACK (MqttPubAck/encode msg)
+                 :UNSUBSCRIBE (MqttUnsubscribe/encode msg))]
     (.sendMessage ^MqttClient client buffer)))
 
 (defn connected? [client]

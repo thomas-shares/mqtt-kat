@@ -24,7 +24,7 @@
   ["-Dclojure.compiler.disable-locals-clearing=true"
    "-Xms128m" "-Xmx4G" "-Djdk.attach.allowAttachSelf" "-XX:+UnlockDiagnosticVMOptions" "-XX:+DebugNonSafepoints"]
 
-  :javac-options ["-Xlint:unchecked" "-source" "1.8" "-target" "1.8" "-g"]
+  :javac-options ["-Xlint:unchecked" "-source" "17" "-target" "17" "-g"]
   :java-source-paths ["src/java"]
   :test-paths ["test"]
   :plugins [[lein-ancient "0.6.15"]

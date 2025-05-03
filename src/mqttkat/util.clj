@@ -18,5 +18,5 @@
       ;(clojure.pprint/pprint map)
       ;(clojure.pprint/pprint (map #(select-keys (val %) [:client-id]) @handlers/clients))
       (clojure.pprint/pprint (get-in @handlers/*clients* [(first (keys @handlers/*clients*)) :subscribed-topics]))
-      (Thread/sleep (* interval 1000))
+      (Thread/sleep ^long (* interval 1000))
       (recur sent-now received-now))))

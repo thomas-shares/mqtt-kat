@@ -61,7 +61,7 @@
 
 (defn -main [& _]
   (start!)
-  (util/info))
+  #_(util/info))
 
 (comment
   (start!)

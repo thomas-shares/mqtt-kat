@@ -86,6 +86,9 @@ public class MqttPublish extends GenericMessage {
 				bytes[length++] = strBytes[i];
 			}
 		} else {
+			//System.out.println("obj is not a string but:  " + message);
+			//System.out.println("obj: " + obj);
+			//System.out.println("obj class: " + obj.getClass());
 			byte[] payloadBytes = (byte[])obj;
 			if( payloadBytes != null ) {
 				for(int i = 0; i < payloadBytes.length; i++) {

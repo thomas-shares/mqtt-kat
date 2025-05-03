@@ -4,7 +4,7 @@
   (:import [org.mqttkat.server MqttServer]))
 
 (defn disconnect-client [client-key]
-  (logger "Disconnecting client " client-key)
+  #_(logger "Disconnecting client:: " client-key)
   (handle-will-if-present client-key)
   (remove-timer! client-key)
   (remove-client! client-key)
@@ -12,4 +12,5 @@
     (.closeConnection ^MqttServer s client-key)))
 
 (defn disconnect [msg]
+  (logger "Disconnecting client: " msg)
   (disconnect-client (:client-key msg)))

@@ -39,10 +39,12 @@ public class MqttServer implements Runnable {
 	}
 
 	public void closeKey(final SelectionKey key) {
-		System.out.println("closing key: " + key.toString());
+		//System.out.println("closing key: " + key.toString());
 		try {
 			IPersistentMap incoming = MqttDisconnect.decode(key);
+			//System.out.println("Server!!!!: DISCONNECT");
 			handler.handle(incoming);
+			
 		} catch (IOException e) {
 			System.out.println("IoException: " + e.getMessage());
 		}
@@ -240,7 +242,7 @@ public class MqttServer implements Runnable {
 
 			// client has gone away...
 			if (read < 0) {
-				// System.out.println("Client has gone away...");
+				//System.out.println("Client has gone away...");
 				// System.out.println("message received: " + receivedMessage.get());
 				// System.out.println("Message sent: " + sentMessages.get());
 				closeKey(key);
@@ -280,6 +282,7 @@ public class MqttServer implements Runnable {
 				 * https://github.com/http-kit/http-kit/issues/125
 				 */
 				if (k != null) {
+					System.out.println("Server!!!!: DISCONNECT    K !== null");
 					closeKey(k); // 0 => close by server
 				}
 			}
