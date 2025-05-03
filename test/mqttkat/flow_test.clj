@@ -30,7 +30,7 @@
 
 ;;(use-fixtures :each server)
 
-#_(deftest connect-test
+(deftest connect-test
     (let [ch (chan 1)
           client (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn (fn [msg _] (go (>! ch msg))) 1))
           connect-msg {:packet-type :CONNECT
@@ -42,7 +42,7 @@
       (client/send-message client connect-msg)
       (is (= :CONNACK (:packet-type (first (alts!! [ch (timeout 1000)])))))))
 
-#_(deftest retain-test
+(deftest retain-test
     (let [ch (chan 1)
           payload "this is a retained message"
           client (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn (fn [msg _] (go (>! ch msg))) 1))
@@ -52,7 +52,7 @@
       (client/send-message client connect-msg)
       (is (= :CONNACK (:packet-type (first (alts!! [ch (timeout 1000)])))))
       (client/send-message client publish-msg)
-      (<!! (timeout 1000))
+      (<!! (timeout 50))
       (client/send-message client subscribe-msg)
       (loop [msg (first (alts!! [ch (timeout 1000)]))]
         (logger msg)
@@ -65,9 +65,9 @@
                 (is (= "retain-topic/test1" (:topic msg)))
                 (is (= payload (String. (:payload  msg) "UTF-8"))))
             (do (is (= :SUBACK type))
-                (recur (first (alts!! [ch (timeout 2000)])))))))))
+                (recur (first (alts!! [ch (timeout 1000)])))))))))
 
-#_(deftest last-will-test
+(deftest last-will-test
     (let [will-topic "will-topic"
           will-message "will message"
           ch-a (chan)
@@ -109,7 +109,7 @@
         (is (= 0 (:qos msg))))
       (.close ^MqttClient client-b)))
 
-#_(deftest last-will-test-and-retain
+(deftest last-will-test-and-retain
     (let [will-topic "will-topic"
           will-message "will message"
           ch-a (chan)
@@ -138,13 +138,13 @@
                          :packet-identifier 1}]
       (client/send-message  client-a connect-a-msg)
       (is (= :CONNACK (:packet-type (first (alts!! [ch-a (timeout 1000)])))))
-      (<!! (timeout 200))
+      (<!! (timeout 50))
       (.close ^MqttClient client-a)
       (client/send-message client-b connect-b-msg)
       (is (= :CONNACK (:packet-type (first (alts!! [ch-b (timeout 1000)])))))
       (client/send-message client-b subscribe-msg)
       (is (= :SUBACK (:packet-type (first (alts!! [ch-b (timeout 1000)])))))
-      (let [msg (first (alts!! [ch-b (timeout 10000)]))]
+      (let [msg (first (alts!! [ch-b (timeout 1000)]))]
         ;;(logger "Message: " msg)
         (is (= :PUBLISH (:packet-type msg)))
         (is (= will-topic (:topic msg)))
@@ -153,7 +153,7 @@
         (is (= 0 (:qos msg))))
       (.close ^MqttClient client-b)))
 
-#_(deftest zero-length-client-id-clean-session-false
+(deftest zero-length-client-id-clean-session-false
     (let [ch (chan)
           client (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn (fn [msg _] (logger msg) (go (>! ch msg))) 1))
           connect-msg {:packet-type :CONNECT
@@ -167,7 +167,7 @@
         (is (= :CONNACK (:packet-type msg)))
         (is (= 0x02 (:connect-return-code msg))))))
 
-#_(deftest zero-length-client-id-clean-session-true
+(deftest zero-length-client-id-clean-session-true
     (let [ch (chan)
           client (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn (fn [msg _] (logger msg) (go (>! ch msg))) 1))
           connect-msg  {:packet-type :CONNECT
@@ -182,7 +182,7 @@
         (is (= 0x00 (:connect-return-code msg))))))
 
 
-#_(deftest session-test
+(deftest session-test
  (let [ch (chan)
        client-a (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn (fn [msg _] (logger msg) (go (>! ch msg))) 1))
        client-b (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn (fn [msg _] (logger msg) (go (>! ch msg))) 1))
@@ -204,7 +204,7 @@
      (is (true? (:session-present? msg)))
      (.close ^MqttClient client-a))))
 
-#_(deftest sub-unsub-test
+(deftest sub-unsub-test
   (let [ch (chan)
         client (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn (fn [msg _] (logger msg) (go (>! ch msg))) 1))
         connect-msg {:packet-type :CONNECT
@@ -221,11 +221,11 @@
                          :topics ["sub-topic/test"]
                          :packet-identifier 124}
         publish-msg {:packet-type :PUBLISH
-                       :qos 0
-                       :topic "sub-topic/test"
-                       :retain? false
-                       :payload "this is a message"
-                       :duplicate false}]
+                     :qos 0
+                     :topic "sub-topic/test"
+                     :retain? false
+                     :payload "this is a message"
+                     :duplicate false}]
     (client/send-message client connect-msg)
     (let [msg (first (alts!! [ch (timeout 1000)]))]
       (is (= :CONNACK (:packet-type msg)))
@@ -243,12 +243,12 @@
     (client/send-message client unsubscribe-msg)
     (let [msg (first (alts!! [ch (timeout 1000)]))]
       (is (= :UNSUBACK (:packet-type msg)))
-      (is (= 123 (:packet-identifier msg))))
+      (is (= 124 (:packet-identifier msg))))
     (client/send-message client publish-msg)
     (.close ^MqttClient client)))
 
 
-#_(deftest subscribe-test
+(deftest subscribe-test
   (let [ch (chan)
         client-a (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn (fn [msg _] (logger msg) (go (>! ch msg))) 1))
         client-b (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn (fn [msg _] (logger msg) (go (>! ch msg))) 1))
@@ -318,7 +318,6 @@
             msg-2 (first (alts!! [ch (timeout 1000)]))
             messages [msg-1 msg-2]]
         (logger "asdg" messages))
-    (logger "TESTING client-a")
 
     (loop [msg (first (alts!! [ch (timeout 1000)]))
            count 2]
@@ -347,7 +346,7 @@
     (<!! (timeout 50))
     (client/send-message client-b connect-msg)
     (logger "Connected client-b")
-    (loop [msg (first (alts!! [ch (timeout 2000)]))
+    (loop [msg (first (alts!! [ch (timeout 1000)]))
            count 3]
       (logger msg)
       (logger "Count: " count)
@@ -366,6 +365,5 @@
                 (is (true? (:session-present? msg)))
                 (recur (first (alts!! [ch (timeout 1000)])) (dec count)))))))
 
-    (<!! (timeout 50))
     (logger "done...")))
 

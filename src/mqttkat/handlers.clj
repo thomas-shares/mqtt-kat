@@ -6,7 +6,7 @@
   (:import [org.mqttkat.server MqttServer]
            [org.mqttkat.packages MqttPublish
             MqttPubRel MqttPubAck MqttPubRec
-            MqttPubComp MqttSubAck MqttPingResp]))
+            MqttPubComp MqttSubAck MqttPingResp MqttUnSubAck]))
 
 (def o Object)
 (defn logger [msg & args]
@@ -322,6 +322,10 @@
       (swap! *clients* update-in [client-key :subscribed-topics] disj {:topic-filter topic :qos qos})
       (logger "Unsubscribing from trie : " topic " client-key: " client-key)
       (swap! *subscriber-trie* tr/delete topic {:client-key client-key :qos qos})))
+  (send-buffer [client-key]
+               (MqttUnSubAck/encode
+                {:packet-type       :UNSUBACK
+                 :packet-identifier (:packet-identifier msg)}))
   (logger "Unsubscribed trie: " @*subscriber-trie*)
   (logger "Unsubscribed clients: " (get-in @*clients* [client-key])))
 
