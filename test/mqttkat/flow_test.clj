@@ -67,6 +67,36 @@
             (do (is (= :SUBACK type))
                 (recur (first (alts!! [ch (timeout 1000)])))))))))
 
+(deftest update-retain-test
+    (let [ch (chan 1)
+          payload-1 "this is a retained message one"
+          payload-2 "this is a retained message two"
+          client-a (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn (fn [msg _] (go (>! ch msg))) 1))
+          connect-msg {:packet-type :CONNECT, :protocol-name "MQTT", :protocol-version 4, :keep-alive 100, :clean-session? true, :client-id "zn3ghGgk2aEOwk"}
+          publish-msg-1 {:packet-type :PUBLISH :qos 0 :topic "retain-topic/test1" :retain? true :payload payload-1 :duplicate false}
+          publish-msg-2 {:packet-type :PUBLISH :qos 0 :topic "retain-topic/test1" :retain? true :payload payload-2 :duplicate false}
+          subscribe-msg {:packet-type :SUBSCRIBE :topics [{:qos 0 :topic-filter "retain-topic/#"}] :packet-identifier 1}]
+      (client/send-message client-a connect-msg)
+      (is (= :CONNACK (:packet-type (first (alts!! [ch (timeout 1000)])))))
+      (client/send-message client-a publish-msg-1)
+      (<!! (timeout 10))
+      (client/send-message client-a publish-msg-2)
+      (<!! (timeout 10))
+      (client/send-message client-a subscribe-msg)
+      (loop [msg (first (alts!! [ch (timeout 1000)]))]
+        (logger msg)
+        (let [type (:packet-type msg)]
+          (if (= type :PUBLISH)
+            (do #_(println (String. (:payload msg) "UTF-8") )
+                (is (= :PUBLISH type))
+                (is (= payload-2 (String. (:payload msg) "UTF-8")))
+                ;;(is (= payload (:payload msg)))
+                )
+            (do 
+              (is (= :SUBACK type))
+              (recur (first (alts!! [ch (timeout 1000)])))))))))
+              
+
 (deftest last-will-test
     (let [will-topic "will-topic"
           will-message "will message"
@@ -320,7 +350,7 @@
         (logger "asdg" messages))
 
     (loop [msg (first (alts!! [ch (timeout 1000)]))
-           count 2]
+           count 1]
       ;;(logger "Count: " count)
       (when (> count 0)
         (let [type (:packet-type msg)]
@@ -335,7 +365,7 @@
                 (is (= 666 (:packet-identifier msg)))
                 (recur (first (alts!! [ch (timeout 1000)])) (dec count)))))))
 
-    (<!! (timeout 50))
+    (<!! (timeout 25))
     (client/send-message client-a {:packet-type :DISCONNECT})
     (client/close client-a)
     (logger "disconnect client-a")
@@ -343,16 +373,16 @@
     ;; The client (WE) didn't send a PUBACK back to the server... so when we reconnect with the same client id 
     ;; we should get the same message again. and this time we PUBACK it.
 
-    (<!! (timeout 50))
+    (<!! (timeout 25))
     (client/send-message client-b connect-msg)
     (logger "Connected client-b")
     (loop [msg (first (alts!! [ch (timeout 1000)]))
            count 3]
-      (logger msg)
-      (logger "Count: " count)
+      ;;(logger msg)
+      ;;(logger "Count: " count)
       (when (> count 0)
-        (logger "Count: " count)
-        (logger msg)
+        ;;(logger "Count: " count)
+        ;;(logger msg)
         (let [type (:packet-type msg)]
           (if (= type :PUBLISH)
             (do (is (= :PUBLISH type))

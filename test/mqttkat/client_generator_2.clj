@@ -31,7 +31,7 @@
     (Thread/sleep 500)
     (catch Exception e)))
 
-(use-fixtures :once mqtt-fixture)
+;;(use-fixtures :once mqtt-fixture)
 
 
 (def model

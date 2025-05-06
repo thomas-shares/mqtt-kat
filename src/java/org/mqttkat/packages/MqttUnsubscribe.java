@@ -49,7 +49,7 @@ public class MqttUnsubscribe extends GenericMessage{
 		int length = 0;
 		byte[] bytes = new byte[MESSAGE_LENGTH];
 		ByteBuffer buffer = ByteBuffer.allocate(MESSAGE_LENGTH);
-		byte[] bType = {(byte) (MESSAGE_UNSUBSCRIBE << 4)};
+		byte[] bType = {(byte) (MESSAGE_UNSUBSCRIBE << 4) | 0x02};
 		buffer.put((byte) (bType[0] & 0xf2));
 		
 		
@@ -72,6 +72,10 @@ public class MqttUnsubscribe extends GenericMessage{
 		buffer.put(calculateLength(length));
 		buffer.put(bytes, 0, length);
 		//log("buffers.size: " + buffers.size());
+		// for(int i=0; i < length ;i++ ){
+		//   //System.out.print(" " + buffer.get(i));
+		//   System.out.print(" " + String.format("%02X", buffer.get(i)));
+		// }
 		buffer.flip();
 		//log("length: " + length);
 		return buffer;

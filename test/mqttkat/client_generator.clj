@@ -34,7 +34,7 @@
     (catch Exception e (println (.printStackTrace e)))))
 
 
-(use-fixtures :once mqtt-fixture)
+;;(use-fixtures :once mqtt-fixture)
 
 (defn client []
   (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn handler-fn 2)))
