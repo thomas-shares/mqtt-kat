@@ -1,13 +1,11 @@
 (ns mqttkat.flow-test
-  (:require [clojure.test :refer [deftest is use-fixtures]]
+  (:require [clojure.test :refer [deftest is ]]
             [mqttkat.server :as server]
             [clojure.core.async :refer [chan go timeout >! <! <!! alts!!]]
             [mqttkat.client :as client])
   (:import [org.mqttkat.client MqttClient]
-           [org.mqttkat MqttHandler]
-           [org.mqttkat.packages MqttConnect MqttPingReq MqttPublish
-            MqttDisconnect MqttSubscribe MqttPubRel MqttPubAck MqttPubRec
-            MqttPubComp]))
+           [org.mqttkat MqttHandler]))
+
 
 ;; lein auto test :only mqttkat.flow-test
 
@@ -17,18 +15,6 @@
   (when true
     (locking lock
       (println msg args))))
-
-(defn server [f]
-  (server/start!)
-  (f)
-  (server/stop!))
-
-(defn client [f]
-  (client/client "localhost" 1883)
-  (f)
-  (client/close ()))
-
-;;(use-fixtures :each server)
 
 (deftest connect-test
     (let [ch (chan 1)
@@ -396,4 +382,3 @@
                 (recur (first (alts!! [ch (timeout 1000)])) (dec count)))))))
 
     (logger "done...")))
-
