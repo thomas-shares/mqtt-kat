@@ -12,5 +12,5 @@
     (.closeConnection ^MqttServer s client-key)))
 
 (defn disconnect [msg]
-  (logger "Disconnecting client: " msg)
+  #_(logger "Disconnecting client: " msg)
   (disconnect-client (:client-key msg)))

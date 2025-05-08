@@ -34,8 +34,8 @@
     (let [topic (get-in msg [:will :will-topic])
           payload (get-in msg [:will :will-message])
           qos (get-in msg [:will :will-qos])]
-      (logger "there is a RETAINED will!" (str (:will msg)))
-      (logger "storing retain: " topic qos (empty? payload))
+      #_(logger "there is a RETAINED will!" (str (:will msg)))
+      #_(logger "storing retain: " topic qos (empty? payload))
       (if (empty? payload)
         (swap! *retained* dissoc topic)
         (swap! *retained* assoc topic {:qos qos :payload payload}))))
@@ -58,8 +58,7 @@
   (disconnect-client client-key))
 
 (defn connect [{:keys [protocol-name protocol-version client-key client-id clean-session?] :as msg}]
-  ;;(logger "clj CONNECT: " (dissoc msg :client-key))
-  (logger "clj CONNECT: " (:client-key msg ))
+  (logger "CONNECT: " (dissoc msg :client-key))
   (cond
     (protocol-name-not-valid? protocol-name) (disconnect-client client-key)
     (protocol-version-not-valid? protocol-version) (handle-not-valid-protocol-version msg)
@@ -68,10 +67,10 @@
     :else (handle-success msg))
   ;;(logger "Checking for message that are being proccessed: " (contains? @*outbound* client-id))
   (when (contains? @*outbound* client-id)
-    (logger "Remaining message found for client: " (get @*outbound* client-id))
+    #_(logger "Remaining message found for client: " (get @*outbound* client-id))
     (doseq [stalled-id (keys (get @*outbound* client-id))]
-      (logger "Sending message to client: " stalled-id)
-      (logger (get-in @*outbound* [client-id stalled-id]))
+      #_(logger "Sending message to client: " stalled-id)
+      #_(logger (get-in @*outbound* [client-id stalled-id]))
       (let [{:keys [topic payload qos] } (get-in @*outbound* [client-id stalled-id]) ]
          (send-buffer [client-key]
                    (MqttPublish/encode {:packet-type       :PUBLISH
