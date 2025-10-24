@@ -26,6 +26,7 @@
 (declare qos-0)
 (declare qos-1-send)
 (declare qos-2-send)
+(declare remove-client!)
 
 (defn publish-will [{:keys [topic qos retain payload]}]
   ;;(logger "Sending will message on topic: " payload)
@@ -57,6 +58,7 @@
         ;; once we have sent the will message remove the will from the client,
         ;; so that it won't get send again.
         #_(swap! *clients* assoc-in [key] dissoc :will)
+        (remove-client! key)
         (logger "about to close")
         (.closeConnection ^MqttServer @*server* key)
         (logger "closed....")))))

@@ -49,6 +49,10 @@ https://gist.github.com/yukaizhao/155d931326e298d6404f
 https://crunchify.com/java-nio-non-blocking-io-with-server-client-example-java-nio-bytebuffer-and-channels-selector-java-nio-vs-io/
 
 http://rox-xmlrpc.sourceforge.net/niotut/
+
+https://deepwiki.com/thomas-shares/mqtt-kat
+
+https://github.com/hobbyquaker/awesome-mqtt
 ## Usage
 
 I call `(start)` function in the repl and then use an MQTT client to send packets to it and wait for it to crash.
