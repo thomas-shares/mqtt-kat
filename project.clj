@@ -26,6 +26,12 @@
   :javac-options ["-Xlint:unchecked" "-source" "17" "-target" "17" "-g"]
   :java-source-paths ["src/java"]
   :test-paths ["test"]
+  ;; `lein test` runs the unit tests only. The load simulations in
+  ;; client-generator{,-2} are tagged ^:performance and run on request with
+  ;; `lein test :performance`.
+  :test-selectors {:default     (complement :performance)
+                   :performance :performance
+                   :all         (constantly true)}
   :plugins [[lein-ancient "0.6.15"]
             [lein-auto "0.1.3"]]
   :jar-exclusions [#"^java.*"] ; exclude the java directory in source path

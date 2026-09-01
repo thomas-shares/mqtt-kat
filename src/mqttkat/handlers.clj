@@ -107,13 +107,17 @@
           client-id (:client-id client)
           subscribed-topics (:subscribed-topics client)]
       ;;(logger "Removing subscribed topics: : " subscribed-topics)
-       (doseq [topic subscribed-topics]
-         ;;(logger "Removing from sub-trie for topic: "  (:topic-filter topic)  "   qos: " (:qos topic))
-         (swap! *subscriber-trie* tr/delete (:topic-filter  topic) {:client-key key :qos (:qos topic)})
-       (swap! *clients* dissoc key)
-       (swap! *clients* assoc client-id client)))
+      (doseq [topic subscribed-topics]
+        ;;(logger "Removing from sub-trie for topic: "  (:topic-filter topic)  "   qos: " (:qos topic))
+        (swap! *subscriber-trie* tr/delete (:topic-filter  topic) {:client-key key :qos (:qos topic)}))
+      ;; Parking the session under its client-id happens once, not once per
+      ;; subscribed topic: these two were inside the doseq above, so a
+      ;; persistent session with no subscriptions was dropped instead of kept,
+      ;; and CONNACK then reported session-present? false on the reconnect.
+      (swap! *clients* dissoc key)
+      (swap! *clients* assoc client-id client)))
   #_(logger "REMOVE: Subscriber trie POST: " @*subscriber-trie*)
-  #_(logger "REMOVE: Clients: " @*clients*)))
+  #_(logger "REMOVE: Clients: " @*clients*))
 
 ;; pre-load queue
 (doseq [i (range 1 (inc packet-identifier-queue-size))]

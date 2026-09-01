@@ -1,384 +1,198 @@
 (ns mqttkat.flow-test
-  (:require [clojure.test :refer [deftest is ]]
-            [mqttkat.server :as server]
-            [clojure.core.async :refer [chan go timeout >! <! <!! alts!!]]
-            [mqttkat.client :as client])
-  (:import [org.mqttkat.client MqttClient]
-           [org.mqttkat MqttHandler]))
+  "End-to-end message flows against a broker this suite starts itself.
 
+   Every test uses its own client ids and its own topics: sessions, retained
+   messages and subscriptions all outlive the test that created them, so tests
+   that share names depend on the order clojure.test happens to run them in."
+  (:require [clojure.test :refer [deftest is testing use-fixtures]]
+            [mqttkat.client :as client]
+            [mqttkat.test-util :as tu]))
 
 ;; lein auto test :only mqttkat.flow-test
 
-(def lock (Object.))
+(use-fixtures :once tu/broker-fixture)
 
-(defn logger [msg & args]
-  (when true
-    (locking lock
-      (println msg args))))
+(defn- subscribe-msg [topic qos id]
+  {:packet-type :SUBSCRIBE :packet-identifier id
+   :topics [{:qos qos :topic-filter topic}]})
+
+(defn- publish-msg [topic payload & {:keys [qos retain? id]
+                                     :or   {qos 0 retain? false}}]
+  (cond-> {:packet-type :PUBLISH :qos qos :topic topic
+           :retain? retain? :duplicate false :payload payload}
+    id (assoc :packet-identifier id)))
 
 (deftest connect-test
-    (let [ch (chan 1)
-          client (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn (fn [msg _] (go (>! ch msg))) 1))
-          connect-msg {:packet-type :CONNECT
-                       :protocol-name "MQTT"
-                       :protocol-version 4
-                       :keep-alive 100
-                       :clean-session? true
-                       :client-id "connect-test-client"}]
-      (client/send-message client connect-msg)
-      (is (= :CONNACK (:packet-type (first (alts!! [ch (timeout 1000)])))))))
-
-(deftest retain-test
-    (let [ch (chan 1)
-          payload "this is a retained message"
-          client (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn (fn [msg _] (go (>! ch msg))) 1))
-          connect-msg {:packet-type :CONNECT, :protocol-name "MQTT", :protocol-version 4, :keep-alive 100, :clean-session? true, :client-id "zn3ghGgk2aEOwk"}
-          publish-msg {:packet-type :PUBLISH :qos 0 :topic "retain-topic/test1" :retain? true :payload payload :duplicate false}
-          subscribe-msg {:packet-type :SUBSCRIBE :topics [{:qos 0 :topic-filter "retain-topic/#"}] :packet-identifier 1}]
-      (client/send-message client connect-msg)
-      (is (= :CONNACK (:packet-type (first (alts!! [ch (timeout 1000)])))))
-      (client/send-message client publish-msg)
-      (<!! (timeout 50))
-      (client/send-message client subscribe-msg)
-      (loop [msg (first (alts!! [ch (timeout 1000)]))]
-        (logger msg)
-        (let [type (:packet-type msg)]
-          (if (= type :PUBLISH)
-            (do #_(println (String. (:payload msg) "UTF-8") "xxx")
-                (is (= :PUBLISH type))
-                (is (true? (:retain? msg)))
-                (is (zero? (:qos msg)))
-                (is (= "retain-topic/test1" (:topic msg)))
-                (is (= payload (String. (:payload  msg) "UTF-8"))))
-            (do (is (= :SUBACK type))
-                (recur (first (alts!! [ch (timeout 1000)])))))))))
-
-(deftest update-retain-test
-    (let [ch (chan 1)
-          payload-1 "this is a retained message one"
-          payload-2 "this is a retained message two"
-          client-a (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn (fn [msg _] (go (>! ch msg))) 1))
-          connect-msg {:packet-type :CONNECT, :protocol-name "MQTT", :protocol-version 4, :keep-alive 100, :clean-session? true, :client-id "zn3ghGgk2aEOwk"}
-          publish-msg-1 {:packet-type :PUBLISH :qos 0 :topic "retain-topic/test1" :retain? true :payload payload-1 :duplicate false}
-          publish-msg-2 {:packet-type :PUBLISH :qos 0 :topic "retain-topic/test1" :retain? true :payload payload-2 :duplicate false}
-          subscribe-msg {:packet-type :SUBSCRIBE :topics [{:qos 0 :topic-filter "retain-topic/#"}] :packet-identifier 1}]
-      (client/send-message client-a connect-msg)
-      (is (= :CONNACK (:packet-type (first (alts!! [ch (timeout 1000)])))))
-      (client/send-message client-a publish-msg-1)
-      (<!! (timeout 10))
-      (client/send-message client-a publish-msg-2)
-      (<!! (timeout 10))
-      (client/send-message client-a subscribe-msg)
-      (loop [msg (first (alts!! [ch (timeout 1000)]))]
-        (logger msg)
-        (let [type (:packet-type msg)]
-          (if (= type :PUBLISH)
-            (do #_(println (String. (:payload msg) "UTF-8") )
-                (is (= :PUBLISH type))
-                (is (= payload-2 (String. (:payload msg) "UTF-8")))
-                ;;(is (= payload (:payload msg)))
-                )
-            (do 
-              (is (= :SUBACK type))
-              (recur (first (alts!! [ch (timeout 1000)])))))))))
-              
-
-(deftest last-will-test
-    (let [will-topic "will-topic"
-          will-message "will message"
-          ch-a (chan)
-          ch-b (chan)
-          client-a (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn (fn [msg _] (go (>! ch-a msg))) 1))
-          client-b (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn (fn [msg _] (logger msg) (go (>! ch-b msg))) 1))
-          connect-a-msg {:packet-type :CONNECT
-                         :protocol-name "MQTT"
-                         :protocol-version 4
-                         :keep-alive 100
-                         :clean-session? true
-                         :client-id "will-client"
-                         :will {:will-retain false
-                                :will-topic will-topic
-                                :will-message will-message
-                                :will-qos 0}}
-          connect-b-msg {:packet-type :CONNECT
-                         :protocol-name "MQTT"
-                         :protocol-version 4
-                         :keep-alive 100
-                         :clean-session? true
-                         :client-id "sub-client"}
-          subscribe-msg  {:packet-type :SUBSCRIBE
-                          :topics [{:qos 0
-                                    :topic-filter "will-topic"}]
-                          :packet-identifier 1}]
-      (client/send-message client-a connect-a-msg)
-      (is (= :CONNACK (:packet-type (first (alts!! [ch-a (timeout 1000)])))))
-      (client/send-message client-b connect-b-msg)
-      (is (= :CONNACK (:packet-type (first (alts!! [ch-b (timeout 1000)])))))
-      (client/send-message  client-b subscribe-msg)
-      (is (= :SUBACK (:packet-type (first (alts!! [ch-b (timeout 1000)])))))
-      (.close ^MqttClient client-a)
-      (let [msg (first (alts!! [ch-b (timeout 1000)]))]
-        (logger msg)
-        (is (= :PUBLISH (:packet-type msg)))
-        (is (= will-topic (:topic msg)))
-        (is (= will-message (String. (:payload msg) "UTF-8")))
-        (is (= 0 (:qos msg))))
-      (.close ^MqttClient client-b)))
-
-(deftest last-will-test-and-retain
-    (let [will-topic "will-topic"
-          will-message "will message"
-          ch-a (chan)
-          ch-b (chan)
-          client-a (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn (fn [msg _] (go (>! ch-a msg))) 1))
-          client-b (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn (fn [msg _] (logger msg) (go (>! ch-b msg))) 1))
-          connect-a-msg {:packet-type :CONNECT
-                         :protocol-name "MQTT"
-                         :protocol-version 4
-                         :keep-alive 100
-                         :clean-session? true
-                         :client-id "will-client"
-                         :will {:will-retain true
-                                :will-topic will-topic
-                                :will-message will-message
-                                :will-qos 0}}
-          connect-b-msg {:packet-type :CONNECT
-                         :protocol-name "MQTT"
-                         :protocol-version 4
-                         :keep-alive 100
-                         :clean-session? true
-                         :client-id "sub-client"}
-          subscribe-msg {:packet-type :SUBSCRIBE
-                         :topics [{:qos 0
-                                   :topic-filter will-topic}]
-                         :packet-identifier 1}]
-      (client/send-message  client-a connect-a-msg)
-      (is (= :CONNACK (:packet-type (first (alts!! [ch-a (timeout 1000)])))))
-      (<!! (timeout 50))
-      (.close ^MqttClient client-a)
-      (client/send-message client-b connect-b-msg)
-      (is (= :CONNACK (:packet-type (first (alts!! [ch-b (timeout 1000)])))))
-      (client/send-message client-b subscribe-msg)
-      (is (= :SUBACK (:packet-type (first (alts!! [ch-b (timeout 1000)])))))
-      (let [msg (first (alts!! [ch-b (timeout 1000)]))]
-        ;;(logger "Message: " msg)
-        (is (= :PUBLISH (:packet-type msg)))
-        (is (= will-topic (:topic msg)))
-        (is (:retain? msg))
-        (is (= will-message (String. (:payload msg) "UTF-8")))
-        (is (= 0 (:qos msg))))
-      (.close ^MqttClient client-b)))
-
-(deftest zero-length-client-id-clean-session-false
-    (let [ch (chan)
-          client (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn (fn [msg _] (logger msg) (go (>! ch msg))) 1))
-          connect-msg {:packet-type :CONNECT
-                       :protocol-name "MQTT"
-                       :protocol-version 4
-                       :keep-alive 100
-                       :clean-session? false
-                       :client-id ""}]
-      (client/send-message  client connect-msg)
-      (let [msg (first (alts!! [ch (timeout 1000)]))]
-        (is (= :CONNACK (:packet-type msg)))
-        (is (= 0x02 (:connect-return-code msg))))))
+  (let [c (tu/connect! "connect")]
+    (is (= 0 (:connect-return-code (:connack c))))
+    (tu/close! c)))
 
 (deftest zero-length-client-id-clean-session-true
-    (let [ch (chan)
-          client (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn (fn [msg _] (logger msg) (go (>! ch msg))) 1))
-          connect-msg  {:packet-type :CONNECT
-                        :protocol-name "MQTT"
-                        :protocol-version 4
-                        :keep-alive 100
-                        :clean-session? true
-                        :client-id ""}]
-      (client/send-message client connect-msg)
-      (let [msg (first (alts!! [ch (timeout 1000)]))]
-        (is (= :CONNACK (:packet-type msg)))
-        (is (= 0x00 (:connect-return-code msg))))))
+  (testing "an empty client id is allowed when the session is clean"
+    (let [c (tu/connect! nil :id "" :clean-session? true)]
+      (is (= 0x00 (:connect-return-code (:connack c))))
+      (tu/close! c))))
 
+(deftest zero-length-client-id-clean-session-false
+  (testing "an empty client id with a persistent session is rejected"
+    (let [{:keys [ch] :as c} (tu/client!)]
+      (client/send-message (:client c) {:packet-type :CONNECT :protocol-name "MQTT"
+                                        :protocol-version 4 :keep-alive 100
+                                        :clean-session? false :client-id ""})
+      (is (= 0x02 (:connect-return-code (tu/expect! ch :CONNACK))))
+      (tu/close! c))))
+
+(deftest retain-test
+  (testing "a retained message is delivered to a later subscriber"
+    (let [topic   (tu/topic "retain")
+          payload "this is a retained message"
+          {:keys [client ch] :as c} (tu/connect! "retain")]
+      (client/send-message client (publish-msg topic payload :retain? true))
+      (client/send-message client (subscribe-msg (tu/wildcard topic) 0 1))
+      (let [msg (tu/expect-eventually! ch :PUBLISH)]
+        (is (true? (:retain? msg)))
+        (is (zero? (:qos msg)))
+        (is (= topic (:topic msg)))
+        (is (= payload (tu/payload-str msg))))
+      (tu/close! c))))
+
+(deftest update-retain-test
+  (testing "only the newest retained message on a topic is kept"
+    (let [topic (tu/topic "update-retain")
+          {:keys [client ch] :as c} (tu/connect! "update-retain")]
+      (client/send-message client (publish-msg topic "retained message one" :retain? true))
+      (Thread/sleep 20)
+      (client/send-message client (publish-msg topic "retained message two" :retain? true))
+      (Thread/sleep 20)
+      (client/send-message client (subscribe-msg (tu/wildcard topic) 0 1))
+      (let [msg (tu/expect-eventually! ch :PUBLISH)]
+        (is (= "retained message two" (tu/payload-str msg))))
+      (tu/close! c))))
+
+(deftest last-will-test
+  (testing "the will is published when a client drops without DISCONNECT"
+    (let [topic (tu/topic "will")
+          will  "will message"
+          a (tu/connect! "will-client" :will {:will-retain false :will-topic topic
+                                              :will-message will :will-qos 0})
+          b (tu/connect! "will-sub")]
+      (client/send-message (:client b) (subscribe-msg topic 0 1))
+      (tu/expect! (:ch b) :SUBACK)
+      (tu/close! a)
+      (let [msg (tu/expect-eventually! (:ch b) :PUBLISH)]
+        (is (= topic (:topic msg)))
+        (is (= will (tu/payload-str msg)))
+        (is (= 0 (:qos msg))))
+      (tu/close! b))))
+
+(deftest last-will-test-and-retain
+  (testing "a retained will reaches a subscriber that arrives after the client died"
+    (let [topic (tu/topic "will-retain")
+          will  "will message"
+          a (tu/connect! "will-client" :will {:will-retain true :will-topic topic
+                                              :will-message will :will-qos 0})]
+      (Thread/sleep 50)
+      (tu/close! a)
+      (let [b (tu/connect! "will-sub")]
+        (client/send-message (:client b) (subscribe-msg topic 0 1))
+        (let [msg (tu/expect-eventually! (:ch b) :PUBLISH)]
+          (is (= topic (:topic msg)))
+          (is (true? (:retain? msg)))
+          (is (= will (tu/payload-str msg)))
+          (is (= 0 (:qos msg))))
+        (tu/close! b)))))
 
 (deftest session-test
- (let [ch (chan)
-       client-a (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn (fn [msg _] (logger msg) (go (>! ch msg))) 1))
-       client-b (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn (fn [msg _] (logger msg) (go (>! ch msg))) 1))
-       connect-msg {:packet-type :CONNECT
-                    :protocol-name "MQTT"
-                    :protocol-version 4
-                    :keep-alive 100
-                    :clean-session? false
-                    :client-id "connect-test-client"}]
-   (client/send-message client-a connect-msg)
-   (let [msg (first (alts!! [ch (timeout 1000)]))]
-     (is (= :CONNACK (:packet-type msg)))
-     (is (= 0x00 (:connect-return-code msg)))
-     (.close ^MqttClient client-a))
-   (client/send-message client-b connect-msg)
-   (let [msg (first (alts!! [ch (timeout 1000)]))]
-     (is (= :CONNACK (:packet-type msg)))
-     (is (= 0x00 (:connect-return-code msg)))
-     (is (true? (:session-present? msg)))
-     (.close ^MqttClient client-a))))
+  (testing "reconnecting with the same id resumes the session"
+    (let [id (tu/client-id "session")
+          a  (tu/connect! nil :id id :clean-session? false)]
+      (is (= 0x00 (:connect-return-code (:connack a))))
+      (tu/close! a)
+      (tu/wait-for-parked-session! id)
+      (let [b (tu/connect! nil :id id :clean-session? false)]
+        (is (= 0x00 (:connect-return-code (:connack b))))
+        (is (true? (:session-present? (:connack b))))
+        (tu/close! b)))))
 
 (deftest sub-unsub-test
-  (let [ch (chan)
-        client (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn (fn [msg _] (logger msg) (go (>! ch msg))) 1))
-        connect-msg {:packet-type :CONNECT
-                     :protocol-name "MQTT"
-                     :protocol-version 4
-                     :keep-alive 100
-                     :clean-session? true
-                     :client-id "sub-unsub-test-client"}
-        subscribe-msg {:packet-type :SUBSCRIBE
-                       :topics [{:qos 0
-                                 :topic-filter "sub-topic/test"}]
-                       :packet-identifier 123}
-        unsubscribe-msg {:packet-type :UNSUBSCRIBE
-                         :topics ["sub-topic/test"]
-                         :packet-identifier 124}
-        publish-msg {:packet-type :PUBLISH
-                     :qos 0
-                     :topic "sub-topic/test"
-                     :retain? false
-                     :payload "this is a message"
-                     :duplicate false}]
-    (client/send-message client connect-msg)
-    (let [msg (first (alts!! [ch (timeout 1000)]))]
-      (is (= :CONNACK (:packet-type msg)))
-      (is (= 0x00 (:connect-return-code msg))))
-    (client/send-message client subscribe-msg)
-    (let [msg (first (alts!! [ch (timeout 1000)]))]
-      (is (= :SUBACK (:packet-type msg)))
-      (is (= [0] (:response msg))))
-    (client/send-message client publish-msg)
-    (let [msg (first (alts!! [ch (timeout 1000)]))]
-      (is (= :PUBLISH (:packet-type msg)))
-      (is (= 0 (:qos msg)))
-      (is (= "sub-topic/test" (:topic msg)))
-      (is (= "this is a message" (String. (:payload msg) "UTF-8"))))
-    (client/send-message client unsubscribe-msg)
-    (let [msg (first (alts!! [ch (timeout 1000)]))]
-      (is (= :UNSUBACK (:packet-type msg)))
-      (is (= 124 (:packet-identifier msg))))
-    (client/send-message client publish-msg)
-    (.close ^MqttClient client)))
+  (testing "a subscription delivers, and stops delivering once unsubscribed"
+    (let [topic (tu/topic "sub-unsub")
+          {:keys [client ch] :as c} (tu/connect! "sub-unsub")]
+      (client/send-message client (subscribe-msg topic 0 123))
+      (is (= [0] (:response (tu/expect! ch :SUBACK))))
 
+      (client/send-message client (publish-msg topic "this is a message"))
+      (let [msg (tu/expect-eventually! ch :PUBLISH)]
+        (is (= 0 (:qos msg)))
+        (is (= topic (:topic msg)))
+        (is (= "this is a message" (tu/payload-str msg))))
+
+      (client/send-message client {:packet-type :UNSUBSCRIBE :topics [topic] :packet-identifier 124})
+      (let [msg (tu/expect! ch :UNSUBACK)]
+        (is (= 124 (:packet-identifier msg))))
+
+      (client/send-message client (publish-msg topic "should not arrive"))
+      (is (nil? (tu/take! ch 300)) "nothing may be delivered after UNSUBSCRIBE")
+      (tu/close! c))))
 
 (deftest subscribe-test
-  (let [ch (chan)
-        client-a (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn (fn [msg _] (logger msg) (go (>! ch msg))) 1))
-        client-b (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn (fn [msg _] (logger msg) (go (>! ch msg))) 1))
-        payload "this is a message"
-        connect-msg {:packet-type :CONNECT
-                     :protocol-name "MQTT"
-                     :protocol-version 4
-                     :keep-alive 100
-                     :clean-session? false
-                     :client-id "connect-test-client"}
-        subscribe-msg {:packet-type :SUBSCRIBE
-                       :topics [{:qos 1
-                                 :topic-filter "qos-0-topic/test"}]
-                       :packet-identifier 123}
-        publish-msg {:packet-type :PUBLISH :qos 0 :topic "qos-0-topic/test" :retain? false :payload payload :duplicate false}]
-    (client/send-message client-a connect-msg)
-    (let [msg (first (alts!! [ch (timeout 1000)]))]
-      (is (= :CONNACK (:packet-type msg)))
-      (is (= 0x00 (:connect-return-code msg))))
-    (client/send-message client-a subscribe-msg)
-    (let [msg (first (alts!! [ch (timeout 1000)]))]
-      (is (= :SUBACK (:packet-type msg)))
-      (is (= [1] (:response msg))))
-    (client/send-message client-a publish-msg)
-    (let [msg (first (alts!! [ch (timeout 1000)]))]
-      (is (= :PUBLISH (:packet-type msg)))
-      (is (= 0 (:qos msg)))
-      (is (= "qos-0-topic/test" (:topic msg)))
-      (is (= payload (String. (:payload msg) "UTF-8"))))
-    (.close ^MqttClient client-a)
-    (client/send-message client-b connect-msg)
-    (let [msg (first (alts!! [ch (timeout 1000)]))]
-        (is (= :CONNACK (:packet-type msg)))
-        (is (= 0x00 (:connect-return-code msg)))
-        (is (true? (:session-present? msg))))
-    (client/send-message client-b publish-msg)
-    (let [msg (first (alts!! [ch (timeout 1000)]))]
-      (is (= :PUBLISH (:packet-type msg)))
-      (is (= 0 (:qos msg)))
-      (is (= "qos-0-topic/test" (:topic msg)))
-      (is (= payload (String. (:payload msg) "UTF-8"))))
-    (.close ^MqttClient client-b)))
+  (testing "a subscription made in one session still delivers in the next"
+    (let [id      (tu/client-id "subscribe")
+          topic   (tu/topic "qos-0")
+          payload "this is a message"
+          a       (tu/connect! nil :id id :clean-session? false)]
+      (client/send-message (:client a) (subscribe-msg topic 1 123))
+      (is (= [1] (:response (tu/expect! (:ch a) :SUBACK))))
+      (client/send-message (:client a) (publish-msg topic payload))
+      (let [msg (tu/expect-eventually! (:ch a) :PUBLISH)]
+        (is (= 0 (:qos msg)))
+        (is (= topic (:topic msg)))
+        (is (= payload (tu/payload-str msg))))
+      (tu/close! a)
+      (tu/wait-for-parked-session! id)
 
+      (let [b (tu/connect! nil :id id :clean-session? false)]
+        (is (true? (:session-present? (:connack b))))
+        (client/send-message (:client b) (publish-msg topic payload))
+        (let [msg (tu/expect-eventually! (:ch b) :PUBLISH)]
+          (is (= 0 (:qos msg)))
+          (is (= topic (:topic msg)))
+          (is (= payload (tu/payload-str msg))))
+        (tu/close! b)))))
 
 (deftest qos-1-test
-  (let [payload "qos-1 test message"
-        ch (chan)
-        client-a (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn (fn [msg _] (logger (str "Received: " msg)) (go (>! ch msg))) 1))
-        client-b (client/client "localhost" 1883 (MqttHandler. ^clojure.lang.IFn (fn [msg _] (logger (str "Received: " msg)) (go (>! ch msg))) 1))
-        connect-msg {:packet-type :CONNECT
-                     :protocol-name "MQTT"
-                     :protocol-version 4
-                     :keep-alive 100
-                     :clean-session? false
-                     :client-id "qos-1-test"}
-        publish-msg {:packet-type :PUBLISH :packet-identifier 666 :qos 1 :topic "qos-1-topic/test1" :retain? false :payload payload :duplicate false}
-        subscribe-msg {:packet-type :SUBSCRIBE
-                       :topics [{:qos 1
-                                 :topic-filter "qos-1-topic/test1"}]
-                       :packet-identifier 123}]
-    (client/send-message client-a connect-msg)
-    (is (= :CONNACK (:packet-type (first (alts!! [ch (timeout 1000)])))))
-    (client/send-message client-a subscribe-msg)
-    (is (= :SUBACK (:packet-type (first (alts!! [ch (timeout 1000)])))))
-    (client/send-message client-a publish-msg)
-    #_(let [msg-1 (first (alts!! [ch (timeout 1000)]))
-            msg-2 (first (alts!! [ch (timeout 1000)]))
-            messages [msg-1 msg-2]]
-        (logger "asdg" messages))
+  (testing "an unacknowledged QoS 1 message is redelivered on the next session"
+    (let [id      (tu/client-id "qos-1")
+          topic   (tu/topic "qos-1")
+          payload "qos-1 test message"
+          a       (tu/connect! nil :id id :clean-session? false)]
+      (client/send-message (:client a) (subscribe-msg topic 1 123))
+      (tu/expect! (:ch a) :SUBACK)
+      (client/send-message (:client a) (publish-msg topic payload :qos 1 :id 666))
 
-    (loop [msg (first (alts!! [ch (timeout 1000)]))
-           count 1]
-      ;;(logger "Count: " count)
-      (when (> count 0)
-        (let [type (:packet-type msg)]
-          (if (= type :PUBLISH)
-            (do (is (= :PUBLISH type))
-                (is (= 1 (:qos msg)))
-                ;;(is (= 1 (:packet-identifier msg)))
-                (is (= "qos-1-topic/test1" (:topic msg)))
-                (is (= payload (String. (:payload  msg) "UTF-8")))
-                (recur (msg (first (alts!! [ch (timeout 1000)]))) (dec count)))
-            (do (is (= :PUBACK type))
-                (is (= 666 (:packet-identifier msg)))
-                (recur (first (alts!! [ch (timeout 1000)])) (dec count)))))))
+      ;; Two packets come back, in either order: the PUBACK for what we
+      ;; published, and the copy delivered to us as a subscriber. We
+      ;; deliberately never acknowledge the latter.
+      (let [{pubacks :PUBACK publishes :PUBLISH} (tu/take-n! (:ch a) 2)]
+        (is (= [666] (map :packet-identifier pubacks)))
+        (let [msg (first publishes)]
+          (is (some? msg) "the subscriber copy should have been delivered")
+          (is (= 1 (:qos msg)))
+          (is (= topic (:topic msg)))
+          (is (= payload (tu/payload-str msg)))))
 
-    (<!! (timeout 25))
-    (client/send-message client-a {:packet-type :DISCONNECT})
-    (client/close client-a)
-    (logger "disconnect client-a")
+      (client/send-message (:client a) {:packet-type :DISCONNECT})
+      (tu/close! a)
+      (tu/wait-for-parked-session! id)
 
-    ;; The client (WE) didn't send a PUBACK back to the server... so when we reconnect with the same client id 
-    ;; we should get the same message again. and this time we PUBACK it.
-
-    (<!! (timeout 25))
-    (client/send-message client-b connect-msg)
-    (logger "Connected client-b")
-    (loop [msg (first (alts!! [ch (timeout 1000)]))
-           count 3]
-      ;;(logger msg)
-      ;;(logger "Count: " count)
-      (when (> count 0)
-        ;;(logger "Count: " count)
-        ;;(logger msg)
-        (let [type (:packet-type msg)]
-          (if (= type :PUBLISH)
-            (do (is (= :PUBLISH type))
-                (is (= 1 (:qos msg)))
-                (is (true? (:duplicate? msg)))
-                (is (= "qos-1-topic/test1" (:topic msg)))
-                (is (= payload (String. (:payload  msg) "UTF-8")))
-                (client/send-message client-b {:packet-type :PUBACK :packet-identifier (:packet-identifier msg)}))
-            (do (is (= :CONNACK type))
-                (is (true? (:session-present? msg)))
-                (recur (first (alts!! [ch (timeout 1000)])) (dec count)))))))
-
-    (logger "done...")))
+      ;; Same client id, so the broker owes us the message we never acked.
+      (let [b (tu/connect! nil :id id :clean-session? false)]
+        (is (true? (:session-present? (:connack b))))
+        (let [msg (tu/expect-eventually! (:ch b) :PUBLISH)]
+          (is (= 1 (:qos msg)))
+          (is (true? (:duplicate? msg)) "a redelivery is flagged as a duplicate")
+          (is (= topic (:topic msg)))
+          (is (= payload (tu/payload-str msg)))
+          (client/send-message (:client b) {:packet-type :PUBACK
+                                            :packet-identifier (:packet-identifier msg)}))
+        (tu/close! b)))))

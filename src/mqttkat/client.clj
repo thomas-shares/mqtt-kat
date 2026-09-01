@@ -28,10 +28,19 @@
    client (MqttClient. ^String host ^int port 2 handler ^Object (async/chan 1))))
 
 (defn connect
+  "Connect `client` with a generated CONNECT.
+
+   The protocol is pinned to 3.1.1 rather than generated: :mqtt/connect is an
+   s/or over MQTT 3.1 (\"MQIsdp\", version 3) and 3.1.1 (\"MQTT\", version 4),
+   and the broker answers an unsupported protocol name by dropping the
+   connection with no CONNACK at all. Generating it meant every simulation run
+   was a coin flip on whether its very first packet was answered."
   ([client] (let [map (gen/generate (s/gen :mqtt/connect))
                   _ (logger "S " map " " client)
-                  buf (MqttConnect/encode (assoc map :keep-alive 60))]
-                  ;ch (async/chan 1)]
+                  buf (MqttConnect/encode (assoc map
+                                                 :keep-alive 60
+                                                 :protocol-name "MQTT"
+                                                 :protocol-version 4))]
               (.sendMessage ^MqttClient client buf))))
 
 ;  ([host port] (client host port (MqttHandler. ^clojure.lang.IFn handler-fn 2)));
@@ -64,7 +73,7 @@
     map))
 
 (defn pingreq [client]
-  (let [map (gen/generate (s/gen :mqtt/pinreq))
+  (let [map (gen/generate (s/gen :mqtt/pingreq))
         bufs (MqttPingReq/encode map)]
     (.sendMessage ^MqttClient client bufs)))
 
