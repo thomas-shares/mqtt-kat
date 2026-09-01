@@ -4,6 +4,7 @@
    skips it (see :test-selectors in project.clj) — run it on purpose with
    `lein test :performance`."
   (:require [clojure.tools.logging :as log]
+            [clojure.string :as str]
             [causatum.event-streams :as es]
             [mqttkat.test-util :as tu]
             [clojure.test :refer [deftest is use-fixtures]]
@@ -12,7 +13,8 @@
             [clojure.spec.alpha :as s]
             [clojure.spec.gen.alpha :as gen]
             [clojure.core.async :as async])
-  (:import  [org.mqttkat MqttHandler MqttStat]
+  (:import  [java.util.concurrent.atomic AtomicLong]
+            [org.mqttkat MqttHandler MqttStat]
             [org.mqttkat.client MqttClient]))
 
 (def subscribe-topics (atom #{}))
@@ -29,6 +31,82 @@
 
 (use-fixtures :once tu/broker-fixture)
 
+
+(def ^:private timings
+  "One [qos prepare-nanos round-trip-nanos] per publish.
+
+   prepare is the test client's own cost — generating a message from the spec,
+   building a topic and encoding it. round-trip is send to last acknowledgement,
+   which is the number that says anything about the broker. Timing them as one
+   would report spec generation as though it were latency."
+  (atom []))
+
+(defn- ms [nanos] (/ (double nanos) 1e6))
+
+(defn- fmt
+  "Two decimals, always with a dot: %f follows the default locale, and half of
+   Europe would render these with a comma."
+  [x]
+  (String/format java.util.Locale/US "%.2f" (to-array [(double x)])))
+
+(defn- pct [sorted p]
+  (nth sorted (min (dec (count sorted)) (int (* p (count sorted))))))
+
+(defn- summary [nanos-seq]
+  (let [sorted (vec (sort nanos-seq))
+        n      (count sorted)]
+    (when (pos? n)
+      (let [mean (/ (reduce + 0 sorted) n)
+            var  (/ (reduce + 0 (map #(let [d (- % mean)] (* d d)) sorted)) n)]
+        {:n n :min (first sorted) :median (pct sorted 0.5) :mean mean
+         :sd (Math/sqrt (double var)) :p95 (pct sorted 0.95) :p99 (pct sorted 0.99)
+         :max (peek sorted)}))))
+
+(defn- line [label s]
+  (when s
+    (format "    %-14s n %-5d min %-8s med %-8s mean %-8s sd %-8s p95 %-8s p99 %-8s max %s"
+            label (:n s) (fmt (ms (:min s))) (fmt (ms (:median s))) (fmt (ms (:mean s)))
+            (fmt (ms (:sd s))) (fmt (ms (:p95 s))) (fmt (ms (:p99 s))) (fmt (ms (:max s))))))
+
+(defn- counters []
+  {:sent           (.get ^AtomicLong MqttStat/sentMessages)
+   :received       (.get ^AtomicLong MqttStat/receivedMessages)
+   :sent-bytes     (.get ^AtomicLong MqttStat/sentBytes)
+   :received-bytes (.get ^AtomicLong MqttStat/receivedBytes)})
+
+(defn- report!
+  "Log the run's statistics. `before` is a counters snapshot taken at the start:
+   MqttStat's counters are static and live for the whole JVM, so the other
+   performance test's traffic is in them too and has to be subtracted."
+  [events elapsed-ms before]
+  (let [after   (counters)
+        secs    (/ (double elapsed-ms) 1000.0)
+        delta   #(- (get after %) (get before %))
+        samples @timings
+        by-qos  (group-by first samples)
+        rt      #(map (fn [[_ _ round-trip]] round-trip) %)
+        prep    #(map (fn [[_ prepare _]] prepare) %)]
+    (log/info
+     (str "simulation summary\n"
+          (format "    %-14s %d events in %ss\n" "events" events (fmt secs))
+          (format "    %-14s qos0 %d  qos1 %d  qos2 %d  (total %d, %d skipped)\n"
+                  "publishes"
+                  (count (get by-qos 0)) (count (get by-qos 1)) (count (get by-qos 2))
+                  (count samples) (- events (count samples)))
+          "  round trip, milliseconds (publish sent -> last acknowledgement)\n"
+          (str/join "\n" (keep identity
+                               [(line "all" (summary (rt samples)))
+                                (line "qos 0" (summary (rt (get by-qos 0))))
+                                (line "qos 1" (summary (rt (get by-qos 1))))
+                                (line "qos 2" (summary (rt (get by-qos 2))))]))
+          "\n  client-side prepare, milliseconds (spec generation + encode)\n"
+          (line "all" (summary (prep samples)))
+          "\n  broker throughput over this test only\n"
+          (format "    %-14s %s msg/s in, %s msg/s out\n"
+                  "messages" (fmt (/ (delta :received) secs)) (fmt (/ (delta :sent) secs)))
+          (format "    %-14s %s KB/s in, %s KB/s out"
+                  "bytes" (fmt (/ (delta :received-bytes) secs 1024.0))
+                  (fmt (/ (delta :sent-bytes) secs 1024.0)))))))
 
 (def model
   {:graph
@@ -132,15 +210,18 @@
   ;; to nothing — rand-nth on an empty vector then throws and takes the whole
   ;; simulation with it.
   (if-let [filters (seq @subscribe-topics)]
-    (let [filter (rand-nth (vec filters))
-          topic (filter-to-topic filter)
+    (let [started (System/nanoTime)
+          filter  (rand-nth (vec filters))
+          topic   (filter-to-topic filter)
           _ (log/debug "S filter:" filter)
           _ (log/debug "S topic:" topic)
-          {payload :payload qos :qos packet-identifier :packet-identifier} (client/publish client topic)]
+          {payload :payload qos :qos packet-identifier :packet-identifier} (client/publish client topic)
+          sent    (System/nanoTime)]
       (condp = qos
         0 (qos-zero client payload)
         1 (qos-one client payload packet-identifier)
-        2 (qos-two client payload packet-identifier)))
+        2 (qos-two client payload packet-identifier))
+      (swap! timings conj [qos (- sent started) (- (System/nanoTime) sent)]))
     (log/debug "nothing subscribed yet, skipping publish")))
 
 
@@ -164,17 +245,15 @@
     ;; calling Causatum's event-stream function with our model and an initial seed
     ;; state.
    (let [start-time (System/currentTimeMillis)
+         _ (reset! timings [])
+         before (counters)
+         events 1000
          client-numbers 1
          client (client)]
          ;clients (take client-numbers (repeatedly (client)))
          ;streams (take client-numbers (repeatedly (es/event-stream model [{:rtime 0, :state :connect}])))]
-     (doseq [{state :state} (take 1000   (es/event-stream model [{:rtime 0, :state :connect}]))]
+     (doseq [{state :state} (take events (es/event-stream model [{:rtime 0, :state :connect}]))]
        (log/trace "State:" state)
        ;;(Thread/sleep 10)
        (({:connect connect, :publish publish, :disconnect disconnect, :connack connack :subscribe subscribe} state) client))
-     (let [time (/ (- (System/currentTimeMillis) start-time) 1000.0)]
-       (log/info
-         "sent per sec"(/ #_{:clj-kondo/ignore [:java-static-field-call]}
-                           (MqttStat/sentMessages) time)
-         "received per sec " (/ #_{:clj-kondo/ignore [:java-static-field-call]}
-                                (MqttStat/receivedMessages) time)))))
+     (report! events (- (System/currentTimeMillis) start-time) before)))
