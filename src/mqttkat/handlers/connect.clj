@@ -41,12 +41,14 @@
         (swap! *retained* dissoc topic)
         (swap! *retained* assoc topic {:qos qos :payload payload}))))
   
-  (when (pos? keep-alive)
-    (add-timer! client-key keep-alive))
   (send-buffer [client-key] (MqttConnAck/encode {:packet-type :CONNACK
                                                  :session-present? (contains? @*clients* client-id)
                                                  :connect-return-code 0x00}))
-  (add-client! msg))
+  (add-client! msg)
+  ;; After add-client!, never before: it replaces this key's whole entry, which
+  ;; would throw away the :timer and :last-active that add-timer! writes.
+  (when (pos? keep-alive)
+    (add-timer! client-key keep-alive)))
 
 (defn no-client-id-and-no-clean-session [client-id clean-session?]
   (and (empty? client-id) (not clean-session?)))

@@ -40,12 +40,17 @@
           will-retain (get-in @*clients* [key :will :will-retain])]
       (publish-will {:topic will-topic :qos will-qos :payload will-message :retain will-retain}))))
 
-(defn check-timer [key time-out]
-  (when (contains? @*clients* key)
-    (let [current-time (System/currentTimeMillis)
-          last-active  @(:last-active (get @*clients* key))]
-      (log/debug "timer fired:" time-out (- current-time last-active))
-      (when (some-> (* 0.9 last-active) (<= (- current-time time-out)))
+(defn check-timer
+  "Drop `key` if nothing has been received from it for `time-out` ms.
+
+   MQTT 3.1.1 §3.1.2.10: the server disconnects a client it has not heard from
+   for one and a half times the Keep Alive interval, which is what add-timer!
+   passes as `time-out`."
+  [key time-out]
+  (when-let [last-active (get-in @*clients* [key :last-active])]
+    (let [idle (- (System/currentTimeMillis) @last-active)]
+      (log/debug "timer fired:" time-out idle)
+      (when (<= time-out idle)
         (log/debug "Timer fired for client:" key)
         (handle-will-if-present key)
         ;; TODO 
@@ -55,16 +60,26 @@
         #_(swap! *clients* assoc-in [key] dissoc :will)
         (remove-client! key)
         (log/debug "about to close")
-        (.closeConnection ^MqttServer @*server* key)
+        ;; *server* holds the stop-server closure; the MqttServer itself lives
+        ;; in its metadata, the same way send-buffer reaches it. The close is
+        ;; guarded so a socket that has already gone cannot kill the timer.
+        (try
+          (.closeConnection ^MqttServer (:server (meta @*server*)) key)
+          (catch Exception e
+            (log/warn e "closing the connection of a timed-out client failed")))
         (log/debug "closed....")))))
 
 (defn add-timer!
   [key time]
   (log/trace "adding client to timer" time " and key:   "key)
-  (let [time-out (* 1500 time)
-        timer    (at/every time-out #(check-timer key time-out) my-pool :initial-delay time-out)]
+  (let [time-out (* 1500 time)]
+    ;; Stamp liveness BEFORE scheduling. The job's initial delay starts running
+    ;; the moment at/every is called, so a stamp taken afterwards leaves the
+    ;; first tick measuring fractionally less than time-out of idleness — the
+    ;; client then survives that cycle and is only reaped on the next one.
     (swap! *clients* assoc-in [key :last-active] (volatile! (System/currentTimeMillis)))
-    (swap! *clients* assoc-in [key :timer] timer))
+    (swap! *clients* assoc-in [key :timer]
+           (at/every time-out #(check-timer key time-out) my-pool :initial-delay time-out)))
   (log/trace @*clients*))
 
 (defn remove-timer! [key]
@@ -140,7 +155,9 @@
 (defn send-buffer [keys buf]
   (log/trace "sending buffer from clj")
   (log/trace  keys)
-  (update-timestamps keys)
+  ;; No update-timestamps here on purpose: keep alive measures the time since
+  ;; a packet was RECEIVED from the client, so writing to it proves nothing.
+  ;; mqttkat.server/default-handler-fn marks liveness on the inbound path.
   (let [{s :server} (meta @*server*)]
     (.sendMessageBuffer ^MqttServer s keys buf)))
 

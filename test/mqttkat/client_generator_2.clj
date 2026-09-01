@@ -128,15 +128,20 @@
     (clojure.string/replace  #"#" (gen/generate (s/gen (s/and string? #(<= 2 (count %))))))))
 
 (defn publish [client]
-  (let [filter (rand-nth (into [] @subscribe-topics))
-        topic (filter-to-topic filter)
-        _ (log/debug "S filter:" filter)
-        _ (log/debug "S topic:" topic)
-        {payload :payload qos :qos packet-identifier :packet-identifier} (client/publish client topic)]
-     (condp = qos
-       0 (qos-zero client payload)
-       1 (qos-one client payload packet-identifier)
-       2 (qos-two client payload packet-identifier))))
+  ;; client/subscribe filters the generated topic list, and can filter it down
+  ;; to nothing — rand-nth on an empty vector then throws and takes the whole
+  ;; simulation with it.
+  (if-let [filters (seq @subscribe-topics)]
+    (let [filter (rand-nth (vec filters))
+          topic (filter-to-topic filter)
+          _ (log/debug "S filter:" filter)
+          _ (log/debug "S topic:" topic)
+          {payload :payload qos :qos packet-identifier :packet-identifier} (client/publish client topic)]
+      (condp = qos
+        0 (qos-zero client payload)
+        1 (qos-one client payload packet-identifier)
+        2 (qos-two client payload packet-identifier)))
+    (log/debug "nothing subscribed yet, skipping publish")))
 
 
 (defn disconnect [client]

@@ -30,9 +30,13 @@
                   :DISCONNECT   disconnect/disconnect
                   :AUTHENTICATE h/authenticate})
 
-(defn default-handler-fn [{:keys [packet-type] :as msg} _]
+(defn default-handler-fn [{:keys [packet-type client-key] :as msg} _]
   (log/trace "message is received." msg)
   (when packet-type
+    ;; Any packet from a client proves it is alive — that is the whole job of
+    ;; PINGREQ — so the keep-alive stamp is refreshed on the inbound path.
+    (when client-key
+      (h/update-timestamps [client-key]))
     ((packet-type handler-map) msg)))
 
 (defn run-server [ip port handler]

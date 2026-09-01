@@ -41,7 +41,8 @@
                    :performance :performance
                    :all         (constantly true)}
   :plugins [[lein-ancient "0.6.15"]
-            [lein-auto "0.1.3"]]
+            [lein-auto "0.1.3"]
+            [lein-cloverage "1.2.4"]]
   :jar-exclusions [#"^java.*"] ; exclude the java directory in source path
   :main mqttkat.server
   :aot [mqttkat.server]

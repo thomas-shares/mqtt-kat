@@ -128,6 +128,19 @@
   [^String t]
   (str (subs t 0 (.indexOf t "/")) "/#"))
 
+(defn wait-until
+  "Poll `pred` every 25ms until it holds, or `ms` elapses. Returns whether it
+   held. A deadline rather than a fixed sleep: the assertion then says what must
+   become true and by when, instead of depending on the machine keeping pace."
+  ([pred] (wait-until pred 4000))
+  ([pred ms]
+   (let [deadline (+ (System/currentTimeMillis) ms)]
+     (loop []
+       (cond
+         (pred)                                  true
+         (> (System/currentTimeMillis) deadline) false
+         :else                                   (do (Thread/sleep 25) (recur)))))))
+
 (defn payload-str
   "The :payload of a packet as a String (it arrives as a byte array)."
   [msg]
