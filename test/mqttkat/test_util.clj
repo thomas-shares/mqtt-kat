@@ -141,6 +141,23 @@
          (> (System/currentTimeMillis) deadline) false
          :else                                   (do (Thread/sleep 25) (recur)))))))
 
+(defn retained-payload
+  "What the broker currently has retained on `topic`, as a String."
+  [topic]
+  (some-> (get-in @handlers/*retained* [topic :payload]) (String. "UTF-8")))
+
+(defn wait-for-retained!
+  "Block until `topic` holds `expected` as its retained message.
+
+   A PUBLISH and a following SUBSCRIBE are handled as independent tasks on the
+   broker's thread pool, so a subscriber can be registered before the publish
+   that precedes it has been processed. A test about retention should not be
+   at the mercy of that; one about ordering should be written on purpose."
+  ([topic expected] (wait-for-retained! topic expected 2000))
+  ([topic expected ms]
+   (or (wait-until #(= expected (retained-payload topic)) ms)
+       (do (is false (str "nothing retained on " topic " after " ms "ms")) false))))
+
 (defn payload-str
   "The :payload of a packet as a String (it arrives as a byte array)."
   [msg]

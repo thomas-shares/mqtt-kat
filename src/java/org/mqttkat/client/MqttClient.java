@@ -3,6 +3,7 @@ package org.mqttkat.client;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.net.StandardSocketOptions;
 import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
@@ -61,6 +62,10 @@ public class MqttClient implements Runnable {
 		mqttAddr = new InetSocketAddress(host, port);
 		socketChannel = SocketChannel.open(mqttAddr);
 		socketChannel.configureBlocking(false);
+		// See the matching call in MqttServer.handleAccept: both ends have to
+		// disable Nagle, or the acknowledgement half of the exchange still
+		// waits on the delayed-ACK timer.
+		socketChannel.setOption(StandardSocketOptions.TCP_NODELAY, true);
 
 		this.asyncChannel = asyncChannel;
 

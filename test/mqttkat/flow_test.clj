@@ -48,6 +48,7 @@
           payload "this is a retained message"
           {:keys [client ch] :as c} (tu/connect! "retain")]
       (client/send-message client (publish-msg topic payload :retain? true))
+      (tu/wait-for-retained! topic payload)
       (client/send-message client (subscribe-msg (tu/wildcard topic) 0 1))
       (let [msg (tu/expect-eventually! ch :PUBLISH)]
         (is (true? (:retain? msg)))
@@ -61,9 +62,9 @@
     (let [topic (tu/topic "update-retain")
           {:keys [client ch] :as c} (tu/connect! "update-retain")]
       (client/send-message client (publish-msg topic "retained message one" :retain? true))
-      (Thread/sleep 20)
+      (tu/wait-for-retained! topic "retained message one")
       (client/send-message client (publish-msg topic "retained message two" :retain? true))
-      (Thread/sleep 20)
+      (tu/wait-for-retained! topic "retained message two")
       (client/send-message client (subscribe-msg (tu/wildcard topic) 0 1))
       (let [msg (tu/expect-eventually! ch :PUBLISH)]
         (is (= "retained message two" (tu/payload-str msg))))

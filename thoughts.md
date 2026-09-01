@@ -2,6 +2,54 @@
 
 In this file will go my thoughts and ramblings about this project and what I have done and what I might do next.
 
+## 20260901
+
+### The latency question, answered: Nagle
+
+The 2020 note below says "latency is rather high, to be investigated". It was
+TCP, not the broker. No socket in the codebase set `TCP_NODELAY`, so Nagle's
+algorithm was holding small writes back until the previous one was
+acknowledged, and the peer's delayed ACK (40ms on Linux) supplied that
+acknowledgement on a timer. Any exchange needing more than one packet in each
+direction paid 40ms.
+
+The performance simulation now reports per-QoS round trips, which made the
+shape obvious — a hard floor with almost no variance, and only on the QoS
+levels that need a reply:
+
+| median round trip | Nagle (before) | TCP_NODELAY |
+|-------------------|----------------|-------------|
+| QoS 0 (1 packet)  | 0.55 ms        | 0.42 ms     |
+| QoS 1 (2 packets) | 41.43 ms       | 0.47 ms     |
+| QoS 2 (4 packets) | 41.65 ms       | 0.82 ms     |
+
+The whole 1000-event simulation went from 21.96s to 0.95s, and throughput over
+the same work from 137 to 3117 messages/second. `TCP_NODELAY` is now set on the
+accepted sockets in `MqttServer.handleAccept` and on the client's socket in
+`MqttClient`; both ends need it, or the acknowledgement half still waits.
+
+That probably also explains the mqttloader comparison in the 2020 entry —
+average latency 116ms against Mosquitto's 71ms. Mosquitto sets `TCP_NODELAY`.
+
+### A race this uncovered: packets are handled out of order
+
+Removing the 40ms delay exposed something that had been hiding behind it.
+`MqttHandler.handle` submits every incoming packet to a shared thread pool as
+an independent task, so two packets **from the same connection** can be handled
+concurrently and out of order. MQTT requires a client's packets to be processed
+in the order they were sent.
+
+It showed up as `retain-test` failing about half the time: the test publishes a
+retained message and then subscribes, and the subscription was sometimes
+registered first — so the client got a live delivery with `retain? false`
+instead of the retained copy. Nagle had been serialising the two packets by
+accident.
+
+The retain tests now wait for the broker to have stored the message before
+subscribing, so they test retention rather than scheduling. The underlying
+ordering bug is still there and wants a fix of its own: dispatch needs to be
+serialised per connection, not per packet.
+
 ## 20201014
 
 Thanks to jocatelo I picked this project up again. He has provided me with quite a few PR's and that got me going again as well. Thinks have been cleaned up and several bugs removed and all the tests now pass!!! Woohoooo. I also just ran an MQTT load generator aginst the server:
