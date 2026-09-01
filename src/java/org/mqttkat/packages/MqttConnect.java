@@ -24,7 +24,7 @@ public class MqttConnect extends GenericMessage {
 
 		int offset = 0;
 		String protocolName = decodeUTF8(remainAndPayload, offset);
-		offset = protocolName.length() + 2;
+		offset += encodedUTF8Length(remainAndPayload, offset);
 		//System.out.println("1 " + offset + " protocol name: " +  protocolName);
 		//System.out.println("protocolName: " + protocolName);
 		byte clientVersion = remainAndPayload[offset++];
@@ -49,7 +49,7 @@ public class MqttConnect extends GenericMessage {
 
 		
 		String clientID = decodeUTF8(remainAndPayload, offset);
-		offset += clientID.length() + 2;
+		offset += encodedUTF8Length(remainAndPayload, offset);
 		//System.out.println("5 " + offset + " ClientId:" + clientID);
 
 
@@ -64,10 +64,10 @@ public class MqttConnect extends GenericMessage {
 			//log("will set...");
 			willTopic = decodeUTF8(remainAndPayload, offset);
 			will.put(WILL_TOPIC, willTopic);
-			offset += willTopic.length() + 2;
+			offset += encodedUTF8Length(remainAndPayload, offset);
 			willMessage = decodeUTF8(remainAndPayload, offset);
 			will.put(WILL_MSG, willMessage);
-			offset += willMessage.length() + 2;
+			offset += encodedUTF8Length(remainAndPayload, offset);
 			boolean willRetain = (connectFlags & WILLRETAIN_FLAG) == 0x20;
 			will.put(WILL_RETAIN, willRetain);
 			
@@ -84,7 +84,7 @@ public class MqttConnect extends GenericMessage {
 		Map<Keyword, Object> userCredentials = new TreeMap<Keyword, Object>();
 		if(userNameSet) {
 			userName = decodeUTF8(remainAndPayload, offset);
-			offset += userName.length() + 2;
+			offset += encodedUTF8Length(remainAndPayload, offset);
 			userCredentials.put(USER_NAME, userName);
 
 			if(passwordSet) {
@@ -129,12 +129,14 @@ public class MqttConnect extends GenericMessage {
 	public static ByteBuffer encode(Map<Keyword, ?> message) throws UnsupportedEncodingException {
 		//log("encode CONNECT");
 		int length = 0;
+		// MESSAGE_LENGTH is the starting size; fit() grows past it. The writes
+		// to bytes[connectFlagOffset] are always inside the first ten bytes, so
+		// they stay valid across a grow — fit() copies what is already there.
 		byte[] bytes = new byte[MESSAGE_LENGTH];
-		ByteBuffer buffer = ByteBuffer.allocate(MESSAGE_LENGTH);
 		byte firstByte = (byte) (MESSAGE_CONNECT << 4);
-		buffer.put(firstByte);
 
 		byte[] protocolName = ((String) message.get(PROTOCOL_NAME)).getBytes(StandardCharsets.UTF_8);
+		bytes = fit(bytes, length, 6 + protocolName.length);
 		bytes[length++] = (byte) ((protocolName.length >>> 8) & 0xFF);
 		bytes[length++] = (byte) (protocolName.length & 0xFF);
 		for(int i = 0; i < protocolName.length; i++) {
@@ -155,6 +157,7 @@ public class MqttConnect extends GenericMessage {
 		bytes[length++] = (byte) (keepAlive & 0xFF);
 	
 		byte[] clientId = ((String) message.get(CLIENT_ID)).getBytes(StandardCharsets.UTF_8);
+		bytes = fit(bytes, length, 2 + clientId.length);
 		bytes[length++] = (byte) ((clientId.length >>> 8) & 0xFF);
 		bytes[length++] = (byte) (clientId.length & 0xFF);
 		for(int i = 0; i < clientId.length; i++) {
@@ -171,6 +174,7 @@ public class MqttConnect extends GenericMessage {
 			bytes[connectFlagOffset] = willRetain ? (byte) (WILLRETAIN_FLAG |bytes[connectFlagOffset]) : bytes[connectFlagOffset];
 			//log("will topic: " + ((String) will.get(WILL_TOPIC)) );
 			byte[] willTopic = ((String) will.get(WILL_TOPIC)).getBytes(StandardCharsets.UTF_8);
+			bytes = fit(bytes, length, 2 + willTopic.length);
 			bytes[length++] = (byte) ((willTopic.length >>> 8) & 0xFF);
 			bytes[length++] = (byte) (willTopic.length & 0xFF);
 			for(int i = 0; i < willTopic.length; i++) {
@@ -178,6 +182,7 @@ public class MqttConnect extends GenericMessage {
 			}	
 			
 			byte[] willMessage = ((String) will.get(WILL_MSG)).getBytes(StandardCharsets.UTF_8);
+			bytes = fit(bytes, length, 2 + willMessage.length);
 			bytes[length++] = (byte) ((willMessage.length >>> 8) & 0xFF);
 			bytes[length++] = (byte) (willMessage.length & 0xFF);
 			for(int i = 0; i < willMessage.length; i++) {
@@ -193,6 +198,7 @@ public class MqttConnect extends GenericMessage {
 			bytes[connectFlagOffset] = (byte) (USERNAME_FLAG | bytes[connectFlagOffset]);
 			
 			byte[] userName = userNameStr.getBytes(StandardCharsets.UTF_8);
+			bytes = fit(bytes, length, 2 + userName.length);
 			bytes[length++] = (byte) ((userName.length >>> 8) & 0xFF);
 			bytes[length++] = (byte) (userName.length & 0xFF);
 			for(int i = 0; i < userName.length; i++) {
@@ -204,7 +210,8 @@ public class MqttConnect extends GenericMessage {
 				bytes[connectFlagOffset]= (byte) (PASSWORD_FLAG | bytes[connectFlagOffset]);
 				//ByteBuffer password = encodeUTF8((String)userCredentials.get(PASSWORD));
 				byte[] passwordArray = (byte[]) userCredentials.get(PASSWORD);
-				
+
+				bytes = fit(bytes, length, 2 + passwordArray.length);
 				bytes[length++] = (byte) ((passwordArray.length >>> 8) & 0xFF);
 				bytes[length++] = (byte) ((passwordArray.length >>> 0) & 0xFF);
 				for(int i =0 ; i < passwordArray.length; i++) {
@@ -214,7 +221,10 @@ public class MqttConnect extends GenericMessage {
 		}
 		//String s1 = String.format("%8s", Integer.toBinaryString(bytes[connectFlagOffset] & 0xFF)).replace(' ', '0');
 		//log("connect flags: " + s1 + "  offset" + connectFlagOffset);
-		buffer.put(calculateLength(length));
+		byte[] remaining = calculateLength(length);
+		ByteBuffer buffer = ByteBuffer.allocate(1 + remaining.length + length);
+		buffer.put(firstByte);
+		buffer.put(remaining);
 		buffer.put(bytes, 0, length);
 		buffer.flip();
 		//log("length: " + length);

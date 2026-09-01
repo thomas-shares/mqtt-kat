@@ -85,13 +85,21 @@ public class MqttClient {
 	 * interleaving.
 	 */
 	public void sendMessage(ByteBuffer buffer) throws IOException {
-		sentMessages.incrementAndGet();
-		sentBytes.addAndGet(buffer.limit());
+		int size = buffer.limit();
 		synchronized (writeLock) {
 			while (buffer.hasRemaining()) {
 				socketChannel.write(buffer);
 			}
 		}
+		// Counted after the write, and as both queued and written: this send is
+		// synchronous, so there is no queue here to fall behind. Keeping the
+		// two in step matters because the performance tests run a client and
+		// the broker in one JVM, where these counters are shared — counting
+		// only `sent` here would show up as broker backlog that does not exist.
+		sentMessages.increment();
+		sentBytes.add(size);
+		writtenMessages.increment();
+		writtenBytes.add(size);
 	}
 
 	public void close() throws IOException {
@@ -201,8 +209,8 @@ public class MqttClient {
 				log.error("invalid packet type received: {}", type);
 				return;
 			}
-			receivedMessages.incrementAndGet();
-			receivedBytes.addAndGet(body.length);
+			receivedMessages.increment();
+			receivedBytes.add(body.length);
 			// In order, on this thread: callers read replies off a channel and
 			// expect them in the order the broker sent them.
 			handler.handleInOrder(incoming, asyncChannel);

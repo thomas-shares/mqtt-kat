@@ -16,6 +16,7 @@ import org.mqttkat.IHandler;
 import org.mqttkat.packages.*;
 
 import static org.mqttkat.MqttStat.*;
+import org.mqttkat.MqttStat;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -241,24 +242,51 @@ public class MqttServer implements Runnable {
 	// SelectionKey key = (SelectionKey) it.next();
 	// ByteBuffer copyBuf = buffer.duplicate();
 	// executor.submit(copyBuf, key);
-	// sentMessages.getAndIncrement();
-	// sentBytes.getAndAdd(buffer.limit());
+	// sentMessages.increment();
+	// sentBytes.add(buffer.limit());
 	// }
 	// }
 
 	public void sendMessageBuffer(final clojure.lang.PersistentVector keys, final ByteBuffer buffer) {
+		sendMessageBuffer(keys, buffer, false);
+	}
+
+	/**
+	 * @param droppable true for QoS 0 publishes, which a connection may refuse
+	 *                  when the subscriber is too far behind. Everything else
+	 *                  — control packets, QoS 1 and 2 publishes — must be
+	 *                  delivered and is queued unconditionally.
+	 */
+	public void sendMessageBuffer(final clojure.lang.PersistentVector keys, final ByteBuffer buffer,
+			final boolean droppable) {
 		for (Object o : keys) {
 			SelectionKey key = (SelectionKey) o;
 			Connection connection = (Connection) key.attachment();
 			if (connection == null) {
 				continue;                            // already gone
 			}
+			if (droppable && connection.isBacklogged()) {
+				// Checked before duplicate(): under overload most subscribers
+				// are refused, and allocating a ByteBuffer per refusal is
+				// millions of objects of pure garbage.
+				MqttStat.droppedMessages.increment();
+				continue;
+			}
 			// duplicate() shares the bytes but gets its own position, so one
 			// encoded packet can be fanned out to every subscriber without
 			// being encoded, or copied, again.
-			connection.write(buffer.duplicate());
-			sentMessages.getAndIncrement();
-			sentBytes.getAndAdd(buffer.limit());
+			ByteBuffer copy = buffer.duplicate();
+			if (droppable) {
+				if (!connection.writeDroppable(copy)) {
+					continue;                        // counted in droppedMessages
+				}
+			} else {
+				connection.write(copy);
+			}
+			// Counted only once it is actually on a queue, so that
+			// queued - written - discarded stays the live backlog.
+			sentMessages.increment();
+			sentBytes.add(buffer.limit());
 		}
 	}
 }

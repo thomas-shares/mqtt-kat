@@ -168,9 +168,20 @@
   (let [{s :server} (meta @*server*)]
     (.sendMessageBuffer ^MqttServer s keys buf)))
 
+(defn send-buffer-droppable
+  "Fan out a QoS 0 publish.
+
+   Unlike send-buffer, a subscriber that is already far behind may refuse
+   these: QoS 0 is at-most-once, so dropping degrades that subscriber's feed
+   instead of costing the broker unbounded memory. Refusals show up as
+   :dropped in the stats line."
+  [keys buf]
+  (let [{s :server} (meta @*server*)]
+    (.sendMessageBuffer ^MqttServer s keys buf true)))
+
 (defn qos-0 [keys topic {:keys [payload]} retain]
   (log/trace "--> respond QOS 0 topic:" topic " retained: " retain  " payload: " payload  " count keys: " (count keys))
-  (send-buffer (mapv :client-key keys)
+  (send-buffer-droppable (mapv :client-key keys)
                (MqttPublish/encode {:packet-type :PUBLISH
                                     :payload     payload
                                     :topic       topic

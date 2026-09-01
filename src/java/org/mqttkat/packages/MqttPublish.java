@@ -32,8 +32,8 @@ public class MqttPublish extends GenericMessage {
 		m.put(QOS, qos);
 		//System.out.println(qos);
 		m.put(RETAIN, (flags & 0x01) == 0x01);
-		String topic = decodeUTF8(remainAndPayload, 0);
-		offset += topic.length() + 2;
+		String topic = decodeUTF8(remainAndPayload, offset);
+		offset += encodedUTF8Length(remainAndPayload, offset);
 		m.put(TOPIC, topic);
 		if(qos > 0 ) {
 			m.put(PACKET_IDENTIFIER, twoBytesToLong( remainAndPayload[offset++], remainAndPayload[offset++]));
@@ -49,8 +49,9 @@ public class MqttPublish extends GenericMessage {
 		//System.out.println("PUBLISHING MESSAGE TO CLIENT: " + message.toString());
 		int length = 0;
 		
+		// MESSAGE_LENGTH is the starting size; fit() grows past it. The final
+		// ByteBuffer is allocated at the end, once the body length is known.
 		byte[] bytes = new byte[MESSAGE_LENGTH];
-		ByteBuffer buffer = ByteBuffer.allocate(MESSAGE_LENGTH);
 		byte firstByte = (byte) (MESSAGE_PUBLISH << 4);
 		
 		if((Boolean) message.get(RETAIN)) {
@@ -63,9 +64,8 @@ public class MqttPublish extends GenericMessage {
 		byte qos = Byte.parseByte(((Long) message.get(QOS)).toString());
 		firstByte = (byte) ((qos << 1) | firstByte);
 
-		buffer.put(firstByte);
-		
 		byte[] topic = ((String) message.get(TOPIC)).getBytes("UTF-8");
+		bytes = fit(bytes, length, 2 + topic.length);
 		bytes[length++] = (byte) ((topic.length >>> 8) & 0xFF);
 		bytes[length++] = (byte) (topic.length & 0xFF);
 		for(int i = 0; i < topic.length; i++) {
@@ -75,6 +75,7 @@ public class MqttPublish extends GenericMessage {
 		if(qos > 0) {
 			Long packetIdentifierL = (Long) message.get(PACKET_IDENTIFIER);
 
+			bytes = fit(bytes, length, 2);
 			bytes[length++] = (byte) ((packetIdentifierL >>> 8) & 0xFF);
 			bytes[length++] = (byte) ((packetIdentifierL >>> 0) & 0xFF);
 		}
@@ -82,6 +83,7 @@ public class MqttPublish extends GenericMessage {
 		Object obj = message.get(PAYLOAD);
 		if( obj instanceof String) {
 			byte[] strBytes  = ((String) obj).getBytes();
+			bytes = fit(bytes, length, strBytes.length);
 			for(int i = 0; i < strBytes.length; i++) {
 				bytes[length++] = strBytes[i];
 			}
@@ -91,13 +93,17 @@ public class MqttPublish extends GenericMessage {
 			//System.out.println("obj class: " + obj.getClass());
 			byte[] payloadBytes = (byte[])obj;
 			if( payloadBytes != null ) {
+				bytes = fit(bytes, length, payloadBytes.length);
 				for(int i = 0; i < payloadBytes.length; i++) {
 					bytes[length++] = payloadBytes[i];
 				}
 			}
 		}
 
-		buffer.put(calculateLength(length));
+		byte[] remaining = calculateLength(length);
+		ByteBuffer buffer = ByteBuffer.allocate(1 + remaining.length + length);
+		buffer.put(firstByte);
+		buffer.put(remaining);
 		buffer.put(bytes, 0, length);
 		buffer.flip();
 		//log("length: " + length);

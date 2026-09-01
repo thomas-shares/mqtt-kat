@@ -4,7 +4,9 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.SocketChannel;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -38,6 +40,33 @@ public class Connection {
 	private static final int MAX_REMAINING_LENGTH_BYTES = 4;   // MQTT 3.1.1 §2.2.3
 
 	/**
+	 * How far behind one client may fall before QoS 0 publishes to it start
+	 * being dropped. 0 disables the limit and restores the old unbounded
+	 * behaviour; override with -Dmqttkat.maxQueuedMessages=N.
+	 *
+	 * At roughly 7k packets/second per connection, 10k is about a second and a
+	 * half of buffering — enough to ride out a burst, far short of letting one
+	 * subscriber that stops reading consume the broker's heap.
+	 */
+	private static volatile int maxQueued =
+			Integer.getInteger("mqttkat.maxQueuedMessages", 10_000).intValue();
+
+	/** The limit in force. 0 means unbounded. */
+	public static int getMaxQueued() {
+		return maxQueued;
+	}
+
+	/**
+	 * Change the limit on a running broker. Read per packet through a volatile,
+	 * so a change takes effect on the next publish rather than the next
+	 * restart; tests use it to reach the drop path without having to bury a
+	 * client under ten thousand messages first.
+	 */
+	public static void setMaxQueued(int limit) {
+		maxQueued = limit;
+	}
+
+	/**
 	 * Shutdown sentinels. Closing used to interrupt both threads, which also
 	 * interrupted whatever the handler happened to be doing — a client that
 	 * hung up while its CONNECT was being handled turned an ordinary rejection
@@ -65,6 +94,14 @@ public class Connection {
 	private final BlockingQueue<Object> inbound = new LinkedBlockingQueue<Object>();
 	private final BlockingQueue<ByteBuffer> outbound = new LinkedBlockingQueue<ByteBuffer>();
 
+	/**
+	 * Depth of `outbound`. Kept alongside the queue because
+	 * LinkedBlockingQueue.size() is O(1) but its count is only advisory here:
+	 * this one is incremented before the offer so a fan-out cannot race past
+	 * the limit by more than the number of threads publishing at that instant.
+	 */
+	private final AtomicInteger queuedCount = new AtomicInteger();
+
 	private volatile boolean running = true;
 	private Thread reader;
 	private Thread writer;
@@ -90,11 +127,55 @@ public class Connection {
 		}
 	}
 
-	/** Queue a packet for this client. Packets are written in the order queued. */
+	/**
+	 * Queue a packet that has to be delivered — CONNACK, SUBACK, PUBACK, a QoS
+	 * 1 or 2 PUBLISH. Never refused: dropping one of these breaks the protocol
+	 * rather than degrading it, so the limit deliberately does not apply.
+	 * Packets are written in the order queued.
+	 */
 	public void write(ByteBuffer buffer) {
 		if (running) {
+			queuedCount.incrementAndGet();
 			outbound.offer(buffer);
 		}
+	}
+
+	/**
+	 * Queue a QoS 0 PUBLISH, which is dropped if this client is already
+	 * maxQueued packets behind.
+	 *
+	 * MQTT 3.1.1 §4.3.1 makes QoS 0 "at most once", so a broker is entitled to
+	 * drop rather than buffer without limit — and it has to be. Unbounded, one
+	 * subscriber that stops reading is charged to the broker's heap, and worse,
+	 * the fan-out threads that fill the queue outcompete the writer threads
+	 * that drain it: the broker ends up spending its CPU accepting work instead
+	 * of doing it.
+	 *
+	 * @return false if the packet was dropped rather than queued.
+	 */
+	/**
+	 * Whether a QoS 0 publish to this client would be dropped. Lets the fan-out
+	 * skip the per-subscriber duplicate() for a client it is only going to
+	 * refuse — under overload that is most of them, and the allocation is pure
+	 * garbage. Advisory: writeDroppable re-checks, so a client that crosses the
+	 * limit between the two calls is still refused there.
+	 */
+	public boolean isBacklogged() {
+		int limit = maxQueued;
+		return limit > 0 && queuedCount.get() >= limit;
+	}
+
+	public boolean writeDroppable(ByteBuffer buffer) {
+		if (!running) {
+			return false;
+		}
+		if (isBacklogged()) {
+			MqttStat.droppedMessages.increment();
+			return false;
+		}
+		queuedCount.incrementAndGet();
+		outbound.offer(buffer);
+		return true;
 	}
 
 	/**
@@ -222,8 +303,8 @@ public class Connection {
 				close();
 				return;
 			}
-			MqttStat.receivedMessages.getAndIncrement();
-			MqttStat.receivedBytes.getAndAdd(body.length);
+			MqttStat.receivedMessages.increment();
+			MqttStat.receivedBytes.add(body.length);
 			// Run the handler here rather than handing it to a pool: this thread
 			// belongs to one connection, so running it inline is what keeps a
 			// client's packets in order.
@@ -242,7 +323,15 @@ public class Connection {
 				if (buffer == STOP_WRITING) {
 					break;                               // everything queued before it is written
 				}
+				queuedCount.decrementAndGet();
+				int size = buffer.remaining();
 				writeFully(buffer);
+				// writeFully also returns when the channel has gone, so ask the
+				// buffer whether the packet left rather than assuming it did.
+				if (!buffer.hasRemaining()) {
+					MqttStat.writtenMessages.increment();
+					MqttStat.writtenBytes.add(size);
+				}
 			}
 		} catch (InterruptedException e) {
 			Thread.currentThread().interrupt();          // closing
@@ -252,6 +341,28 @@ public class Connection {
 		} catch (Throwable t) {
 			log.error("connection {} writer failed", id, t);
 			close();
+		} finally {
+			discardQueued();
+		}
+	}
+
+	/**
+	 * Count what this connection promised and will now never deliver. Without
+	 * it the gap between queued and written only ever grows, and stops meaning
+	 * "current backlog" the first time a client hangs up with packets still
+	 * queued for it.
+	 */
+	private void discardQueued() {
+		List<ByteBuffer> left = new ArrayList<ByteBuffer>();
+		outbound.drainTo(left);
+		long n = 0;
+		for (ByteBuffer b : left) {
+			if (b != STOP_WRITING) {
+				n++;
+			}
+		}
+		if (n > 0) {
+			MqttStat.discardedMessages.add(n);
 		}
 	}
 

@@ -62,7 +62,45 @@ public abstract class MqttUtil {
 		return ret;
 	}
 
+	/**
+	 * The largest body a four-byte remaining length can express — MQTT 3.1.1
+	 * §2.2.3, and the protocol's own ceiling on a packet.
+	 */
+	public static final long MAX_REMAINING_LENGTH = 268435455L;
+
+	/**
+	 * Room for `needed` more bytes at `length`, growing the array if there is
+	 * not any.
+	 *
+	 * The encoders build a packet body into a scratch array with
+	 * bytes[length++]. That array was a fixed MESSAGE_LENGTH — 4096 — with no
+	 * bounds check anywhere, so anything bigger threw
+	 * ArrayIndexOutOfBoundsException out of encode: a payload over 4 KB, a
+	 * SUBSCRIBE with enough filters, a SUBACK answering one. For a broker
+	 * forwarding a publish that exception is caught upstream, which made it
+	 * silent data loss rather than a crash. MESSAGE_LENGTH is now where these
+	 * arrays start, not where they stop.
+	 */
+	public static byte[] fit(byte[] bytes, int length, int needed) {
+		int required = length + needed;
+		if (required <= bytes.length) {
+			return bytes;
+		}
+		return Arrays.copyOf(bytes, Math.max(required, bytes.length * 2));
+	}
+
+	/**
+	 * @throws IllegalArgumentException past MAX_REMAINING_LENGTH. The loop
+	 *         below stops at four bytes, so an over-long packet would otherwise
+	 *         be handed a truncated length — and a wrong remaining length does
+	 *         not corrupt one packet, it desynchronises every packet after it
+	 *         on that connection.
+	 */
 	public static byte[] calculateLength(long number) {
+		if (number > MAX_REMAINING_LENGTH) {
+			throw new IllegalArgumentException(
+					"packet body of " + number + " bytes exceeds the MQTT maximum of " + MAX_REMAINING_LENGTH);
+		}
 		int numBytes = 0;
 		long no = number;
 		ByteArrayOutputStream bos = new ByteArrayOutputStream();
@@ -91,6 +129,21 @@ public abstract class MqttUtil {
 		return ret;
 	}
 	
+	/**
+	 * How many bytes decodeUTF8 consumed at `offset`: the two-byte length
+	 * prefix plus the bytes it counts.
+	 *
+	 * Advance past a decoded string with this and never with String.length().
+	 * MQTT strings are UTF-8 (3.1.1 §1.5.3), so the character count and the
+	 * byte count are the same only for ASCII — and every decoder here used the
+	 * character count. For a topic like "café/über" that left the offset two
+	 * bytes short and put the tail of the topic on the front of the payload,
+	 * silently, for anyone whose topics are not plain ASCII.
+	 */
+	public static int encodedUTF8Length(byte[] input, int offset) {
+		return 2 + twoBytesToInt(input[offset], input[1 + offset]);
+	}
+
 	public static int twoBytesToInt(byte b1, byte b2) {
 		//log("hoog: " + b1 + "  " +  (b1<<8) + "  laag: " + b2);
 		int ret = Short.toUnsignedInt((short) (b1<<8)) + Short.toUnsignedInt((short) (b2 & 0xFF));

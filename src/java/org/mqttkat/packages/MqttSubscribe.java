@@ -2,7 +2,9 @@ package org.mqttkat.packages;
 
 import static clojure.lang.Keyword.intern;
 import static org.mqttkat.MqttUtil.calculateLength;
+import static org.mqttkat.MqttUtil.fit;
 import static org.mqttkat.MqttUtil.decodeUTF8;
+import static org.mqttkat.MqttUtil.encodedUTF8Length;
 import static org.mqttkat.MqttUtil.twoBytesToLong;
 
 import java.io.IOException;
@@ -37,7 +39,7 @@ public class MqttSubscribe extends GenericMessage{
 			String topic = decodeUTF8(data, offset);
 			//System.out.println("topic: " + topic);
 			topicMap.put(TOPIC_FILTER, topic);
-			offset += topic.length() + 2;
+			offset += encodedUTF8Length(data, offset);
 			//System.out.println(offset);
 			topicMap.put(QOS, data[offset++]);
 			//System.out.println(offset + " " +  data.length + " " + topicMap.toString());
@@ -62,14 +64,14 @@ public class MqttSubscribe extends GenericMessage{
 		//log("encode SUBSCRIBE");
 		int length = 0;
 
+		// MESSAGE_LENGTH is the starting size; fit() grows past it.
 		byte[] bytes = new byte[MESSAGE_LENGTH];
-		ByteBuffer buffer = ByteBuffer.allocate(MESSAGE_LENGTH);
 		byte[] bType = {(byte) (MESSAGE_SUBSCRIBE << 4) | 0x02};
 		
 		//String q1 = String.format("%8s", Integer.toBinaryString(bType[0] & 0xf2)).replace(' ', '0');
 		//System.out.println("packet id 2: " + q1);
-		buffer.put((byte) (bType[0] & 0xf2));
-		
+		byte firstByte = (byte) (bType[0] & 0xf2);
+
 		Long packetIdentifier = (Long) message.get(PACKET_IDENTIFIER);
 		bytes[length++] = (byte) ((packetIdentifier >> 8) & 0xFF);
 		bytes[length++] = (byte) ((packetIdentifier >> 0) & 0xFF);
@@ -89,6 +91,7 @@ public class MqttSubscribe extends GenericMessage{
 			@SuppressWarnings("unchecked")
 			Map<Keyword, ?> topicMap = (Map<Keyword, ?>) it.next();
 			byte[] topic = ((String) topicMap.get(TOPIC_FILTER)).getBytes("UTF-8");
+			bytes = fit(bytes, length, 3 + topic.length);
 			bytes[length++] = (byte) ((topic.length >>> 8) & 0xFF);
 			bytes[length++] = (byte) (topic.length & 0xFF);
 			for(int i = 0; i < topic.length; i++) {
@@ -103,7 +106,10 @@ public class MqttSubscribe extends GenericMessage{
 		//}
 		//System.out.print("\n");
 
-		buffer.put(calculateLength(length));
+		byte[] remaining = calculateLength(length);
+		ByteBuffer buffer = ByteBuffer.allocate(1 + remaining.length + length);
+		buffer.put(firstByte);
+		buffer.put(remaining);
 		buffer.put(bytes, 0, length);
 		buffer.flip();
 		//log("length: " + length);

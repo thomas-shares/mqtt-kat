@@ -2,7 +2,9 @@ package org.mqttkat.packages;
 
 import static clojure.lang.Keyword.intern;
 import static org.mqttkat.MqttUtil.calculateLength;
+import static org.mqttkat.MqttUtil.fit;
 import static org.mqttkat.MqttUtil.decodeUTF8;
+import static org.mqttkat.MqttUtil.encodedUTF8Length;
 import static org.mqttkat.MqttUtil.twoBytesToLong;
 
 import java.io.IOException;
@@ -35,7 +37,7 @@ public class MqttUnsubscribe extends GenericMessage{
 
 		while(offset < data.length) {
 			String topic = decodeUTF8(data, offset);
-			offset += topic.length() + 2;
+			offset += encodedUTF8Length(data, offset);
 			vector = vector.cons(topic);
 		}
 
@@ -47,10 +49,10 @@ public class MqttUnsubscribe extends GenericMessage{
 	
 	public static ByteBuffer encode(Map<Keyword, ?> message) throws UnsupportedEncodingException {
 		int length = 0;
+		// MESSAGE_LENGTH is the starting size; fit() grows past it.
 		byte[] bytes = new byte[MESSAGE_LENGTH];
-		ByteBuffer buffer = ByteBuffer.allocate(MESSAGE_LENGTH);
 		byte[] bType = {(byte) (MESSAGE_UNSUBSCRIBE << 4) | 0x02};
-		buffer.put((byte) (bType[0] & 0xf2));
+		byte firstByte = (byte) (bType[0] & 0xf2);
 		
 		
 		Long packetIdentifierL = (Long) message.get(PACKET_IDENTIFIER);
@@ -62,6 +64,7 @@ public class MqttUnsubscribe extends GenericMessage{
 		Iterator<?> it =  vector.iterator();
 		while(it.hasNext()) {
 			byte[] topic = ((String) it.next()).getBytes("UTF-8");
+			bytes = fit(bytes, length, 2 + topic.length);
 			bytes[length++] = (byte) ((topic.length >>> 8) & 0xFF);
 			bytes[length++] = (byte) (topic.length & 0xFF);
 			for(int i = 0; i < topic.length; i++) {
@@ -69,7 +72,10 @@ public class MqttUnsubscribe extends GenericMessage{
 			}
 		}
 		
-		buffer.put(calculateLength(length));
+		byte[] remaining = calculateLength(length);
+		ByteBuffer buffer = ByteBuffer.allocate(1 + remaining.length + length);
+		buffer.put(firstByte);
+		buffer.put(remaining);
 		buffer.put(bytes, 0, length);
 		//log("buffers.size: " + buffers.size());
 		// for(int i=0; i < length ;i++ ){

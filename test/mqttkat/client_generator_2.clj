@@ -13,7 +13,7 @@
             [clojure.spec.alpha :as s]
             [clojure.spec.gen.alpha :as gen]
             [clojure.core.async :as async])
-  (:import  [java.util.concurrent.atomic AtomicLong]
+  (:import  [java.util.concurrent.atomic LongAdder]
             [org.mqttkat MqttHandler MqttStat]
             [org.mqttkat.client MqttClient]))
 
@@ -69,10 +69,10 @@
             (fmt (ms (:sd s))) (fmt (ms (:p95 s))) (fmt (ms (:p99 s))) (fmt (ms (:max s))))))
 
 (defn- counters []
-  {:sent           (.get ^AtomicLong MqttStat/sentMessages)
-   :received       (.get ^AtomicLong MqttStat/receivedMessages)
-   :sent-bytes     (.get ^AtomicLong MqttStat/sentBytes)
-   :received-bytes (.get ^AtomicLong MqttStat/receivedBytes)})
+  {:sent           (.sum ^LongAdder MqttStat/sentMessages)
+   :received       (.sum ^LongAdder MqttStat/receivedMessages)
+   :sent-bytes     (.sum ^LongAdder MqttStat/sentBytes)
+   :received-bytes (.sum ^LongAdder MqttStat/receivedBytes)})
 
 (defn- report!
   "Log the run's statistics. `before` is a counters snapshot taken at the start:
@@ -110,14 +110,14 @@
 
 (def model
   {:graph
-    {:connect [;{:disconnect {:weight 1}}
-               ;;{:publish {:weight 1}}
-               {:connack {:weight 1}}]
-     :connack [{:subscribe {:weight 1}}]
-     :subscribe [{:publish {:weight 1}}]
-     :publish [{:publish {:weight 2}}]
+   {:connect [;{:disconnect {:weight 1}}
+              ;;{:publish {:weight 1}}
+              {:connack {:weight 1}}]
+    :connack [{:subscribe {:weight 1}}]
+    :subscribe [{:publish {:weight 1}}]
+    :publish [{:publish {:weight 2}}]
               ;{:disconnect {:weight 1}}]
-     :disconnect [{:connect {:weight 1}}]}})
+    :disconnect [{:connect {:weight 1}}]}})
 
 (defn client []
   (client/client tu/host tu/port (MqttHandler. ^clojure.lang.IFn handler-fn 2)))
@@ -188,7 +188,7 @@
     (client/pubrel client packet-identifier)
     (let [first-message (recv! client)
           second-message (recv! client)]
-      (log/debug  "R "first-message)
+      (log/debug  "R " first-message)
       (log/debug  "R " second-message)
       (if (= :PUBCOMP (:packet-type first-message))
         (do (let [packet-identifier (:packet-identifier first-message)]
@@ -202,8 +202,8 @@
 
 (defn filter-to-topic [filter]
   (-> filter
-    (clojure.string/replace  #"\+" (gen/generate (s/gen (s/and string? #(<= 2 (count %))))))
-    (clojure.string/replace  #"#" (gen/generate (s/gen (s/and string? #(<= 2 (count %))))))))
+      (clojure.string/replace  #"\+" (gen/generate (s/gen (s/and string? #(<= 2 (count %))))))
+      (clojure.string/replace  #"#" (gen/generate (s/gen (s/and string? #(<= 2 (count %))))))))
 
 (defn publish [client]
   ;; client/subscribe filters the generated topic list, and can filter it down
@@ -231,7 +231,7 @@
 
 (defn subscribe [client]
   (let [topic-filter (client/subscribe ^MqttClient client)
-        topics (map #(:topic-filter % ) (:topics topic-filter))
+        topics (map #(:topic-filter %) (:topics topic-filter))
         c (count topics)]
     (swap! subscribe-topics (partial apply conj) topics)
     (let [msg (recv! client)
@@ -241,19 +241,19 @@
 
 
 (deftest ^:performance simulation
-    ;; We create an event stream (or chain of state transitions, if you will) by
-    ;; calling Causatum's event-stream function with our model and an initial seed
-    ;; state.
-   (let [start-time (System/currentTimeMillis)
-         _ (reset! timings [])
-         before (counters)
-         events 1000
-         client-numbers 1
-         client (client)]
+  ;; We create an event stream (or chain of state transitions, if you will) by
+  ;; calling Causatum's event-stream function with our model and an initial seed
+  ;; state.
+  (let [start-time (System/currentTimeMillis)
+        _ (reset! timings [])
+        before (counters)
+        events 10000
+        client-numbers 1
+        client (client)]
          ;clients (take client-numbers (repeatedly (client)))
          ;streams (take client-numbers (repeatedly (es/event-stream model [{:rtime 0, :state :connect}])))]
-     (doseq [{state :state} (take events (es/event-stream model [{:rtime 0, :state :connect}]))]
-       (log/trace "State:" state)
-       ;;(Thread/sleep 10)
-       (({:connect connect, :publish publish, :disconnect disconnect, :connack connack :subscribe subscribe} state) client))
-     (report! events (- (System/currentTimeMillis) start-time) before)))
+    (doseq [{state :state} (take events (es/event-stream model [{:rtime 0, :state :connect}]))]
+      (log/trace "State:" state)
+      ;;(Thread/sleep 10)
+      (({:connect connect, :publish publish, :disconnect disconnect, :connack connack :subscribe subscribe} state) client))
+    (report! events (- (System/currentTimeMillis) start-time) before)))

@@ -94,6 +94,226 @@ subscribing, so they test retention rather than scheduling. The underlying
 ordering bug is still there and wants a fix of its own: dispatch needs to be
 serialised per connection, not per packet.
 
+### The load test that looked like a broker problem
+
+`mqttloader` against the broker, 150 publishers and 150 subscribers all on one
+topic, 2000 messages each, QoS 0 both ways:
+
+```
+Number of received messages: 1121529
+Maximum latency [ms]: 45657.837
+Average latency [ms]: 9817.411
+```
+
+Ten seconds of average latency looked bad enough to be a regression. It is
+arithmetic. 150 publishers × 2000 messages is 300k publishes, and every one
+fans out to 150 subscribers: **45 million deliveries**, about 10 GB on the
+wire, asked for inside a 60-second window. The 2020 run in the entry below was
+15×15×200 — 45,000 deliveries. This config asks for a thousand times the work.
+
+What it is not:
+
+* **Not GC.** 69 young collections and 5.4s of GC across two whole runs. The
+  heap grew to 7.4 GB but G1 never struggled, and a forced full collection on
+  an idle broker leaves a 12 MB live set — nothing leaks.
+* **Not a starved write path.** Thread dumps in the collapse window put ~149 of
+  the 150 subscriber writer threads in `parkNanos` — the `Thread.sleep(1)` in
+  `writeFully` — and one or two in `write0`. That reads like a broker that
+  cannot write, until you look at the sockets:
+
+```
+sockets: 300   nonzero Send-Q: 97   total: 118,803,938   max: 3,073,634
+```
+
+97 subscriber sockets each holding 2-3 MB the client had not read. When the
+send buffer is full there is nothing left for the broker to do.
+
+One conclusion that looked obvious and was wrong: that the 43.8M undelivered
+messages never went out. They did. Once the broker could count writes properly
+(below) it turned out to have written **all 45,000,761 packets at ~910k/s**,
+finishing three seconds before mqttloader disconnected its subscribers. TCP
+flow control means `write()` only returns non-zero if the peer's kernel took
+the bytes, so those 10 GB genuinely crossed the socket. mqttloader read them
+and surfaced 2.4% through Paho callbacks before its window closed.
+
+At this fan-out the benchmark measures the load generator.
+
+### Counting what the broker promises, not only what it accepts
+
+`MqttStat.sentMessages` was incremented in `sendMessageBuffer` immediately
+after `connection.write(...)`, which is an `offer()` onto an unbounded queue.
+Nothing had touched a socket. The broker's own stats would have reported 45M
+"sent" while a million arrived — exactly the kind of number that sends you
+hunting in the wrong place.
+
+The outbound side is counted in four places now, because a packet the broker
+accepts is not a packet the client receives:
+
+| counter | meaning |
+|---|---|
+| `sentMessages` | queued for a client; nothing on a socket yet |
+| `writtenMessages` | written to the socket, in full |
+| `discardedMessages` | queued, then abandoned when the connection died |
+| `droppedMessages` | never queued: refused because the client is behind |
+
+`sent — written — discarded` is the live backlog. `dropped` is deliberately
+separate: it is the design working, whereas a non-zero `discarded` is a bug.
+
+`mqttkat.util/info` reports all of it, on real elapsed time rather than the
+nominal ten seconds, and warns when the backlog *grows* over an interval -
+threshold-free, because growth is itself the failure condition. It counts
+connected clients apart from parked `clean-session? false` sessions, which live
+in the same `*clients*` map and made the old count only ever go up.
+
+The first thing it showed was a number that had never been visible:
+
+```
+queued/s 2,318,397 / received/s 15,467.5 = 149.9
+```
+
+The fan-out ratio is exactly 150, as it should be — but the broker was only
+ingesting **15,000 publishes/second**, while mqttloader believed it had
+published 300k in three seconds. The gap sat in kernel buffers and in
+`Connection.inbound`. And the ratio that mattered:
+
+| phase | queued/s | written/s |
+|---|---|---|
+| burst, readers busy | 2,318,397 | 438,502 |
+| after publishing stops | — | 1,099,313 |
+
+The broker wrote 2.5× faster with *less* work to do. It was never
+write-limited. Fan-out runs inline on the publisher's reader thread, so 150
+reader threads enqueueing at 2.3M/s compete with 150 writer threads for 23
+carriers — and the readers always win, because they never block. Nothing pushed
+back, so the broker spent its CPU accepting work instead of doing it, and built
+a 31-million-packet promise it then took 30 seconds to honour.
+
+### Back-pressure, and LongAdder
+
+Two changes, both falling straight out of that.
+
+**LongAdder.** Every `MqttStat` counter is incremented once per packet per
+subscriber: a 150-way fan-out of 300k publishes is 90M increments from 150
+threads, a CAS fight over two cache lines. `LongAdder` spreads it over
+per-thread cells and pays only on the read, once per stats interval. The 15k/s
+ingest ceiling was real rather than an artifact of the measurement — it
+doubled.
+
+**A bounded outbound queue.** `Connection` refuses QoS 0 publishes past
+`maxQueued` (default 10,000, `-Dmqttkat.maxQueuedMessages`, 0 for the old
+unbounded behaviour). The constraint that shapes the design: **only QoS 0 may
+be dropped.** MQTT 3.1.1 §4.3.1 makes it at-most-once, so dropping degrades a
+subscriber's feed; dropping a CONNACK, SUBACK, PUBACK or a QoS 1/2 PUBLISH
+breaks the protocol instead. QoS 0 fan-out goes through its own
+`send-buffer-droppable`; everything else is queued unconditionally.
+
+One detail worth keeping: the drop check happens *before* `buffer.duplicate()`.
+Duplicating and then discarding was 40M ByteBuffers of pure garbage, and most
+of the GC.
+
+| | unbounded | bounded @ 10k |
+|---|---|---|
+| publish ingest | ~15,000/s | 30,003/s |
+| subscriber throughput | 19,887/s | 98,904/s |
+| average latency | 12,783 ms | 2,645 ms |
+| max latency | 53,264 ms | 7,839 ms |
+| peak backlog | 32,279,864 | 0 |
+| GC time | ~2.7 s | 0.65 s |
+
+The backlog never forms now — the fan-out refuses at the limit rather than
+queueing and draining later. The trade is honest: mqttloader counts 791,228
+messages against 1,093,785, so ~28% fewer delivered for 5× the throughput, a
+fifth of the latency and a twentieth of the memory. The 40.5M drops were QoS 0
+publishes to subscribers that were never going to consume them.
+
+`backpressure_test.clj` covers it: a raw socket that subscribes and then never
+reads, plus enough volume to overrun the broker's ~2.5 MB socket send buffer.
+Small messages never get there — 2000 of them are 70 KB and every write
+succeeds, which is why the first version of the test found nothing.
+
+### The 4 KB ceiling on every packet the broker could send
+
+Every encoder built its packet body into `byte[] bytes = new byte[MESSAGE_LENGTH]`
+— 4096 — and wrote into it with `bytes[length++]`, with no bounds check
+anywhere. Anything larger threw `ArrayIndexOutOfBoundsException` out of
+`encode`. Five of them did it: `MqttPublish`, `MqttConnect`, `MqttSubscribe`,
+`MqttUnsubscribe`, `MqttSubAck`.
+
+For `MqttPublish` that is worse than a crash. `Connection.dispatch` catches
+Throwable, so a publish over 4 KB was logged and then vanished: the publisher
+was told nothing, the subscriber simply never heard, and the broker carried on.
+MQTT's own limit is the 268,435,455 bytes a four-byte remaining length can
+express, so we were three orders of magnitude short of the spec and silent
+about it.
+
+`MESSAGE_LENGTH` is now where those arrays *start* rather than where they stop.
+`MqttUtil.fit(bytes, length, needed)` grows the scratch array when a
+variable-length field will not fit, and each encoder allocates its final
+`ByteBuffer` at the end, from the length it actually produced, instead of
+guessing 4096 up front.
+
+`calculateLength` now throws past `MAX_REMAINING_LENGTH` instead of silently
+returning a truncated varint. That mattered more than it looks: a wrong
+remaining length does not corrupt one packet, it desynchronises every packet
+after it on that connection.
+
+`flow-test` covers 4096, 4097, 16384 and 100000-byte payloads round-tripping
+intact — 4096/4097 for the boundary, 100000 because it needs a three-byte
+remaining length.
+
+### The broker only really worked in English
+
+Found while testing the encoder fix. Every decoder advanced past a decoded
+string with `offset += someString.length() + 2` — the *character* count of the
+String it had just built, not the UTF-8 byte count it had actually read off the
+wire. MQTT strings are UTF-8 (3.1.1 §1.5.3), so those two numbers agree only
+for ASCII.
+
+Eight sites had it: the topic in `MqttPublish`, the filters in `MqttSubscribe`
+and `MqttUnsubscribe`, and the protocol name, client id, will topic, will
+message and user name in `MqttConnect`. For anything outside ASCII the offset
+landed short and the tail of the string was handed to whatever came next —
+the front of the payload, the QoS byte of the next filter, the protocol
+version after the client id:
+
+```
+topic=plain/ascii   chars=11 utf8bytes=11  ->  payload="PAYLOAD-START"        OK
+topic=café/über     chars=9  utf8bytes=11  ->  payload="erPAYLOAD-START"      CORRUPT
+topic=日本語/topic    chars=9  utf8bytes=15  ->  payload="/topicPAYLOAD-START"  CORRUPT
+```
+
+Silent, and only for people whose topics are not English — which is the worst
+shape a bug can have. It also compounds: a publish is decoded once by the
+broker and once again by the subscribing client, so the corruption arrives
+doubled.
+
+`MqttUtil.encodedUTF8Length(input, offset)` now reports what `decodeUTF8`
+consumed — the two-byte prefix plus the bytes it counts — and all eight sites
+use it. The point of the helper is that it is the only way to advance, rather
+than eight arithmetic expressions each of which has to be right.
+
+`flow-test` covers accented, Japanese and emoji topics end to end, plus a
+SUBSCRIBE carrying several UTF-8 filters, where the per-topic error compounds
+inside the decode loop. Reverting the one line in `MqttPublish` makes the ASCII
+case pass and the other three fail, which is the check worth having.
+
+### Found on the way, not fixed
+
+* **A keep-alive timer fires against a parked session.** `keep-alive-test` logs
+  a `ClassCastException: String cannot be cast to SelectionKey` out of
+  `check-timer` — a timer outliving the re-keying in `remove-client!`. Caught
+  and logged, so harmless today.
+* **`writeFully` still polls.** `Thread.sleep(1)` against a non-blocking
+  channel is the wrong shape with virtual threads; a blocking channel parks on
+  the JDK poller instead, with no 1 ms granularity. It was not the bottleneck,
+  so it is still there.
+* **`Connection.inbound` is unbounded too.** The selector thread offers chunks
+  with no limit, so a slow reader means bytes pile up in heap rather than
+  applying TCP back-pressure to the publisher. Only 67 MB at this scale.
+* **53 of 150 subscriber sockets had an empty Send-Q** while the rest were
+  saturated. With uniform fan-out to one topic they should look alike. Never
+  explained.
+
 ## 20201014
 
 Thanks to jocatelo I picked this project up again. He has provided me with quite a few PR's and that got me going again as well. Thinks have been cleaned up and several bugs removed and all the tests now pass!!! Woohoooo. I also just ran an MQTT load generator aginst the server:

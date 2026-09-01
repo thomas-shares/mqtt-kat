@@ -176,6 +176,78 @@
         (is (= "an explicit payload" (tu/payload-str msg))))
       (tu/close! c))))
 
+(deftest publish-larger-than-the-encoder-scratch-buffer
+  (testing "a payload well past 4 KB survives the round trip intact"
+    ;; The encoders built every packet into a fixed 4096-byte array with no
+    ;; bounds check, so anything larger threw ArrayIndexOutOfBoundsException
+    ;; out of MqttPublish/encode. On the broker that exception is caught by
+    ;; Connection.dispatch, which made it silent data loss: the publisher was
+    ;; told nothing and the subscriber simply never heard. MQTT allows a body
+    ;; of 268,435,455 bytes; 100 KB is enough to prove the array grows and
+    ;; that the two- and three-byte remaining lengths encode correctly.
+    (doseq [size [4096 4097 16384 100000]]
+      (let [topic   (tu/topic "big")
+            payload (apply str (repeat size \p))
+            {:keys [client ch] :as c} (tu/connect! "big")]
+        (client/send-message client (subscribe-msg topic 0 1))
+        (tu/expect! ch :SUBACK)
+        (client/publish client topic payload 0)
+        (let [msg (tu/expect-eventually! ch :PUBLISH 5000)]
+          (is (= topic (:topic msg)))
+          (is (= size (count (tu/payload-str msg)))
+              (str "payload of " size " bytes came back truncated"))
+          (is (= payload (tu/payload-str msg))
+              (str "payload of " size " bytes came back altered")))
+        (tu/close! c)))))
+
+(deftest non-ascii-topics-and-client-ids
+  (testing "UTF-8 topics, filters and client ids survive decoding"
+    ;; MQTT strings are UTF-8 (3.1.1 §1.5.3), but every decoder advanced past
+    ;; one with String.length() — the character count, not the byte count it
+    ;; had actually read. For anything outside ASCII the offset landed short
+    ;; and the tail of the string was handed to whatever came next: the front
+    ;; of a payload, the QoS byte of the next topic filter, the protocol
+    ;; version after the client id. Silent, and only for people whose topics
+    ;; are not English.
+    (doseq [[label topic] [["ascii"    "plain/ascii"]
+                           ["accents"  "café/über"]
+                           ["japanese" "日本語/トピック"]
+                           ["emoji"    "boot/⛵/status"]]]
+      (testing label
+        (let [t       (str topic "/" (tu/client-id "u8"))
+              payload "the payload must arrive unchanged"
+              {:keys [client ch] :as c} (tu/connect! (str "u8-" label))]
+          (client/send-message client (subscribe-msg t 0 1))
+          (tu/expect! ch :SUBACK)
+          (client/publish client t payload 0)
+          (let [msg (tu/expect-eventually! ch :PUBLISH 2000)]
+            (is (= t (:topic msg)) "the topic came back altered")
+            (is (= payload (tu/payload-str msg))
+                "the payload was corrupted by the topic offset"))
+          (tu/close! c))))))
+
+(deftest non-ascii-multi-topic-subscribe
+  (testing "a SUBSCRIBE carrying several UTF-8 filters decodes every one"
+    ;; The per-topic offset error compounds inside the SUBSCRIBE loop: one
+    ;; short advance and the QoS byte read for the next filter is really a
+    ;; topic byte, so everything after the first non-ASCII filter is wrong.
+    (let [a  (str "ü/" (tu/client-id "m1"))
+          b  (str "日本/" (tu/client-id "m2"))
+          c' (str "ascii/" (tu/client-id "m3"))
+          {:keys [client ch] :as c} (tu/connect! "u8-multi")]
+      (client/send-message client
+                           {:packet-type :SUBSCRIBE :packet-identifier 7
+                            :topics [{:qos 0 :topic-filter a}
+                                     {:qos 0 :topic-filter b}
+                                     {:qos 0 :topic-filter c'}]})
+      (tu/expect! ch :SUBACK)
+      (doseq [t [a b c']]
+        (client/publish client t (str "payload for " t) 0)
+        (let [msg (tu/expect-eventually! ch :PUBLISH 2000)]
+          (is (= t (:topic msg)))
+          (is (= (str "payload for " t) (tu/payload-str msg)))))
+      (tu/close! c))))
+
 (deftest qos-1-test
   (testing "an unacknowledged QoS 1 message is redelivered on the next session"
     (let [id      (tu/client-id "qos-1")

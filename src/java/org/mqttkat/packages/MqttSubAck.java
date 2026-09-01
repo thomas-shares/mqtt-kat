@@ -2,6 +2,7 @@ package org.mqttkat.packages;
 
 import static clojure.lang.Keyword.intern;
 import static org.mqttkat.MqttUtil.calculateLength;
+import static org.mqttkat.MqttUtil.fit;
 import static org.mqttkat.MqttUtil.twoBytesToLong;
 
 import java.io.IOException;
@@ -39,10 +40,9 @@ public class MqttSubAck extends GenericMessage {
 
 	public static ByteBuffer encode(Map<Keyword, ?> message) {
 		int length = 0;
+		// MESSAGE_LENGTH is the starting size; fit() grows past it.
 		byte[] bytes = new byte[MESSAGE_LENGTH];
-		
-		ByteBuffer buffer = ByteBuffer.allocate(MESSAGE_LENGTH);
-		buffer.put((byte) ((MESSAGE_SUBACK << 4) & 0xf2));
+		byte firstByte = (byte) ((MESSAGE_SUBACK << 4) & 0xf2);
 
 		
 		Long packetIdentifierL = (Long) message.get(PACKET_IDENTIFIER);
@@ -55,11 +55,15 @@ public class MqttSubAck extends GenericMessage {
 		Iterator<?> it =  vector.iterator();
 		while(it.hasNext()) {
 			//Byte answer = Byte.parseByte(((Long) it.next()).toString());
+			bytes = fit(bytes, length, 1);
 			bytes[length++] = ((Long) it.next()).byteValue();
 
 		}
 
-		buffer.put(calculateLength(length));
+		byte[] remaining = calculateLength(length);
+		ByteBuffer buffer = ByteBuffer.allocate(1 + remaining.length + length);
+		buffer.put(firstByte);
+		buffer.put(remaining);
 		buffer.put(bytes, 0, length);
 		//log("buffers.size: " + buffers.size());
 		buffer.flip();
