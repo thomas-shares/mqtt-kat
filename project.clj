@@ -27,7 +27,11 @@
   ["-Dclojure.compiler.disable-locals-clearing=true"
    "-Xms128m" "-Xmx4G" "-Djdk.attach.allowAttachSelf" "-XX:+UnlockDiagnosticVMOptions" "-XX:+DebugNonSafepoints"]
 
-  :javac-options ["-Xlint:unchecked" "-source" "17" "-target" "17" "-g"]
+  ;; --release 17 rather than -source/-target: it pins the platform API too, so
+  ;; javac can prove nothing newer than 17 leaks in (and stops warning that it
+  ;; cannot). -proc:none because log4j-core ships an annotation processor that
+  ;; javac would otherwise discover and run over code that has no log4j plugins.
+  :javac-options ["-Xlint:unchecked" "--release" "17" "-g" "-proc:none"]
   :java-source-paths ["src/java"]
   :test-paths ["test"]
   ;; `lein test` runs the unit tests only. The load simulations in
