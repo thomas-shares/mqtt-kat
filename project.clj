@@ -8,17 +8,16 @@
   :global-vars {*warn-on-reflection* true}
 
   :dependencies
-  [[org.clojure/clojure "1.12.0"]
-   [org.clojure/core.async "1.8.741"]
-   [org.clojure/spec.alpha "0.5.238"]
-   [org.clojure/core.specs.alpha "0.4.74"]
-   [org.clojure/test.check "1.1.1"]
+  [[org.clojure/clojure "1.12.5"]
+   [org.clojure/core.async "1.9.865"]
+   [org.clojure/spec.alpha "0.6.249"]
+   [org.clojure/core.specs.alpha "0.5.81"]
+   [org.clojure/test.check "1.1.3"]
    [org.craigandera/causatum "0.3.0"]
-   [clojurewerkz/triennium "1.0.0-beta2" ]
+   [clojurewerkz/triennium "1.0.0-beta2"]
    [overtone/at-at "1.4.65"]
    ;;[djblue/portal "0.6.1"]
-   [io.zalky/cues  "0.2.1"]
-   ]
+   [io.zalky/cues  "0.2.1"]]
 
   :jvm-opts
   ["-Dclojure.compiler.disable-locals-clearing=true"
@@ -32,10 +31,8 @@
   :jar-exclusions [#"^java.*"] ; exclude the java directory in source path
   :main mqttkat.server
   :aot [mqttkat.server]
-  :profiles 
-    {:dev 
-      {:dependencies [[djblue/portal "0.58.5"]
-                      [com.clojure-goes-fast/clj-async-profiler "1.6.1"]
-                      [virgil "0.4.0"]]}}
-  
-  )
+  :profiles
+  {:dev
+   {:dependencies [[djblue/portal "0.67.2"]
+                   [com.clojure-goes-fast/clj-async-profiler "1.8.0"]
+                   [virgil "0.4.0"]]}})
