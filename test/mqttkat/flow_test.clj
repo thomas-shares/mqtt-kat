@@ -160,6 +160,21 @@
           (is (= payload (tu/payload-str msg))))
         (tu/close! b)))))
 
+(deftest publish-with-an-explicit-payload
+  (testing "client/publish delivers a caller-supplied payload"
+    ;; Also keeps the four-argument arity exercised: it spent its life
+    ;; uncalled, and uncalled means unverified.
+    (let [topic (tu/topic "explicit")
+          {:keys [client ch] :as c} (tu/connect! "explicit")]
+      (client/send-message client (subscribe-msg topic 0 1))
+      (tu/expect! ch :SUBACK)
+      (client/publish client topic "an explicit payload" 0)
+      (let [msg (tu/expect-eventually! ch :PUBLISH)]
+        (is (= topic (:topic msg)))
+        (is (= 0 (:qos msg)))
+        (is (= "an explicit payload" (tu/payload-str msg))))
+      (tu/close! c))))
+
 (deftest qos-1-test
   (testing "an unacknowledged QoS 1 message is redelivered on the next session"
     (let [id      (tu/client-id "qos-1")

@@ -19,7 +19,7 @@
   ([] (client "localhost" 1883))
   ([host port] (client host port (MqttHandler. ^clojure.lang.IFn handler-fn 2)))
   ([host port handler]
-   client (MqttClient. ^String host ^int port 2 handler ^Object (async/chan 1))))
+   (MqttClient. ^String host ^int port 2 handler ^Object (async/chan 1))))
 
 (defn connect
   "Connect `client` with a generated CONNECT.
@@ -53,18 +53,37 @@
          buf (MqttPublish/encode map)]
      (.sendMessage ^MqttClient client buf)
      (select-keys map [:qos :payload :packet-identifier])))
-  ([topic msg qos]
-   (let [bufs (MqttPublish/encode {:packet-type :PUBLISH :qos qos :topic topic :payload msg :retain? false :duplicate? false})]
-     (.sendMessage ^MqttClient client bufs))))
+  ;; Takes the client explicitly. It used to be ([topic msg qos], whose body
+  ;; then resolved `client` to this very function var rather than to a
+  ;; connection — a ClassCastException waiting for its first caller.
+  ([client topic msg qos]
+   (let [map {:packet-type :PUBLISH :qos qos :topic topic
+              :payload msg :retain? false :duplicate? false}
+         _   (log/debug "S" map client)
+         buf (MqttPublish/encode map)]
+     (.sendMessage ^MqttClient client buf))))
 
-(defn subscribe [client]
-  (let [map (gen/generate (s/gen :mqtt/subscribe))
-        filtered (filterv #(boolean (re-find #"\w+" (:topic-filter %))) (:topics map))
-        map (assoc map :topics filtered)
-        _ (log/debug "S" map client)
-        buf (MqttSubscribe/encode map)]
-    (.sendMessage ^MqttClient client buf)
-    map))
+(defn- generated-subscribe
+  "A generated SUBSCRIBE with the unusable topic filters — those carrying no
+   word characters — dropped. The list can come back empty."
+  []
+  (let [m (gen/generate (s/gen :mqtt/subscribe))]
+    (assoc m :topics (filterv #(boolean (re-find #"\w+" (:topic-filter %))) (:topics m)))))
+
+(defn subscribe
+  "Send a generated SUBSCRIBE.
+
+   MQTT 3.1.1 §3.8.3 requires at least one topic filter, and the generator can
+   produce a message whose filters are all dropped — an invalid packet, and one
+   that leaves the caller with nothing to publish to. So keep generating until
+   one survives, and fall back to a fixed filter rather than send an empty
+   subscription."
+  [client]
+  (let [msg (or (first (filter (comp seq :topics) (repeatedly 20 generated-subscribe)))
+                (assoc (generated-subscribe) :topics [{:qos 0 :topic-filter "mqtt-kat/fallback"}]))]
+    (log/debug "S" msg client)
+    (.sendMessage ^MqttClient client (MqttSubscribe/encode msg))
+    msg))
 
 (defn pingreq [client]
   (let [map (gen/generate (s/gen :mqtt/pingreq))
