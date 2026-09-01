@@ -60,6 +60,17 @@ public class MqttHandler implements IHandler {
 		}
 	}
 
+	public void handleInOrder(IPersistentMap incoming, Object asyncChannel) {
+		if( incoming == null ) {
+			return;
+		}
+		try {
+			handler.invoke(incoming, asyncChannel);
+		} catch (Throwable e) {
+			log.error("handler invocation failed for {}", incoming, e);
+		}
+	}
+
 	public void handle(IPersistentMap incoming) {
 		if( incoming ==  null ) {
 			return;

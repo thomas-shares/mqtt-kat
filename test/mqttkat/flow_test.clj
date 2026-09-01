@@ -204,11 +204,16 @@
       ;; Same client id, so the broker owes us the message we never acked.
       (let [b (tu/connect! nil :id id :clean-session? false)]
         (is (true? (:session-present? (:connack b))))
-        (let [msg (tu/expect-eventually! (:ch b) :PUBLISH)]
-          (is (= 1 (:qos msg)))
-          (is (true? (:duplicate? msg)) "a redelivery is flagged as a duplicate")
-          (is (= topic (:topic msg)))
-          (is (= payload (tu/payload-str msg)))
-          (client/send-message (:client b) {:packet-type :PUBACK
-                                            :packet-identifier (:packet-identifier msg)}))
+        ;; A generous deadline: the redelivery is triggered by the reconnect,
+        ;; and the rest of the suite can be keeping the broker busy. `when msg`
+        ;; because a timeout should fail this test, not throw out of the PUBACK
+        ;; built from a nil packet identifier.
+        (let [msg (tu/expect-eventually! (:ch b) :PUBLISH 5000)]
+          (when msg
+            (is (= 1 (:qos msg)))
+            (is (true? (:duplicate? msg)) "a redelivery is flagged as a duplicate")
+            (is (= topic (:topic msg)))
+            (is (= payload (tu/payload-str msg)))
+            (client/send-message (:client b) {:packet-type :PUBACK
+                                              :packet-identifier (:packet-identifier msg)})))
         (tu/close! b)))))

@@ -1,338 +1,220 @@
 package org.mqttkat.client;
 
-
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.StandardSocketOptions;
 import java.nio.ByteBuffer;
-import java.nio.channels.SelectionKey;
-import java.nio.channels.Selector;
+import java.nio.channels.ClosedChannelException;
 import java.nio.channels.SocketChannel;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.Map;
-
-import org.mqttkat.IHandler;
-import org.mqttkat.packages.GenericMessage;
-import org.mqttkat.packages.MqttAuthenticate;
-import org.mqttkat.packages.MqttConnAck;
-import org.mqttkat.packages.MqttConnect;
-import org.mqttkat.packages.MqttDisconnect;
-import org.mqttkat.packages.MqttPingReq;
-import org.mqttkat.packages.MqttPingResp;
-import org.mqttkat.packages.MqttPubAck;
-import org.mqttkat.packages.MqttPubComp;
-import org.mqttkat.packages.MqttPubRec;
-import org.mqttkat.packages.MqttPubRel;
-import org.mqttkat.packages.MqttPublish;
-import org.mqttkat.packages.MqttSubAck;
-import org.mqttkat.packages.MqttSubscribe;
-import org.mqttkat.packages.MqttUnSubAck;
-import org.mqttkat.packages.MqttUnsubscribe;
+import java.util.Arrays;
 
 import clojure.lang.IPersistentMap;
+
+import org.mqttkat.IHandler;
+import org.mqttkat.server.MqttDecode;
+
 import static org.mqttkat.MqttStat.*;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-public class MqttClient implements Runnable {
+/**
+ * The test and load-generation client.
+ *
+ * Blocking I/O on a virtual thread, rather than a selector. That removes the
+ * whole apparatus the previous version needed to fake blocking — a selector
+ * loop, a pending-writes map, a pending-changes list, OP_WRITE juggling — and
+ * with it four defects:
+ *
+ *   - responses were decoded straight out of one read, so a packet split
+ *     across two reads was misframed;
+ *   - sendMessage only queued the bytes for the selector thread, so closing
+ *     straight after sending dropped the packet;
+ *   - close() shut the selector and channel while that thread was selecting,
+ *     which surfaced as NullPointerException from AbstractSelectableChannel;
+ *   - received packets were delivered through a thread pool, so a client could
+ *     hand them to its caller out of order.
+ *
+ * A client now costs one virtual thread and no platform threads, so a load
+ * generator can hold as many connections as the broker it is measuring.
+ */
+public class MqttClient {
 
 	private static final Logger log = LoggerFactory.getLogger(MqttClient.class);
-	private volatile boolean running = true;
-	private InetSocketAddress mqttAddr;
-	private SocketChannel socketChannel;
-	private final Selector selector;
+	private static final int READ_BUFFER = 8192;
+	private static final int MAX_REMAINING_LENGTH_BYTES = 4;   // MQTT 3.1.1 §2.2.3
+
+	private final SocketChannel socketChannel;
 	private final IHandler handler;
 	private final Object asyncChannel;
-	private Map<SocketChannel, List> pendingData = new HashMap<SocketChannel, List>();
-	// A list of PendingChange instances
-	private List<ChangeRequest> pendingChanges = new LinkedList<ChangeRequest>();
-	// The buffer into which we'll read data when it's available
-	private ByteBuffer readBuffer = ByteBuffer.allocate(4096);
+	private final Object writeLock = new Object();
 
+	private volatile boolean running = true;
+	private byte[] pending = new byte[0];      // touched only by the reader thread
+
+	/**
+	 * @param threadPoolSize retained for the existing call sites; packets are
+	 *                       delivered on this client's own thread, in order, so
+	 *                       the handler's pool is never used.
+	 */
 	public MqttClient(String host, int port, int threadPoolSize, IHandler handler, Object asyncChannel)
 			throws IOException {
 		log.debug("Creating client...");
 		this.handler = handler;
-
-		mqttAddr = new InetSocketAddress(host, port);
-		socketChannel = SocketChannel.open(mqttAddr);
-		socketChannel.configureBlocking(false);
+		this.asyncChannel = asyncChannel;
+		this.socketChannel = SocketChannel.open(new InetSocketAddress(host, port));
 		// See the matching call in MqttServer.handleAccept: both ends have to
 		// disable Nagle, or the acknowledgement half of the exchange still
 		// waits on the delayed-ACK timer.
-		socketChannel.setOption(StandardSocketOptions.TCP_NODELAY, true);
-
-		this.asyncChannel = asyncChannel;
-
-		selector = Selector.open();
-		// this.executor = new MqttSendExecutor(selector, threadPoolSize);
-
-		Thread t = new Thread(this, "mqtt-client");
-		t.setDaemon(true);
-		t.start();
+		this.socketChannel.setOption(StandardSocketOptions.TCP_NODELAY, true);
+		Thread.ofVirtual().name("mqtt-client-read").start(this::readLoop);
 	}
 
 	public Object getChannel() {
 		return this.asyncChannel;
 	}
 
+	public boolean isConnected() {
+		return this.socketChannel.isOpen();
+	}
+
+	/**
+	 * Write a packet. Synchronous, unlike the version that queued for a
+	 * selector: when this returns the bytes are on the wire, so closing
+	 * immediately afterwards cannot lose them. The lock keeps two callers from
+	 * interleaving.
+	 */
 	public void sendMessage(ByteBuffer buffer) throws IOException {
 		sentMessages.incrementAndGet();
 		sentBytes.addAndGet(buffer.limit());
-
-		// And queue the data we want written
-		synchronized (this.pendingData) {
-			@SuppressWarnings("unchecked")
-			List<ByteBuffer> queue = (List<ByteBuffer>) this.pendingData.get(socketChannel);
-			if (queue == null) {
-				queue = new ArrayList<ByteBuffer>();
-				this.pendingData.put(socketChannel, queue);
-			}
-			queue.add(buffer);
-			// System.out.println( "queue size: " + queue.size());
-		}
-		synchronized (this.pendingChanges) {
-			ChangeRequest changeRequest = new ChangeRequest(socketChannel, ChangeRequest.REGISTER,
-					SelectionKey.OP_WRITE);
-			this.pendingChanges.add(changeRequest);
-		}
-
-		// Finally, wake up our selecting thread so it can make the required changes
-		this.selector.wakeup();
-		// System.out.println("woken up...");
-	}
-
-	public void run() {
-		log.debug("Client loop started running...");
-		while (running) {
-			try {
-
-				synchronized (this.pendingChanges) {
-					Iterator<?> changes = this.pendingChanges.iterator();
-					// System.out.println("changes..." + changes.hasNext());
-					while (changes.hasNext()) {
-						ChangeRequest change = (ChangeRequest) changes.next();
-						switch (change.type) {
-							case ChangeRequest.CHANGEOPS:
-								// System.out.println("OPS...");
-
-								SelectionKey key = change.socket.keyFor(this.selector);
-								key.interestOps(change.ops);
-								break;
-							case ChangeRequest.REGISTER:
-								// System.out.println("REGISTER...");
-								change.socket.register(this.selector, change.ops);
-								break;
-						}
-					}
-					this.pendingChanges.clear();
-				}
-				// Wait for an event one of the registered channels
-				int x = this.selector.select();
-				// System.out.println("selected..." + this.selector.selectedKeys().size() + " "
-				// + x);
-
-				// Iterate over the set of keys for which events are available
-				Iterator<SelectionKey> selectedKeys = this.selector.selectedKeys().iterator();
-				while (selectedKeys.hasNext()) {
-					SelectionKey key = (SelectionKey) selectedKeys.next();
-					// System.out.println("key: " + key.toString());
-
-					selectedKeys.remove();
-
-					if (!key.isValid()) {
-						continue;
-					}
-
-					// Check what event is available and deal with it
-					if (key.isConnectable()) {
-						this.finishConnection(key);
-					} else if (key.isReadable()) {
-						// System.out.println("ready for read...");
-						this.read(key);
-						// System.out.println("done read in loop");
-					} else if (key.isWritable()) {
-						// System.out.println("ready for write...");
-						this.write(key);
-					}
-				}
-			} catch (Exception e) {
-				// System.out.println(e.getMessage());
-				// e.printStackTrace();
-			}
-		}
-	}
-
-	private void read(SelectionKey key) throws IOException {
-		SocketChannel socketChannel = (SocketChannel) key.channel();
-
-		// Clear out our read buffer so it's ready for new data
-		this.readBuffer.clear();
-
-		// Attempt to read off the channel
-		int numRead;
-		try {
-			numRead = socketChannel.read(this.readBuffer);
-		} catch (IOException e) {
-			// The remote forcibly closed the connection, cancel
-			// the selection key and close the channel.
-			key.cancel();
-			socketChannel.close();
-			return;
-		}
-
-		if (numRead == -1) {
-			// Remote entity shut the socket down cleanly. Do the
-			// same from our end and cancel the channel.
-			key.channel().close();
-			key.cancel();
-			return;
-		}
-
-		// Handle the response
-		this.handleResponse(this.readBuffer.array(), numRead);
-	}
-
-	private void handleResponse(byte[] data, int numRead) throws IOException {
-		// Make a correctly sized copy of the data before handing it
-		// to the client this can be multiple MQTT packets...
-
-		int i = 0;
-		// System.out.println("read " + numRead);
-		do {
-
-			// System.out.println("start " + i);
-
-			byte type = (byte) ((data[i] & 0xff) >> 4);
-			byte flags = (byte) (data[i] &= 0x0f);
-
-			byte digit;
-			int multiplier = 1;
-			int msgLength = 0;
-			// System.out.println( "limit: " + buf.limit() + " position: " + buf.position()
-			// + " capacity: " + buf.capacity() );
-			i++;
-			do {
-				digit = data[i++];
-				msgLength += ((digit & 0x7F) * multiplier);
-				multiplier *= 128;
-			} while ((digit & 0x80) != 0);
-			// System.out.println(msgLength);
-
-			byte[] rspData = new byte[msgLength];
-			System.arraycopy(data, i, rspData, 0, msgLength);
-			i += msgLength;
-
-			// for(byte q :rspData) {
-			// System.out.print(q + " ");
-			// }
-			// System.out.println("\n");
-
-			SelectionKey key = null;
-			IPersistentMap incoming = null;
-			if (type == GenericMessage.MESSAGE_CONNECT) {
-				incoming = MqttConnect.decode(key, flags, rspData);
-			} else if (type == GenericMessage.MESSAGE_CONNACK) {
-				incoming = MqttConnAck.decode(key, rspData);
-			} else if (type == GenericMessage.MESSAGE_PUBLISH) {
-				incoming = MqttPublish.decode(key, flags, rspData);
-			} else if (type == GenericMessage.MESSAGE_PUBACK) {
-				incoming = MqttPubAck.decode(key, rspData);
-			} else if (type == GenericMessage.MESSAGE_PUBREC) {
-				incoming = MqttPubRec.decode(key, rspData);
-			} else if (type == GenericMessage.MESSAGE_PUBREL) {
-				incoming = MqttPubRel.decode(key, rspData);
-			} else if (type == GenericMessage.MESSAGE_PUBCOMP) {
-				incoming = MqttPubComp.decode(key, rspData);
-			} else if (type == GenericMessage.MESSAGE_SUBSCRIBE) {
-				incoming = MqttSubscribe.decode(key, rspData);
-			} else if (type == GenericMessage.MESSAGE_SUBACK) {
-				incoming = MqttSubAck.decode(key, rspData);
-			} else if (type == GenericMessage.MESSAGE_UNSUBSCRIBE) {
-				incoming = MqttUnsubscribe.decode(key, rspData);
-			} else if (type == GenericMessage.MESSAGE_UNSUBACK) {
-				incoming = MqttUnSubAck.decode(key, rspData);
-			} else if (type == GenericMessage.MESSAGE_PINGREQ) {
-				incoming = MqttPingReq.decode(key);
-			} else if (type == GenericMessage.MESSAGE_PINGRESP) {
-				incoming = MqttPingResp.decode(key);
-			} else if (type == GenericMessage.MESSAGE_DISCONNECT) {
-				incoming = MqttDisconnect.decode(key);
-			} else if (type == GenericMessage.MESSAGE_AUTHENTICATION) {
-				incoming = MqttAuthenticate.decode(key);
-			} else {
-				log.error("invalid packet type received: {}", type);
-			}
-
-			if (incoming != null) {
-				handler.handle(incoming, this.asyncChannel);
-				receivedMessages.incrementAndGet();
-				receivedBytes.addAndGet(msgLength);
-			}
-		} while (i < numRead);
-	}
-
-	private void write(SelectionKey key) throws IOException {
-		SocketChannel socketChannel = (SocketChannel) key.channel();
-
-		synchronized (this.pendingData) {
-			List<?> queue = (List<?>) this.pendingData.get(socketChannel);
-
-			// Write until there's not more data ...
-			while (!queue.isEmpty()) {
-				ByteBuffer buffer = (ByteBuffer) queue.get(0);
-				// log("buf: " + buf.toString());
+		synchronized (writeLock) {
+			while (buffer.hasRemaining()) {
 				socketChannel.write(buffer);
-				if (buffer.remaining() > 0) {
-					// ... or the socket's buffer fills up
-					break;
-				}
-				queue.remove(0);
-			}
-
-			if (queue.isEmpty()) {
-				// We wrote away all data, so we're no longer interested
-				// in writing on this socket. Switch back to waiting for
-				// data.
-				key.interestOps(SelectionKey.OP_READ);
 			}
 		}
-	}
-
-	private void finishConnection(SelectionKey key) throws IOException {
-		SocketChannel socketChannel = (SocketChannel) key.channel();
-
-		// Finish the connection. If the connection operation failed
-		// this will raise an IOException.
-		try {
-			socketChannel.finishConnect();
-		} catch (IOException e) {
-			// Cancel the channel's registration with our selector
-			log.error("finishing the connection failed", e);
-			key.cancel();
-			return;
-		}
-
-		// Register an interest in writing on this channel
-		key.interestOps(SelectionKey.OP_WRITE);
 	}
 
 	public void close() throws IOException {
+		if (!running) {
+			return;
+		}
 		log.debug("Client stopping...");
+		running = false;
+		socketChannel.close();                 // unblocks the reader
+	}
 
-		if (selector != null && running == true) {
-			selector.close();
+	// ── receiving ────────────────────────────────────────────────────────────
+
+	private void readLoop() {
+		log.debug("Client loop started running...");
+		ByteBuffer buffer = ByteBuffer.allocate(READ_BUFFER);
+		try {
+			while (running) {
+				buffer.clear();
+				int read = socketChannel.read(buffer);
+				if (read < 0) {
+					break;                     // the broker closed the connection
+				}
+				buffer.flip();
+				byte[] chunk = new byte[buffer.remaining()];
+				buffer.get(chunk);
+				append(chunk);
+				frameAndDeliver();
+			}
+		} catch (ClosedChannelException e) {
+			// close() shut the socket underneath us, which is how we stop
+		} catch (IOException e) {
+			if (running) {
+				log.debug("client read failed", e);
+			}
+		} catch (Throwable t) {
+			// The old loop caught Exception and did nothing at all with it,
+			// which is why client-side failures were invisible.
+			log.error("client reader failed", t);
+		} finally {
+			// Whatever ended the loop — EOF, an error, close() — the socket has
+			// to end up shut, or isConnected() goes on claiming a connection
+			// the broker has already dropped.
 			running = false;
-			socketChannel.close();
+			try {
+				socketChannel.close();
+			} catch (IOException ignored) {
+			}
 		}
 	}
 
-	public boolean isConnected() {
-		return this.socketChannel.isOpen();
+	private void append(byte[] chunk) {
+		if (pending.length == 0) {
+			pending = chunk;
+			return;
+		}
+		byte[] merged = new byte[pending.length + chunk.length];
+		System.arraycopy(pending, 0, merged, 0, pending.length);
+		System.arraycopy(chunk, 0, merged, pending.length, chunk.length);
+		pending = merged;
+	}
+
+	/** Deliver every complete packet, keeping any tail for the next read. */
+	private void frameAndDeliver() {
+		int offset = 0;
+		while (offset < pending.length) {
+			int first = pending[offset] & 0xff;
+
+			int multiplier = 1;
+			int length = 0;
+			int i = offset + 1;
+			int digits = 0;
+			boolean lengthComplete = false;
+			while (i < pending.length) {
+				int digit = pending[i++] & 0xff;
+				length += (digit & 0x7F) * multiplier;
+				multiplier *= 128;
+				if (++digits > MAX_REMAINING_LENGTH_BYTES) {
+					log.error("malformed remaining length from the broker, closing");
+					closeQuietly();
+					return;
+				}
+				if ((digit & 0x80) == 0) {
+					lengthComplete = true;
+					break;
+				}
+			}
+			if (!lengthComplete || i + length > pending.length) {
+				break;                         // wait for the rest of the packet
+			}
+
+			byte type = (byte) (first >> 4);
+			byte flags = (byte) (first & 0x0f);
+			byte[] body = Arrays.copyOfRange(pending, i, i + length);
+			offset = i + length;
+			deliver(type, flags, body);
+		}
+		pending = (offset == 0) ? pending : Arrays.copyOfRange(pending, offset, pending.length);
+	}
+
+	private void deliver(byte type, byte flags, byte[] body) {
+		try {
+			// No SelectionKey on this side: the client has one connection, and
+			// :client-key is only meaningful to the broker.
+			IPersistentMap incoming = MqttDecode.decode(null, type, flags, body);
+			if (incoming == null) {
+				log.error("invalid packet type received: {}", type);
+				return;
+			}
+			receivedMessages.incrementAndGet();
+			receivedBytes.addAndGet(body.length);
+			// In order, on this thread: callers read replies off a channel and
+			// expect them in the order the broker sent them.
+			handler.handleInOrder(incoming, asyncChannel);
+		} catch (Throwable t) {
+			log.error("handling a packet of type {} failed", type, t);
+		}
+	}
+
+	private void closeQuietly() {
+		try {
+			close();
+		} catch (IOException ignored) {
+		}
 	}
 }

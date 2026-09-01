@@ -14,6 +14,9 @@ public interface IHandler {
     void handleInOrder(IPersistentMap incoming);
 
     void handle(IPersistentMap incoming, Object asyncChannel);
+
+    /** As handleInOrder, for callers that carry an async channel. */
+    void handleInOrder(IPersistentMap incoming, Object asyncChannel);
     void connect(IPersistentMap connect);
     
     void close(int timeoutMs);
