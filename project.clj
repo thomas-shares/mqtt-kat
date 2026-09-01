@@ -45,9 +45,13 @@
             [lein-cloverage "1.2.4"]]
   :jar-exclusions [#"^java.*"] ; exclude the java directory in source path
   :main mqttkat.server
-  :aot [mqttkat.server]
   :profiles
   {:dev
    {:dependencies [[djblue/portal "0.67.2"]
                    [com.clojure-goes-fast/clj-async-profiler "1.8.0"]
-                   [virgil "0.4.0"]]}})
+                   [virgil "0.4.0"]]}
+   ;; AOT only where it is actually needed — the uberjar, which needs a
+   ;; compiled Main-Class. At the top level it compiled every namespace
+   ;; mqttkat.server requires on every task, and the resulting stale classes
+   ;; shadow newer sources until someone thinks to run `lein clean`.
+   :uberjar {:aot [mqttkat.server]}})
