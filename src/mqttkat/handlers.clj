@@ -146,11 +146,18 @@
     (let [s (:server (meta @*server*))]))
 ;  (.sendMessage ^MqttServer s keys msg)))
 
-(defn update-timestamps [client-keys]
+(defn update-timestamps
+  "Mark these clients as alive.
+
+   One read of *clients* per client, not two: this used to check that
+   :last-active was present and then look it up again to write it, and the
+   client could disconnect in between — the second lookup then returned nil and
+   vreset! threw. A client going away while a packet of its own is still being
+   handled is ordinary, so it is skipped rather than reported."
+  [client-keys]
   (doseq [client-key client-keys]
-    (when (contains? (get-in @*clients* [client-key]) :last-active)
-      ;;(swap! *clients* assoc-in [client-key :last-active] (System/currentTimeMillis))))
-      (vreset! (get-in @*clients* [client-key :last-active]) (System/currentTimeMillis)))))
+    (when-let [last-active (get-in @*clients* [client-key :last-active])]
+      (vreset! last-active (System/currentTimeMillis)))))
 
 (defn send-buffer [keys buf]
   (log/trace "sending buffer from clj")

@@ -49,6 +49,17 @@ public class MqttHandler implements IHandler {
       this.execs = new ThreadPoolExecutor(thread, thread, 0, TimeUnit.MILLISECONDS, queue, factory);
     }
 
+	public void handleInOrder(IPersistentMap incoming) {
+		if( incoming == null ) {
+			return;
+		}
+		try {
+			handler.invoke(incoming, null);
+		} catch (Throwable e) {
+			log.error("handler invocation failed for {}", incoming, e);
+		}
+	}
+
 	public void handle(IPersistentMap incoming) {
 		if( incoming ==  null ) {
 			return;
@@ -65,8 +76,20 @@ public class MqttHandler implements IHandler {
 	}
 
 	public void close(int timeoutMs) {
-        MqttSendExecutor.shutdown(timeoutMs, execs);
-    }
+		if (timeoutMs > 0) {
+			execs.shutdown();
+			try {
+				if (!execs.awaitTermination(timeoutMs, TimeUnit.MILLISECONDS)) {
+					execs.shutdownNow();
+				}
+			} catch (InterruptedException ie) {
+				execs.shutdownNow();
+				Thread.currentThread().interrupt();
+			}
+		} else {
+			execs.shutdownNow();
+		}
+	}
 
 	public void connect(IPersistentMap connect) {
 		// TODO Auto-generated method stub

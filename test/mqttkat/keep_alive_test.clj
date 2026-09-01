@@ -86,6 +86,18 @@
           (is (not (contains? @h/*clients* k))
               "a client silent for 60s must be reaped by a 1.5s timeout"))))))
 
+(deftest update-timestamps-tolerates-a-vanishing-client
+  (testing "marking liveness never throws when the client is already gone"
+    ;; The broker handles a packet on one thread while another disconnects the
+    ;; client that sent it; the entry, or its :last-active, can be gone by the
+    ;; time the stamp is written.
+    (binding [h/*clients* (atom {"has-stamp"    {:last-active (volatile! 0)}
+                                 "no-stamp"     {:client-id "keep-alive-0"}})]
+      (is (nil? (h/update-timestamps ["has-stamp" "no-stamp" "never-existed"]))
+          "a missing client or a missing stamp must be skipped, not thrown on")
+      (is (pos? @(get-in @h/*clients* ["has-stamp" :last-active]))
+          "the client that does have a stamp is still updated"))))
+
 ;; ── the contract, end to end ──────────────────────────────────────────────────
 
 (deftest idle-client-is-disconnected

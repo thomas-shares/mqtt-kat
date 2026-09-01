@@ -31,6 +31,50 @@ accepted sockets in `MqttServer.handleAccept` and on the client's socket in
 That probably also explains the mqttloader comparison in the 2020 entry —
 average latency 116ms against Mosquitto's 71ms. Mosquitto sets `TCP_NODELAY`.
 
+### The threading model, rebuilt on virtual threads
+
+Working through the consequences of the ordering race, the I/O layer is now
+one connection = two virtual threads, instead of shared platform-thread pools.
+
+Before: the `server-loop` thread read bytes, framed, decoded and then handed
+each packet to a 4-thread pool (`prefix1..4`); replies and fan-out went through
+a separate 16-thread pool (`senders-1..16`). Four things followed from that,
+all of them fixed together because they are the same structural problem:
+
+* **A packet split across two TCP reads killed the broker.** `handleRead`
+  decoded straight out of an 8 KB buffer with no reassembly, so a partial
+  packet raised `BufferUnderflowException` — a RuntimeException, caught by
+  neither `handleRead` (catches IOException) nor `run()` — which escaped and
+  terminated `server-loop`, taking every connection with it. This is the
+  exception the 20180211 entry below saw under JMeter.
+* **Partial writes were silently dropped.** `MqttSender` called `ch.write(buf)`
+  and discarded the return value; a non-blocking write returns short when the
+  socket buffer is full, and the remainder was never sent.
+* **Order was lost twice** — once submitting each packet to the handler pool,
+  and again submitting each outgoing packet to the sender pool, so a PUBACK
+  could overtake the PUBLISH it acknowledged.
+* **Decoding ran on the selector thread**, so one slow decode stalled reads for
+  every connection.
+
+Now the selector thread only reads bytes and hands them to the connection they
+came from. Each connection has a reader thread that reassembles, decodes and
+runs the handler inline, in order, and a writer thread that sends queued
+packets one at a time, looping until each is fully written. Virtual threads are
+what make that affordable: 200 connections add 400 threads and no measurable
+platform threads — the broker still shows exactly one, `server-loop`.
+
+Fan-out also stops queueing through 16 platform threads: a publish to M
+subscribers now proceeds on M independent writer threads, and a client that
+stops reading parks its own writer instead of occupying a shared one.
+
+Latency is unchanged where it was already good and slightly better at the tail
+(max round trip 2.2ms, against 4.7ms through the shared pool).
+
+Known limitation of the new design: a connection's outbound queue is unbounded,
+so a client that never reads accumulates packets in memory until it is
+disconnected by keep-alive. That wants a bounded queue and a drop-or-disconnect
+policy.
+
 ### A race this uncovered: packets are handled out of order
 
 Removing the 40ms delay exposed something that had been hiding behind it.
