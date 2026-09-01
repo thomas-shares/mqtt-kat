@@ -20,7 +20,12 @@ import static org.mqttkat.packages.GenericMessage.*;
 
 import clojure.lang.Keyword;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 public class MqttEncode {
+
+	private static final Logger log = LoggerFactory.getLogger(MqttEncode.class);
 
 	public static ByteBuffer mqttEncoder(Map<Keyword, ?> message) throws IOException {
 		if( message == null ) {
@@ -58,12 +63,11 @@ public class MqttEncode {
 			}
 
 			else {
-				System.out.println("DIDN'T RECOGNISE OUTBOUND MESSAGE TYPE!!!");
-				System.out.println(message.toString());
+				log.error("unrecognised outbound message type: {}", message);
 				throw new IOException("Unrecognised keyword");
 			}
 		} else {
-			System.out.println("FAILURE!!!!! not a keyword!!!");
+			log.error("outbound message has no packet-type keyword: {}", message);
 			throw new IOException("No Keyword provided");
 		}
 		return outboundMessage;

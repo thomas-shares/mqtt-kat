@@ -1,5 +1,5 @@
 (ns mqttkat.handlers.connack
-  (:require [mqttkat.handlers :refer [logger]]))
+  (:require [clojure.tools.logging :as log]))
 
 (defn connack [msg]
-  (logger "CONNACK: " msg))
+  (log/debug "CONNACK:" msg))

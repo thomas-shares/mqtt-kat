@@ -17,7 +17,12 @@ import org.mqttkat.packages.*;
 
 import static org.mqttkat.MqttStat.*;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 public class MqttServer implements Runnable {
+
+	private static final Logger log = LoggerFactory.getLogger(MqttServer.class);
 	static final String THREAD_NAME = "server-loop";
 
 	private final Selector selector;
@@ -46,14 +51,14 @@ public class MqttServer implements Runnable {
 			handler.handle(incoming);
 			
 		} catch (IOException e) {
-			System.out.println("IoException: " + e.getMessage());
+			log.error("closing key failed", e);
 		}
 		try {
 			if (key.channel().isOpen()) {
 				key.channel().close();
 			}
 		} catch (Exception e) {
-			System.out.println("Exception: " + e.getMessage());
+			log.error("closing key failed", e);
 		}
 	}
 
@@ -65,12 +70,12 @@ public class MqttServer implements Runnable {
 				key.channel().close();
 			}
 		} catch (Exception e) {
-			System.out.println("closeConnection Exception: " + e.getMessage());
+			log.error("closing connection failed", e);
 		}
 	}
 
 	public void run() {
-		System.out.println("Server starting on port " + this.port);
+		log.info("Server starting on port {}", this.port);
 		SelectionKey key = null;
 
 		try {
@@ -93,9 +98,7 @@ public class MqttServer implements Runnable {
 			if (key != null) {
 				key.cancel();
 			}
-			System.out
-					.println("IOException, server of port " + this.port + " terminating. Stack trace:" + e.getLocalizedMessage());
-			e.printStackTrace();
+			log.error("IOException, server on port {} terminating", this.port, e);
 		} catch (ClosedSelectorException e) {
 			// Here we are stopping... so no need to do anything
 		}
@@ -226,7 +229,7 @@ public class MqttServer implements Runnable {
 					} else if (type == GenericMessage.MESSAGE_AUTHENTICATION) {
 						incoming = MqttAuthenticate.decode(key);
 					} else {
-						System.out.println("FAIL!!!!!! INVALID packet sent: " + type);
+						log.error("invalid packet type received: {}", type);
 						closeKey(key);
 					}
 
@@ -282,7 +285,7 @@ public class MqttServer implements Runnable {
 				 * https://github.com/http-kit/http-kit/issues/125
 				 */
 				if (k != null) {
-					System.out.println("Server!!!!: DISCONNECT    K !== null");
+					log.debug("DISCONNECT with a live key");
 					closeKey(k); // 0 => close by server
 				}
 			}

@@ -1,5 +1,6 @@
 (ns mqttkat.client
-  (:require [clojure.spec.gen.alpha :as gen]
+  (:require [clojure.tools.logging :as log]
+            [clojure.spec.gen.alpha :as gen]
             [clojure.spec.alpha :as s]
             [mqttkat.spec]
             [clojure.core.async :as async])
@@ -11,15 +12,8 @@
 
 (set! *warn-on-reflection* true)
 
-(def o (Object.))
-
-(defn logger [msg & args]
-  (when true
-    (locking 0
-      (println msg args))))
-
 (defn handler-fn [msg _]
-  (println "clj handler: " msg))
+  (log/debug "clj handler:" msg))
 
 (defn client
   ([] (client "localhost" 1883))
@@ -36,7 +30,7 @@
    connection with no CONNACK at all. Generating it meant every simulation run
    was a coin flip on whether its very first packet was answered."
   ([client] (let [map (gen/generate (s/gen :mqtt/connect))
-                  _ (logger "S " map " " client)
+                  _ (log/debug "S" map client)
                   buf (MqttConnect/encode (assoc map
                                                  :keep-alive 60
                                                  :protocol-name "MQTT"
@@ -47,7 +41,7 @@
 ;  ([host port handler]
 ;   (connect (client host port handler))
 ;   (let [map (gen/generate (s/gen :mqtt/connect))
-;         _ (logger "S " map)
+;         _ (log/debug "S" map)
 ;         bufs (MqttConnect/encode map)
 ;     (.sendMessage ^MqttClient @client-atom bufs)))
 
@@ -55,7 +49,7 @@
   ([client topic]
    (let [map (gen/generate (s/gen :mqtt/publish-qos-gt0))
          map (assoc map :topic topic)
-         _ (logger "S " map " " client)
+         _ (log/debug "S" map client)
          buf (MqttPublish/encode map)]
      (.sendMessage ^MqttClient client buf)
      (select-keys map [:qos :payload :packet-identifier])))
@@ -67,7 +61,7 @@
   (let [map (gen/generate (s/gen :mqtt/subscribe))
         filtered (filterv #(boolean (re-find #"\w+" (:topic-filter %))) (:topics map))
         map (assoc map :topics filtered)
-        _ (logger "S " map " " client)
+        _ (log/debug "S" map client)
         buf (MqttSubscribe/encode map)]
     (.sendMessage ^MqttClient client buf)
     map))
@@ -90,19 +84,19 @@
 
 (defn puback [client id]
   (let [map {:packet-type :PUBACK :packet-identifier id}
-        _ (logger "S " map)
+        _ (log/debug "S" map)
         buf (MqttPubAck/encode map)]
     (.sendMessage ^MqttClient client buf)))
 
 (defn pubrec [client id]
   (let [map {:packet-type :PUBREC :packet-identifier id}
-        _ (logger "S " map)
+        _ (log/debug "S" map)
         buf (MqttPubRec/encode map)]
     (.sendMessage ^MqttClient client buf)))
 
 (defn pubcomp [client id]
   (let [map {:packet-type :PUBCOMP :packet-identifier id}
-        _ (logger "S " map)
+        _ (log/debug "S" map)
         buf (MqttPubComp/encode map)]
     (.sendMessage ^MqttClient client buf)))
 

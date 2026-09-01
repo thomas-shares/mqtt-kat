@@ -1,5 +1,6 @@
 (ns mqttkat.util
-  (:require [mqttkat.handlers :as handlers])
+  (:require [clojure.tools.logging :as log]
+            [mqttkat.handlers :as handlers])
   (:import  [org.mqttkat MqttStat]))
 
 (def interval 10)
@@ -15,8 +16,9 @@
                :total-sent sent-now
                :received-per-second (float(/ (- received-now received-message-last-time) interval))
                :total-received received-now}]
-      ;(clojure.pprint/pprint map)
-      ;(clojure.pprint/pprint (map #(select-keys (val %) [:client-id]) @handlers/clients))
-      (clojure.pprint/pprint (get-in @handlers/*clients* [(first (keys @handlers/*clients*)) :subscribed-topics]))
+      (log/trace map)
+      ;(log/trace (map #(select-keys (val %) [:client-id]) @handlers/clients))
+      (log/info "stats" map "subscribed-topics"
+                (get-in @handlers/*clients* [(first (keys @handlers/*clients*)) :subscribed-topics]))
       (Thread/sleep ^long (* interval 1000))
       (recur sent-now received-now))))

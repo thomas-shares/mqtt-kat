@@ -1,6 +1,5 @@
 package org.mqttkat.client;
 
-import static org.mqttkat.MqttUtil.log;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -36,7 +35,12 @@ import org.mqttkat.packages.MqttUnsubscribe;
 import clojure.lang.IPersistentMap;
 import static org.mqttkat.MqttStat.*;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 public class MqttClient implements Runnable {
+
+	private static final Logger log = LoggerFactory.getLogger(MqttClient.class);
 	private volatile boolean running = true;
 	private InetSocketAddress mqttAddr;
 	private SocketChannel socketChannel;
@@ -51,7 +55,7 @@ public class MqttClient implements Runnable {
 
 	public MqttClient(String host, int port, int threadPoolSize, IHandler handler, Object asyncChannel)
 			throws IOException {
-		log("Creating client...");
+		log.debug("Creating client...");
 		this.handler = handler;
 
 		mqttAddr = new InetSocketAddress(host, port);
@@ -99,7 +103,7 @@ public class MqttClient implements Runnable {
 	}
 
 	public void run() {
-		System.out.println("Client loop started running...");
+		log.debug("Client loop started running...");
 		while (running) {
 			try {
 
@@ -257,7 +261,7 @@ public class MqttClient implements Runnable {
 			} else if (type == GenericMessage.MESSAGE_AUTHENTICATION) {
 				incoming = MqttAuthenticate.decode(key);
 			} else {
-				System.out.println("FAIL!!!!!! INVALID packet sent: " + type);
+				log.error("invalid packet type received: {}", type);
 			}
 
 			if (incoming != null) {
@@ -304,7 +308,7 @@ public class MqttClient implements Runnable {
 			socketChannel.finishConnect();
 		} catch (IOException e) {
 			// Cancel the channel's registration with our selector
-			System.out.println(e);
+			log.error("finishing the connection failed", e);
 			key.cancel();
 			return;
 		}
@@ -314,7 +318,7 @@ public class MqttClient implements Runnable {
 	}
 
 	public void close() throws IOException {
-		System.out.println("Client stopping...");
+		log.debug("Client stopping...");
 
 		if (selector != null && running == true) {
 			selector.close();

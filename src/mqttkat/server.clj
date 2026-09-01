@@ -1,5 +1,6 @@
 (ns mqttkat.server
-  (:require [mqttkat.handlers :as h]
+  (:require [clojure.tools.logging :as log]
+            [mqttkat.handlers :as h]
             [mqttkat.handlers.connect :as connect]
             [mqttkat.handlers.disconnect :as disconnect]
             [mqttkat.handlers.connack :as connack]
@@ -30,7 +31,7 @@
                   :AUTHENTICATE h/authenticate})
 
 (defn default-handler-fn [{:keys [packet-type] :as msg} _]
-  ;;(println "message is received. " msg)
+  (log/trace "message is received." msg)
   (when packet-type
     ((packet-type handler-map) msg)))
 
@@ -38,7 +39,7 @@
   #_(prof/serve-files 8080)
   (let [s           (MqttServer. ^String ip ^int port handler)
         stop-server (fn stop-server [& {:keys [timeout] :or {timeout 100}}]
-                      (println "meta stop...")
+                      (log/debug "meta stop...")
                       (.stop s timeout))]
     (.start s)
     (with-meta stop-server {:local-port (.getPort s)
@@ -53,7 +54,7 @@
 
 (defn stop! []
   (when (@*server*)
-    (println "Server stopping...")
+    (log/info "Server stopping...")
     ;;(prof/stop {})
     (at/stop-and-reset-pool! h/my-pool :strategy :kill)
     (alter-meta! *server* #(assoc % :timeout 1000))

@@ -3,7 +3,8 @@
    MQTT exchanges for a thousand events. Tagged ^:performance, so `lein test`
    skips it (see :test-selectors in project.clj) — run it on purpose with
    `lein test :performance`."
-  (:require [causatum.event-streams :as es]
+  (:require [clojure.tools.logging :as log]
+            [causatum.event-streams :as es]
             [mqttkat.test-util :as tu]
             [clojure.test :refer [deftest is use-fixtures]]
             [mqttkat.client :as client]
@@ -20,8 +21,8 @@
 
 
 (defn handler-fn [msg chan]
-  ;;(println "Posting on async channel: ")
-  ;(clojure.pprint/pprint (dissoc msg :client-key))
+  (log/trace "Posting on async channel:")
+  (log/trace (dissoc msg :client-key))
   (async/go (async/>! chan msg)))
 
 (def handler (MqttHandler. ^clojure.lang.IFn handler-fn 2))
@@ -57,7 +58,7 @@
 (defn connack [client]
   (let [msg (recv! client)]
     (is (= (:packet-type msg) :CONNACK))
-    (client/logger "R " msg)))
+    (log/debug "R" msg)))
 
 (defn compare-packet-identifier [p-id-1 p-id-2]
   (is (= p-id-1 p-id-2)))
@@ -75,11 +76,11 @@
     (client/puback client (:packet-identifier msg))))
 
 (defn qos-one [client payload packet-identifier]
-  ;(println "QOS1 " packet-identifier)
+  (log/trace "QOS1" packet-identifier)
   (let [first-message (recv! client)
-        _ (client/logger  "first: " first-message)
+        _ (log/debug  "first: " first-message)
         second-message (recv! client)
-        _ (client/logger  "second " second-message)]
+        _ (log/debug  "second " second-message)]
     (if (= :PUBACK (:packet-type first-message))
       (do (let [received-packet-identifier (:packet-identifier first-message)]
             (compare-packet-identifier packet-identifier received-packet-identifier)
@@ -97,20 +98,20 @@
     2 (do
         (client/pubrec client (:packet-identifier msg))
         (let [pubrel (recv! client)]
-          (client/logger  "R " pubrel)
+          (log/debug  "R " pubrel)
           (is (= :PUBREL (:packet-type pubrel)))
           (client/pubcomp client (:packet-identifier pubrel))))))
 
 (defn qos-two [client payload packet-identifier]
-  ;(client/logger  "QOS2 " packet-identifier)
+  (log/trace  "QOS2 " packet-identifier)
   (let [pubrec (recv! client)]
-    (client/logger  "R " pubrec)
+    (log/debug  "R " pubrec)
     (compare-packet-identifier packet-identifier (:packet-identifier pubrec))
     (client/pubrel client packet-identifier)
     (let [first-message (recv! client)
           second-message (recv! client)]
-      (client/logger  "R "first-message)
-      (client/logger  "R " second-message)
+      (log/debug  "R "first-message)
+      (log/debug  "R " second-message)
       (if (= :PUBCOMP (:packet-type first-message))
         (do (let [packet-identifier (:packet-identifier first-message)]
               (compare-packet-identifier packet-identifier (:packet-identifier first-message))
@@ -129,8 +130,8 @@
 (defn publish [client]
   (let [filter (rand-nth (into [] @subscribe-topics))
         topic (filter-to-topic filter)
-        _ (client/logger "S filter: " filter)
-        _ (client/logger "S topic: " topic)
+        _ (log/debug "S filter:" filter)
+        _ (log/debug "S topic:" topic)
         {payload :payload qos :qos packet-identifier :packet-identifier} (client/publish client topic)]
      (condp = qos
        0 (qos-zero client payload)
@@ -149,7 +150,7 @@
     (swap! subscribe-topics (partial apply conj) topics)
     (let [msg (recv! client)
           ret-count (count (:response msg))]
-      (client/logger  "R " msg)
+      (log/debug  "R " msg)
       (is (= c ret-count)))))
 
 
@@ -163,12 +164,12 @@
          ;clients (take client-numbers (repeatedly (client)))
          ;streams (take client-numbers (repeatedly (es/event-stream model [{:rtime 0, :state :connect}])))]
      (doseq [{state :state} (take 1000   (es/event-stream model [{:rtime 0, :state :connect}]))]
-       ;;(println "State:" state)
+       (log/trace "State:" state)
        ;;(Thread/sleep 10)
        (({:connect connect, :publish publish, :disconnect disconnect, :connack connack :subscribe subscribe} state) client))
      (let [time (/ (- (System/currentTimeMillis) start-time) 1000.0)]
-       (println
-         "sent per sec "(/ #_{:clj-kondo/ignore [:java-static-field-call]}
+       (log/info
+         "sent per sec"(/ #_{:clj-kondo/ignore [:java-static-field-call]}
                            (MqttStat/sentMessages) time)
          "received per sec " (/ #_{:clj-kondo/ignore [:java-static-field-call]}
                                 (MqttStat/receivedMessages) time)))))

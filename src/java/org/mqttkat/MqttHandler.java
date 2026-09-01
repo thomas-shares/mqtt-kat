@@ -6,8 +6,12 @@ import clojure.lang.IFn;
 import java.util.concurrent.*;
 
 import org.mqttkat.server.PrefixThreadFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 class MqttExecutor implements Runnable{
+
+	private static final Logger log = LoggerFactory.getLogger(MqttExecutor.class);
 	final IFn handler;
 	final IPersistentMap incoming;
 	final Object asyncChannel;
@@ -22,13 +26,14 @@ class MqttExecutor implements Runnable{
 	    try {
 				handler.invoke(incoming, asyncChannel);
 	     } catch (Throwable e) {
-	    	 	e.printStackTrace();
-	    	 	System.out.println("Can't RUN!!! " + e.getMessage() + " " + incoming);
+	    	 	log.error("handler invocation failed for {}", incoming, e);
 	    }
 	}
 }
 
 public class MqttHandler implements IHandler {
+
+	private static final Logger log = LoggerFactory.getLogger(MqttHandler.class);
     final ExecutorService execs;
     final IFn handler;
 
@@ -55,10 +60,7 @@ public class MqttHandler implements IHandler {
 			if(!execs.isShutdown() && !execs.isTerminated())
 				execs.submit(task);
 		} catch (RejectedExecutionException e) {
-			e.printStackTrace();
-			System.out.println("handler : " + handler.toString());
-			System.out.println("incoming : " + incoming.toString());
-			System.out.println ("Handling Fails.");
+			log.error("task rejected, handler={} incoming={}", handler, incoming, e);
 		}
 	}
 
@@ -79,9 +81,6 @@ public class MqttHandler implements IHandler {
 		try {
 			execs.submit(task);
 		} catch (RejectedExecutionException e) {
-			e.printStackTrace();
-			System.out.println("handler : " + handler.toString());
-			System.out.println("incoming : " + incoming.toString());
-			System.out.println ("Handling Fails.");
+			log.error("task rejected, handler={} incoming={}", handler, incoming, e);
 		}	}
 }

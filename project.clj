@@ -17,7 +17,11 @@
    [clojurewerkz/triennium "1.0.0-beta2"]
    [overtone/at-at "1.4.65"]
    ;;[djblue/portal "0.6.1"]
-   [io.zalky/cues  "0.2.1"]]
+   [io.zalky/cues  "0.2.1"]
+   [org.clojure/tools.logging "1.3.0"]
+   [org.apache.logging.log4j/log4j-api "2.26.1"]
+   [org.apache.logging.log4j/log4j-core "2.26.1"]
+   [org.apache.logging.log4j/log4j-slf4j-impl "2.26.1"]]
 
   :jvm-opts
   ["-Dclojure.compiler.disable-locals-clearing=true"
