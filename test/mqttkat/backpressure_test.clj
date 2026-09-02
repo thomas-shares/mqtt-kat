@@ -28,7 +28,7 @@
    would make this a load test rather than a unit test."
   20)
 
-(defn- ->bytes [^ByteBuffer buf]
+(defn- ^"[B" ->bytes [^ByteBuffer buf]
   (let [a (byte-array (.remaining buf))]
     (.get (.duplicate buf) a)
     a))
@@ -52,12 +52,12 @@
                (.setReceiveBufferSize 512))]
     (.connect sock (java.net.InetSocketAddress. ^String tu/host ^int (int tu/port)))
     (let [^java.io.OutputStream out (.getOutputStream sock)]
-      (.write out ^bytes (->bytes (MqttConnect/encode
+      (.write out (->bytes (MqttConnect/encode
                             {:packet-type :CONNECT :protocol-name "MQTT"
                              :protocol-version 4 :keep-alive 100
                              :clean-session? true
                              :client-id (tu/client-id "deaf")})))
-      (.write out ^bytes (->bytes (MqttSubscribe/encode
+      (.write out (->bytes (MqttSubscribe/encode
                             {:packet-type :SUBSCRIBE :packet-identifier 1
                              :topics [{:qos qos :topic-filter topic}]})))
       (.flush out))

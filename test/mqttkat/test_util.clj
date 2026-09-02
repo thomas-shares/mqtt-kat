@@ -144,7 +144,7 @@
 (defn retained-payload
   "What the broker currently has retained on `topic`, as a String."
   [topic]
-  (some-> (get-in @handlers/*retained* [topic :payload]) (String. "UTF-8")))
+  (some-> ^bytes (get-in @handlers/*retained* [topic :payload]) (String. "UTF-8")))
 
 (defn wait-for-retained!
   "Block until `topic` holds `expected` as its retained message.

@@ -16,7 +16,11 @@
 
 (use-fixtures :once tu/broker-fixture)
 
-(defn- ->bytes [^ByteBuffer buf]
+(defn- ^"[B" ->bytes
+  "The bytes of `buf`. Hinted ^bytes because every caller hands the result
+   straight to OutputStream.write or alength, and without it each of those is
+   a reflective call resolved at run time."
+  [^ByteBuffer buf]
   (let [a (byte-array (.remaining buf))]
     (.get (.duplicate buf) a)
     a))
@@ -62,7 +66,7 @@
         (tu/close! after))
       (tu/close! sub))))
 
-(defn- connect-bytes [version client-id]
+(defn- ^"[B" connect-bytes [version client-id]
   (->bytes (MqttConnect/encode {:packet-type :CONNECT :protocol-name "MQTT"
                                 :protocol-version version :keep-alive 60
                                 :clean-session? true :client-id client-id})))
