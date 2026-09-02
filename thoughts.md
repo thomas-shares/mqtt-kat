@@ -2,6 +2,151 @@
 
 In this file will go my thoughts and ramblings about this project and what I have done and what I might do next.
 
+## 20260902
+
+### The packet identifier pool had a countdown in it
+
+QoS 1 measurements looked odd — `queued` tracking `received` one for one, where
+QoS 0 gave a clean 150:1. That is not the fan-out disappearing, it is the
+acknowledgement traffic closing the books: each publish costs 1 PUBLISH plus
+150 PUBACKs inbound, and 1 PUBACK plus 150 PUBLISHes outbound. Both directions
+are 151 × P. Solving each independently from the totals gave P = 80,198 and
+P = 80,196, so only 80,200 of 300,000 publishes had got in — the run measured
+27% of itself.
+
+Identifiers came from one global core.async channel holding 1024 values, taken
+with a blocking `<!!`. Four things wrong with that, and the first two are
+permanent hangs rather than slowdowns:
+
+* **It leaked.** `put-packet-identifier` was called from exactly two places,
+  PUBACK and PUBCOMP. Nothing returned identifiers when a client disconnected,
+  and `*outbound*` deliberately keeps unacknowledged messages for redelivery.
+  So every ungraceful disconnect with messages in flight burned its identifiers
+  for good. There were 1024. After enough of those the take blocks forever and
+  QoS 1/2 delivery stops broker-wide, silently. A long-running broker did not
+  have a throughput problem here, it had a countdown.
+* **Any client could break it.** PUBACK returned whatever identifier the client
+  sent, unchecked. An unsolicited one overfilled a channel sized exactly 1024,
+  so `>!!` blocked that connection's reader thread for good; a duplicate put a
+  live identifier back into circulation for the next delivery to reuse.
+* **It was global**, where §2.3.1 scopes identifiers to a connection: 1024
+  shared out rather than 65535 each.
+* **The take blocked the fan-out thread**, which deadlocks a client that both
+  publishes and subscribes — it waits on an identifier that only its own
+  unread PUBACKs could release.
+
+Raising the pool was worth testing before redesigning anything. 1024 → 16384
+gave **1.25×**, not the 16× a window-limited pipeline would predict. So the
+pool was worth about 21% and something else was binding. Adding both
+directions: QoS 0 ran at 474,803 packets/s and QoS 1 with the big pool at
+475,869 — 0.2% apart. That looked like a hard per-packet ceiling, and it was
+not; see below.
+
+`*outbound*` already recorded what was in flight, keyed by client-id, already
+outliving the connection for redelivery. So it is the allocator now: one place
+that knows what is outstanding, instead of a pool that has to be kept in step
+with it. A wrapping counter is enough because the in-flight window is far below
+65535 and cannot lap a live identifier. `release-packet-identifier!` returns
+the message it retired, or nil for an identifier never issued — which is the
+whole defence against a client corrupting the space.
+
+### Two wrong answers before the right one
+
+The window needed a policy for "full", and I got it wrong twice, both times
+measurably.
+
+**Disconnect the subscriber.** Defensible on paper — a client that far behind
+is not reading — and a disaster in practice: 408 disconnects, every subscriber
+killed, delivery down from 15M to 15,028. Real brokers queue past the in-flight
+window. They do not terminate.
+
+**Queue it, drop when the queue is full.** Better, and then much worse than it
+should have been: 241 publishes/s and 12.6 second latencies. That was my own
+bug, not the design's — `(vec (rest %))` to drop the head of a 4096-element
+vector, inside a `swap!` on a contended atom, once per acknowledgement.
+`PersistentQueue` with `peek`/`pop` made it 2,863 publishes/s, which is 1.86×
+the best the old pool ever managed, and incidentally 563,612 packets/s — so
+that 475k "ceiling" was partly the pool after all.
+
+But it dropped 11.9 million QoS 1 messages. QoS 1 is at-least-once; dropping is
+not a policy, it is a broken promise. The old blocking pool never dropped
+anything precisely *because* it blocked: a global semaphore is back-pressure
+all the way to the publisher, arrived at by accident.
+
+### Back-pressure where it belongs: the publisher's socket
+
+Under overload something must give — block, drop, or disconnect. Dropping
+breaks the guarantee and disconnecting is worse, so it has to be blocking, and
+blocking a broker thread is not available: two clients that each publish to a
+topic the other subscribes to would each hold a thread waiting on the other's
+window, and neither would ever process the acknowledgements that release it.
+Not a slowdown, a cycle.
+
+What is available is refusing to read. `Connection.pauseReading` clears
+`OP_READ`, so the bytes stay in the kernel receive buffer; that fills, the
+receive window closes, and the publisher blocks in its own `write`. TCP does
+the work, and no thread of ours is holding anything.
+
+* A subscriber whose pending queue passes `pause-threshold` (512) pauses the
+  publisher feeding it, and remembers it.
+* Every acknowledgement drains one pending message and, below
+  `resume-threshold` (128), releases everyone waiting. Hysteresis, or the
+  interest ops flap once per packet.
+* A connection never pauses itself — a client subscribed to a topic it
+  publishes to would otherwise stop reading the very acknowledgements that
+  would free it.
+* `close()` calls `drained()`, so nobody is left throttled on a subscriber
+  that has gone.
+* `pending-limit` (4096) survives as a memory backstop. Under back-pressure it
+  should never fire, and in the run below it did not.
+
+The gap between 512 and 4096 is deliberate: clearing `OP_READ` stops new bytes
+arriving, but the publisher's reader thread still has whatever was already
+framed to work through, and every one of those publishes fans out 150 ways.
+That gap is the headroom for the overshoot.
+
+`MqttStat.publisherPauses` counts it, and it shows in the stats line as
+`:throttled`. Without it there is no way to tell a throttled broker from an
+idle one.
+
+### What it bought
+
+Same 150×150 QoS 1 config as the run that started this:
+
+| | pool of 1024 | per-client ids + back-pressure |
+|---|---|---|
+| publish rate | 1,238/s | **1,671/s** |
+| total packets/s | 373,916 | **547,061** |
+| publishes ingested | 80,200 | **113,616** |
+| messages delivered | ~12.1M | **16.2M** |
+| dropped | 0 | **0** |
+| average latency | — | 212 ms |
+| throttle events | n/a | 74,239 |
+
+35% more publishes, 46% more packets, nothing dropped, and the four hangs gone.
+`:throttled` climbing steadily is what back-pressure looks like when it is
+working: the publishers were held to what the subscribers could actually take.
+
+### A test that was worse than no test
+
+Two of my own tests misbehaved and both were worth the time to fix properly.
+
+The QoS 0 isolation assertion was `>= 90%` of messages reaching a healthy
+subscriber, which failed 4 runs in 8 at 75-83%. The threshold was invented, and
+it was wrong: with the limit set to 20 for the test, a healthy subscriber that
+pauses for a moment crosses it too. It now has the stalled subscriber saturated
+first, then a small paced burst to a subscriber that joins afterwards — where
+"all of them" is a real assertion rather than a guess.
+
+The QoS 1 back-pressure test published 20,000 large messages from a future it
+then cancelled, and left the broker still fanning them out into the next
+namespace, where `flow-test`'s reconnect started failing intermittently. Enough
+to cross the threshold is enough. It publishes 3072 small ones now and waits
+for the broker to settle before returning. Six clean runs of the full suite
+afterwards, from four failures in eight before.
+
+Neither was a bug in the broker. Both would have been blamed on one.
+
 ## 20260901
 
 ### The latency question, answered: Nagle

@@ -2,12 +2,15 @@ package org.mqttkat.server;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.channels.CancelledKeyException;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.SocketChannel;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -101,6 +104,14 @@ public class Connection {
 	 * the limit by more than the number of threads publishing at that instant.
 	 */
 	private final AtomicInteger queuedCount = new AtomicInteger();
+
+	/**
+	 * Publishers whose reads were stopped because this connection could not
+	 * take any more. They are let go again once it has drained.
+	 */
+	private final Set<Connection> waiters = ConcurrentHashMap.newKeySet();
+
+	private volatile boolean readingPaused = false;
 
 	private volatile boolean running = true;
 	private Thread reader;
@@ -200,8 +211,92 @@ public class Connection {
 			return;
 		}
 		running = false;
+		// Nobody may be left throttled on a connection that no longer exists.
+		drained();
 		inbound.offer(STOP_READING);
 		outbound.offer(STOP_WRITING);
+	}
+
+	// ── back-pressure ────────────────────────────────────────────────────────
+	//
+	// The only way to stop a publisher without either dropping its messages or
+	// blocking a thread is to stop reading its socket. Clearing OP_READ leaves
+	// the bytes in the kernel receive buffer; that fills, the receive window
+	// closes, and the publisher blocks in its own write. TCP does the work.
+	//
+	// Blocking a broker thread instead is not an option, and not only because
+	// of the cost: two clients that each publish to a topic the other
+	// subscribes to would each hold a thread waiting on the other's window,
+	// and neither would ever process the acknowledgements that release it.
+
+	/** Stop reading this connection's socket. Idempotent. */
+	public synchronized void pauseReading() {
+		if (readingPaused) {
+			return;
+		}
+		readingPaused = true;
+		MqttStat.publisherPauses.increment();
+		try {
+			if (key.isValid()) {
+				key.interestOps(key.interestOps() & ~SelectionKey.OP_READ);
+				key.selector().wakeup();
+			}
+		} catch (CancelledKeyException e) {
+			// the connection went away; nothing left to pause
+		}
+	}
+
+	/** Start reading it again. Idempotent. */
+	public synchronized void resumeReading() {
+		if (!readingPaused) {
+			return;
+		}
+		readingPaused = false;
+		try {
+			if (key.isValid()) {
+				key.interestOps(key.interestOps() | SelectionKey.OP_READ);
+				key.selector().wakeup();
+			}
+		} catch (CancelledKeyException e) {
+			// the connection went away; nothing left to resume
+		}
+	}
+
+	public boolean isReadingPaused() {
+		return readingPaused;
+	}
+
+	/**
+	 * Stop reading `publisher` until this connection has drained.
+	 *
+	 * Never pauses a connection on itself: a client subscribed to a topic it
+	 * publishes to would otherwise stop reading its own acknowledgements, which
+	 * are the only thing that could release it.
+	 */
+	public void pauseUntilDrained(Connection publisher) {
+		if (publisher == null || publisher == this) {
+			return;
+		}
+		waiters.add(publisher);
+		publisher.pauseReading();
+	}
+
+	/**
+	 * Let every publisher waiting on this connection read again.
+	 *
+	 * Called both when the queue has drained and when the connection closes —
+	 * a publisher must never be left paused on a subscriber that has gone. It
+	 * runs on every acknowledgement, so a pause that raced a drain is undone on
+	 * the next one rather than sticking.
+	 */
+	public void drained() {
+		if (waiters.isEmpty()) {
+			return;
+		}
+		for (Connection publisher : waiters) {
+			publisher.resumeReading();
+		}
+		waiters.clear();
 	}
 
 	// ── inbound ──────────────────────────────────────────────────────────────

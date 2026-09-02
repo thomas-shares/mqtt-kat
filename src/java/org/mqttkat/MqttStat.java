@@ -45,6 +45,13 @@ public class MqttStat {
 	/** Refused at the queue: a QoS 0 publish to a subscriber that is too far behind. */
 	public static LongAdder droppedMessages = new LongAdder();
 
+	/**
+	 * Times a publisher's socket was stopped because a subscriber it feeds
+	 * could not keep up. Back-pressure working, not an error — but it is how
+	 * you tell throttling apart from a broker that is simply idle.
+	 */
+	public static LongAdder publisherPauses = new LongAdder();
+
 	public static LongAdder receivedMessages = new LongAdder();
 	public static LongAdder receivedBytes = new LongAdder();
 }

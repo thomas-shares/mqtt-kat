@@ -34,6 +34,7 @@
    :written   (.sum ^LongAdder MqttStat/writtenMessages)
    :discarded (.sum ^LongAdder MqttStat/discardedMessages)
    :dropped   (.sum ^LongAdder MqttStat/droppedMessages)
+   :throttled (.sum ^LongAdder MqttStat/publisherPauses)
    :received  (.sum ^LongAdder MqttStat/receivedMessages)})
 
 (defn- backlog
@@ -77,7 +78,10 @@
    ;; then abandoned when the connection died, `dropped` was never queued
    ;; because the subscriber was too far behind. Only the first is a bug.
    :discarded (:discarded now)
-   :dropped   {:per-second (rate :dropped before now) :total (:dropped now)}})
+   :dropped   {:per-second (rate :dropped before now) :total (:dropped now)}
+   ;; How often a publisher was stopped so a subscriber could catch up. Rising
+   ;; means back-pressure is doing the work that dropping would otherwise do.
+   :throttled (:throttled now)})
 
 (defn info
   "Log the broker's counters every `interval` seconds, forever.

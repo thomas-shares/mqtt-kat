@@ -12,6 +12,7 @@
        same topic still gets everything."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [mqttkat.client :as client]
+            [mqttkat.handlers :as h]
             [mqttkat.test-util :as tu])
   (:import [java.net Socket]
            [java.nio ByteBuffer]
@@ -45,7 +46,8 @@
 
 (defn- deaf-subscriber!
   "A raw socket that subscribes and then never reads again."
-  [^String topic]
+  ([^String topic] (deaf-subscriber! topic 0))
+  ([^String topic qos]
   (let [sock (doto (Socket.)
                (.setReceiveBufferSize 512))]
     (.connect sock (java.net.InetSocketAddress. ^String tu/host ^int (int tu/port)))
@@ -57,53 +59,140 @@
                              :client-id (tu/client-id "deaf")})))
       (.write out ^bytes (->bytes (MqttSubscribe/encode
                             {:packet-type :SUBSCRIBE :packet-identifier 1
-                             :topics [{:qos 0 :topic-filter topic}]})))
+                             :topics [{:qos qos :topic-filter topic}]})))
       (.flush out))
-    sock))
+    sock)))
+
+(defn- subscribe! [{:keys [client ch]} topic]
+  (client/send-message client {:packet-type :SUBSCRIBE :packet-identifier 1
+                               :topics [{:qos 0 :topic-filter topic}]})
+  ;; expect-eventually!, not expect!: the SUBACK is queued by the subscribe
+  ;; handler while a publisher's fan-out thread may be queueing a PUBLISH to
+  ;; the same connection, so the two can arrive in either order.
+  (tu/expect-eventually! ch :SUBACK 2000))
+
+(defn- settle!
+  "Wait until the broker stops dropping, i.e. it has worked through the burst,
+   so a subscriber joining now sees only what is published after it."
+  []
+  (let [deadline (+ (System/currentTimeMillis) 15000)]
+    (loop [previous -1]
+      (let [now (.sum MqttStat/droppedMessages)]
+        (when (and (not= now previous) (< (System/currentTimeMillis) deadline))
+          (Thread/sleep 250)
+          (recur now))))))
+
+(defn- saturate!
+  "Bury `topic` under enough volume to overrun the broker's socket send buffer
+   for a subscriber that is not reading, and wait until it starts dropping."
+  [pub topic]
+  (let [before (.sum MqttStat/droppedMessages)]
+    (dotimes [i 2000]
+      (client/send-message (:client pub)
+                           {:packet-type :PUBLISH :qos 0 :retain? false
+                            :topic topic :payload (str i "-" payload)}))
+    (let [deadline (+ (System/currentTimeMillis) 5000)]
+      (loop []
+        (when (and (= before (.sum MqttStat/droppedMessages))
+                   (< (System/currentTimeMillis) deadline))
+          (Thread/sleep 20)
+          (recur))))
+    before))
 
 (deftest qos-0-to-a-stalled-subscriber-is-dropped-not-queued
   (let [was (Connection/getMaxQueued)]
     (try
       (Connection/setMaxQueued limit)
-      (let [topic  (tu/topic "backpressure")
-            deaf   (deaf-subscriber! topic)
-            _      (Thread/sleep 200)            ; let the SUBSCRIBE be handled
-            healthy (tu/connect! "healthy-sub")
-            pub     (tu/connect! "backpressure-pub")]
-        (client/send-message (:client healthy)
-                             {:packet-type :SUBSCRIBE :packet-identifier 1
-                              :topics [{:qos 0 :topic-filter topic}]})
-        (tu/expect! (:ch healthy) :SUBACK)
+      (let [topic (tu/topic "backpressure")
+            deaf  (deaf-subscriber! topic)
+            _     (Thread/sleep 200)             ; let the SUBSCRIBE be handled
+            pub   (tu/connect! "backpressure-pub")
+            before (saturate! pub topic)]
+        (is (> (.sum MqttStat/droppedMessages) before)
+            "expected QoS 0 publishes to a subscriber that stopped reading to be dropped")
+        (.close ^Socket deaf)
+        (tu/close! pub))
+      (finally
+        (Connection/setMaxQueued was)))))
 
-        (let [before (.sum MqttStat/droppedMessages)
-              n      2000]
+(deftest a-stalled-subscriber-does-not-starve-a-healthy-one
+  (let [was (Connection/getMaxQueued)]
+    (try
+      (Connection/setMaxQueued limit)
+      (let [topic (tu/topic "isolation")
+            deaf  (deaf-subscriber! topic)
+            _     (Thread/sleep 200)
+            pub   (tu/connect! "isolation-pub")]
+        (saturate! pub topic)
+        (settle!)
+
+        ;; The healthy subscriber joins only now, so it starts with an empty
+        ;; queue and never sees the flood that stalled the other one. Then a
+        ;; small, paced burst: at this rate a subscriber that is reading cannot
+        ;; fall behind, so "all of them" is a real assertion rather than a
+        ;; threshold. Asserting a proportion here was flaky — with the limit
+        ;; set this low for the test, a healthy subscriber that pauses for a
+        ;; moment crosses it too.
+        (let [healthy (tu/connect! "healthy-sub")
+              n       20
+              before  (.sum MqttStat/droppedMessages)]
+          (subscribe! healthy topic)
           (dotimes [i n]
             (client/send-message (:client pub)
                                  {:packet-type :PUBLISH :qos 0 :retain? false
-                                  :topic topic :payload (str i "-" payload)}))
+                                  :topic topic :payload (str "paced-" i)})
+            (Thread/sleep 5))
+          (let [got (tu/take-n! (:ch healthy) n 5000)]
+            (is (= n (count (:PUBLISH got)))
+                "a subscriber that is reading should get every message"))
+          (is (> (.sum MqttStat/droppedMessages) before)
+              "and the stalled one should still have been dropped throughout"))
 
-          (testing "the stalled subscriber's queue is bounded, so publishes to it are dropped"
-            (let [deadline (+ (System/currentTimeMillis) 3000)]
-              (loop []
-                (when (and (= before (.sum MqttStat/droppedMessages))
-                           (< (System/currentTimeMillis) deadline))
-                  (Thread/sleep 20)
-                  (recur))))
-            (is (> (.sum MqttStat/droppedMessages) before)
-                "expected QoS 0 publishes to a subscriber that stopped reading to be dropped"))
-
-          (testing "a healthy subscriber on the same topic keeps its feed"
-            ;; Not an exact count on purpose. The limit is global and set very
-            ;; low here, so a subscriber that pauses for a moment mid-burst can
-            ;; cross it too — at 20 queued packets, briefly, anything can. The
-            ;; property under test is that a subscriber which is still reading
-            ;; keeps getting the feed while the stalled one is cut off, not
-            ;; that QoS 0 became reliable.
-            (let [got  (tu/take-n! (:ch healthy) n 8000)
-                  pubs (count (:PUBLISH got))]
-              (is (>= pubs (* 0.9 n))
-                  (str "a reading subscriber should have kept up; got " pubs " of " n)))))
-
-        (.close ^Socket deaf))
+        (.close ^Socket deaf)
+        (tu/close! pub))
       (finally
         (Connection/setMaxQueued was)))))
+
+;; ── QoS 1: back-pressure instead of dropping ─────────────────────────────
+
+(deftest qos-1-throttles-the-publisher-rather-than-dropping
+  (testing "a subscriber that stops reading stops the publisher, losing nothing"
+    ;; QoS 1 is at-least-once, so the QoS 0 answer — refuse the message — is
+    ;; not available. The pressure goes back to the source instead: the broker
+    ;; stops reading the publisher's socket, its receive window closes, and the
+    ;; publisher blocks in its own write. Nothing is discarded.
+    ;;
+    ;; Deliberately small and deliberately tidy. An earlier version published
+    ;; 20,000 large messages from a future it then cancelled, which left the
+    ;; broker still fanning them out into the next namespace and made
+    ;; flow-test's reconnect race intermittently. Enough to cross the pause
+    ;; threshold is enough, and small payloads keep the client's own writes
+    ;; inside its socket buffer so nothing here blocks.
+    (let [topic  (tu/topic "qos1-backpressure")
+          deaf   (deaf-subscriber! topic 1)
+          _      (Thread/sleep 200)
+          pub    (tu/connect! "qos1-pub")
+          n      (* 6 h/pause-threshold)
+          before-dropped   (.sum MqttStat/droppedMessages)
+          before-throttled (.sum MqttStat/publisherPauses)]
+      (dotimes [i n]
+        (client/send-message (:client pub)
+                             {:packet-type :PUBLISH :qos 1
+                              :packet-identifier (inc (mod i 60000))
+                              :retain? false :topic topic
+                              :payload (str "m" i)}))
+      (let [deadline (+ (System/currentTimeMillis) 15000)]
+        (loop []
+          (when (and (= before-throttled (.sum MqttStat/publisherPauses))
+                     (< (System/currentTimeMillis) deadline))
+            (Thread/sleep 50)
+            (recur))))
+      (is (> (.sum MqttStat/publisherPauses) before-throttled)
+          "the publisher feeding a stalled subscriber should have been paused")
+      (is (= before-dropped (.sum MqttStat/droppedMessages))
+          "and nothing may be dropped: QoS 1 is at-least-once")
+
+      (.close ^Socket deaf)
+      (tu/close! pub)
+      ;; Do not hand the next namespace a broker still working through this.
+      (settle!))))

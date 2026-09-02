@@ -68,18 +68,18 @@
     (client-contains? client-key) (disconnect-client client-key)
     (no-client-id-and-no-clean-session client-id clean-session?) (handle-incorrect-clean-session msg)
     :else (handle-success msg))
-  (log/trace "Checking for message that are being proccessed:" (contains? @*outbound* client-id))
-  (when (contains? @*outbound* client-id)
-    (log/trace "Remaining message found for client:" (get @*outbound* client-id))
-    (doseq [stalled-id (keys (get @*outbound* client-id))]
-      (log/trace "Sending message to client:" stalled-id)
-      (log/trace (get-in @*outbound* [client-id stalled-id]))
-      (let [{:keys [topic payload qos] } (get-in @*outbound* [client-id stalled-id]) ]
-         (send-buffer [client-key]
+  ;; Anything this client left unacknowledged is still recorded against its
+  ;; client-id, under the same identifiers it was sent with, so redelivery
+  ;; reuses them rather than reserving new ones.
+  (let [stalled (get-in @*outbound* [client-id :inflight])]
+    (log/trace "Checking for messages that are being processed:" (count stalled))
+    (doseq [[stalled-id {:keys [topic payload qos]}] stalled]
+      (log/trace "Redelivering to client:" client-id "identifier:" stalled-id)
+      (send-buffer [client-key]
                    (MqttPublish/encode {:packet-type       :PUBLISH
                                         :payload           payload
                                         :topic             topic
                                         :qos               qos
                                         :retain?           false
                                         :duplicate?        true
-                                        :packet-identifier stalled-id}))))))
+                                        :packet-identifier stalled-id})))))

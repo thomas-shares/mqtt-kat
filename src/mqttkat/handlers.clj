@@ -2,20 +2,62 @@
   (:require [clojure.tools.logging :as log]
             [mqttkat.s :refer [*server*]]
             [overtone.at-at :as at]
-            [clojurewerkz.triennium.mqtt :as tr]
-            [clojure.core.async :as async])
-  (:import [org.mqttkat.server MqttServer]
+            [clojurewerkz.triennium.mqtt :as tr])
+  (:import [java.util.concurrent.atomic LongAdder]
+           [org.mqttkat MqttStat]
+           [java.nio.channels SelectionKey]
+           [org.mqttkat.server Connection MqttServer]
            [org.mqttkat.packages MqttPublish
             MqttPubRel MqttPubAck MqttPubRec
             MqttPubComp MqttSubAck MqttPingResp MqttUnSubAck]))
 
-(def packet-identifier-queue-size 1024)
+(def max-packet-identifier
+  "MQTT 3.1.1 §2.3.1: identifiers run 1..65535, and 0 is not one."
+  65535)
+
+(def inflight-window
+  "How many unacknowledged QoS 1/2 messages the broker will hold for one
+   client before it stops accepting more for that client.
+
+   This is the resource that is actually scarce — identifiers are not, there
+   are 65535 of them per connection. Keeping the window well under that is
+   also what lets the counter below wrap without ever colliding with a live
+   identifier. Mosquitto's equivalent, max_inflight_messages, defaults to 20."
+  128)
+
+(def pending-limit
+  "How many QoS 1/2 messages will wait for a window slot before the broker
+   gives up on them.
+
+   The window alone is not a policy: something has to happen to the message
+   that cannot have an identifier yet. Blocking the fan-out thread is what the
+   old pool did, and it deadlocks a client that both publishes and subscribes.
+   Disconnecting the subscriber, which is what this first tried, turns a busy
+   moment into 408 dropped connections under load. So it waits here instead,
+   and is refused only once this is full too — the same shape as the QoS 0
+   queue limit, and what Mosquitto does with max_queued_messages."
+  4096)
+
+(def pause-threshold
+  "Pending depth at which the broker stops reading from a publisher feeding
+   this subscriber.
+
+   Well below pending-limit on purpose. Clearing OP_READ stops new bytes
+   arriving, but the publisher's reader thread still has whatever was already
+   framed to work through, and every one of those publishes fans out. The gap
+   between this and pending-limit is the headroom for that overshoot."
+  512)
+
+(def resume-threshold
+  "Pending depth at which those publishers are read again. Hysteresis: resuming
+   at the same depth that paused would flap the interest ops once per packet."
+  128)
+
 (def ^:dynamic *clients* (atom {}))
 (def ^:dynamic *inflight* (atom {}))
 (def ^:dynamic *subscriber-trie* (atom (tr/make-trie)))
 (def ^:dynamic *outbound* (atom {}))
 (def ^:dynamic *retained* (atom {}))  ;; {:topic {:qos qos :payload payload}})
-(def packet-identifiers (async/chan packet-identifier-queue-size))
 
 (def my-pool (at/mk-pool))
 (declare qos-0)
@@ -112,7 +154,13 @@
   (log/trace "REMOVE: clean session?" (get-in @*clients* [key :clean-session?] true))
   (log/trace "key:" key)
   (if (get-in @*clients* [key :clean-session?] true)
-    (swap! *clients* dissoc key)
+    (let [client-id (get-in @*clients* [key :client-id])]
+      ;; A clean session keeps nothing. Its in-flight record would otherwise
+      ;; sit in *outbound* for the life of the process, since only a reconnect
+      ;; under the same client-id ever reads it again.
+      (when client-id
+        (swap! *outbound* dissoc client-id))
+      (swap! *clients* dissoc key))
     (let [client (get @*clients* key)
           client-id (:client-id client)
           subscribed-topics (:subscribed-topics client)]
@@ -129,16 +177,193 @@
   (log/trace "REMOVE: Subscriber trie POST:" @*subscriber-trie*)
   (log/trace "REMOVE: Clients:" @*clients*))
 
-;; pre-load queue
-(doseq [i (range 1 (inc packet-identifier-queue-size))]
-  (async/>!! packet-identifiers i))
+;; ── packet identifiers ───────────────────────────────────────────────────
+;;
+;; These used to come from one global core.async channel holding 1024 values,
+;; taken with a blocking <!!. That had four problems, two of them permanent
+;; hangs rather than slowdowns:
+;;
+;;   * it leaked. Identifiers came back only via PUBACK/PUBCOMP, so every
+;;     client that disconnected with unacknowledged messages burned its
+;;     identifiers for good. After 1024 of those the take blocked forever and
+;;     QoS 1/2 delivery stopped broker-wide, silently.
+;;   * any client could break it. PUBACK returned whatever identifier the
+;;     client sent, unchecked: an unsolicited one overfilled a channel sized
+;;     exactly 1024 and blocked that connection's reader thread forever, and a
+;;     duplicate put a live identifier back into circulation so the next
+;;     delivery reused it.
+;;   * it was global, where §2.3.1 scopes identifiers to a connection — 1024
+;;     shared out among every client instead of 65535 each.
+;;   * the take blocked the publisher's fan-out thread, which cost about 21%
+;;     under load and deadlocks outright if a client that both publishes and
+;;     subscribes ends up waiting on an identifier its own unread PUBACKs
+;;     would have released.
+;;
+;; *outbound* already records what is in flight for a client, keyed by
+;; client-id and deliberately outliving the connection so a persistent session
+;; can be redelivered on reconnect. So it is the allocator: one place that
+;; knows what is outstanding, rather than a pool that has to be kept in step
+;; with it.
 
-(defn get-packet-identifier []
-  (async/<!! packet-identifiers))
+(defn- next-identifier
+  "The next free identifier for this client, or nil if there is none.
 
-(defn put-packet-identifier [p]
-  (log/trace "put" p)
-  (async/>!! packet-identifiers p))
+   A plain wrapping counter is enough because `inflight-window` is far below
+   65535: the counter cannot lap a live identifier. The containment check is
+   belt and braces for a window raised carelessly."
+  [{:keys [next-id inflight] :or {next-id 0}}]
+  (loop [candidate (inc (mod next-id max-packet-identifier))
+         tried     0]
+    (cond
+      (>= tried max-packet-identifier)  nil
+      (contains? inflight candidate)    (recur (inc (mod candidate max-packet-identifier)) (inc tried))
+      :else                             candidate)))
+
+(defn- reserve
+  "Record `msg` against a fresh identifier, or leave the state alone when the
+   client's in-flight window is full."
+  [state msg]
+  (let [inflight (:inflight state {})]
+    (if (>= (count inflight) inflight-window)
+      state
+      (if-let [id (next-identifier state)]
+        (assoc state :next-id id :inflight (assoc inflight id msg))
+        state))))
+
+(defn acquire-packet-identifier!
+  "Reserve an identifier for `client-id` and record `msg` against it.
+
+   Returns the identifier, or nil when the client already has
+   `inflight-window` messages outstanding. Never blocks: a client that has
+   stopped acknowledging is the caller's problem to handle, not a reason to
+   park the thread doing the fan-out."
+  [client-id msg]
+  (let [[before after] (swap-vals! *outbound* update client-id reserve msg)]
+    (when (> (count (get-in after [client-id :inflight]))
+             (count (get-in before [client-id :inflight])))
+      (get-in after [client-id :next-id]))))
+
+(defn release-packet-identifier!
+  "Retire `id` for `client-id`.
+
+   Returns the message that was in flight under it, or nil if this identifier
+   was never issued — an unsolicited or duplicate acknowledgement, which is
+   then ignored rather than acted on. That check is the whole defence against
+   a client corrupting the identifier space."
+  [client-id id]
+  (let [[before _] (swap-vals! *outbound* update-in [client-id :inflight] dissoc id)]
+    (get-in before [client-id :inflight id])))
+
+(defn inflight-count
+  "How many messages are outstanding for `client-id`."
+  [client-id]
+  (count (get-in @*outbound* [client-id :inflight])))
+
+(defn pending-count
+  "How many messages are waiting for a window slot for `client-id`."
+  [client-id]
+  (count (get-in @*outbound* [client-id :pending])))
+
+(defn queue-pending!
+  "Hold `msg` for `client-id` until a window slot frees up.
+
+   Returns true if it was queued, false if this client's pending queue is full
+   too — at which point the message is refused, which is the only honest thing
+   left: it has not been delivered and nothing is pretending otherwise."
+  [client-id msg]
+  (let [[before after]
+        (swap-vals! *outbound* update client-id
+                    (fn [state]
+                      (if (>= (count (:pending state)) pending-limit)
+                        state
+                        ;; PersistentQueue, not a vector: this is a FIFO whose
+                        ;; head is removed once per acknowledgement, and
+                        ;; dropping the head of a vector copies the whole
+                        ;; thing. At a 4096-deep queue that copy, inside a
+                        ;; swap! on a contended atom, cost about 6x the
+                        ;; broker's publish throughput.
+                        (update state :pending
+                                (fnil conj clojure.lang.PersistentQueue/EMPTY) msg))))]
+    (> (count (get-in after [client-id :pending]))
+       (count (get-in before [client-id :pending])))))
+
+(defn take-pending!
+  "Reserve an identifier for the next message waiting on `client-id`'s window.
+
+   Returns [identifier msg], or nil when nothing is waiting or the window is
+   still full. Called as acknowledgements come back, so the queue drains at
+   exactly the rate the client is acknowledging."
+  [client-id]
+  (let [[before after]
+        (swap-vals! *outbound* update client-id
+                    (fn [state]
+                      (if-let [msg (peek (:pending state))]
+                        (let [reserved (reserve state msg)]
+                          (if (identical? reserved state)
+                            state                     ; window still full
+                            (update reserved :pending pop)))
+                        state)))]
+    (when (< (count (get-in after [client-id :pending]))
+             (count (get-in before [client-id :pending])))
+      [(get-in after [client-id :next-id])
+       (peek (get-in before [client-id :pending]))])))
+
+(declare send-buffer)
+
+(defn- send-publish!
+  [key {:keys [topic payload qos]} packet-identifier]
+  (send-buffer [key]
+               (MqttPublish/encode {:packet-type       :PUBLISH
+                                    :payload           payload
+                                    :topic             topic
+                                    :qos               qos
+                                    :retain?           false
+                                    :duplicate?        false
+                                    :packet-identifier packet-identifier})))
+
+(defn- connection-of ^Connection [key]
+  (when key
+    (.attachment ^SelectionKey key)))
+
+(defn- throttle-publisher!
+  "Stop reading from the publisher feeding a subscriber that is filling up, and
+   record it so the subscriber releases it once drained."
+  [subscriber-key publisher-key]
+  (when-let [subscriber (connection-of subscriber-key)]
+    (when-let [publisher (connection-of publisher-key)]
+      (.pauseUntilDrained subscriber publisher))))
+
+(defn- deliver-or-queue!
+  "Send `msg` to a subscriber if its window has room; hold it if not.
+
+   Holding is not enough on its own — an unbounded hold is just the old
+   unbounded queue by another name — so once the queue passes `pause-threshold`
+   the publisher that is filling it stops being read. That is the whole point:
+   QoS 1 is at-least-once, so the pressure has to go back to the source rather
+   than be paid for in dropped messages. The refusal below it is a backstop for
+   memory, and under back-pressure it should never fire."
+  [key client-id msg publisher-key]
+  (if-let [packet-identifier (acquire-packet-identifier! client-id msg)]
+    (send-publish! key msg packet-identifier)
+    (do
+      (when-not (queue-pending! client-id msg)
+        (.increment ^LongAdder MqttStat/droppedMessages))
+      (when (>= (pending-count client-id) pause-threshold)
+        (throttle-publisher! key publisher-key)))))
+
+(defn- drain-pending!
+  "Send the next message waiting on this client's window, if any, and let any
+   throttled publishers go once the queue is comfortably clear.
+
+   The release check runs on every acknowledgement rather than only when the
+   queue empties, so a pause that raced a drain is undone on the next ack
+   instead of sticking."
+  [key client-id]
+  (when-let [[packet-identifier msg] (take-pending! client-id)]
+    (send-publish! key msg packet-identifier))
+  (when (<= (pending-count client-id) resume-threshold)
+    (when-let [subscriber (connection-of key)]
+      (.drained subscriber))))
 
 #_(defn send-message [keys msg]
     (log/debug "sending message  from  clj" (:packet-type msg) " " (:packet-identifier msg))
@@ -188,23 +413,14 @@
                                     :qos         0
                                     :retain?     retain})))
 
-(defn qos-1-send [keys topic {:keys [payload]}]
+(defn qos-1-send [keys topic {:keys [payload] publisher-key :client-key}]
   (log/trace "respond qos 1:" (count keys) )
   (doseq [key (mapv :client-key keys)]
-    (let [packet-identifier (get-packet-identifier)
-          client-id (:client-id (get @*clients* key))]
-      (swap! *outbound* update client-id assoc packet-identifier {:topic topic :payload payload :qos 1})
-      (log/trace "qos 1 send:" @*outbound*)
-      (log/trace "qos 1 send key:" key)
-      (log/trace "qos 1 send packet-identifier:" packet-identifier)
-      (send-buffer [key]
-                   (MqttPublish/encode {:packet-type       :PUBLISH
-                                        :payload           payload
-                                        :topic             topic
-                                        :qos               1
-                                        :retain?           false
-                                        :duplicate?        false
-                                        :packet-identifier packet-identifier})))))
+    ;; No client-id means the subscriber went away between the trie lookup and
+    ;; here, which is ordinary — there is nobody left to deliver to.
+    (when-let [client-id (:client-id (get @*clients* key))]
+      (deliver-or-queue! key client-id {:topic topic :payload payload :qos 1}
+                         publisher-key))))
 
 (defn qos-n? [num {:keys [qos] :as m}]
   (when (= num qos) m))
@@ -262,11 +478,14 @@
 
 (defn puback [{:keys [packet-identifier client-key]}]
   (log/debug "PUBACK:" packet-identifier)
-  (put-packet-identifier packet-identifier)
-  (let [client-id (:client-id (get @*clients* client-key ))]
-    (log/trace "client-id:" client-id)
-    (swap! *outbound* update client-id dissoc packet-identifier)
-    (log/trace "outbound:" @*outbound*)))
+  (let [client-id (:client-id (get @*clients* client-key))]
+    (if (release-packet-identifier! client-id packet-identifier)
+      ;; A slot just freed, so let the next message waiting on it through.
+      (drain-pending! client-key client-id)
+      ;; An acknowledgement for something never sent. Ignoring it is the point:
+      ;; acting on it used to put a live identifier back into circulation.
+      (log/debug "PUBACK from" client-id "for identifier" packet-identifier
+                 "which was never issued to it - ignored"))))
 
 (defn pubrec [{:keys [client-key packet-identifier]}]
   (log/debug "PUBREC:" packet-identifier)
@@ -274,7 +493,7 @@
                (MqttPubRel/encode
                 {:packet-type :PUBREL :packet-identifier packet-identifier})))
 
-(defn qos-2-send [keys topic {:keys [payload] :as msg}]
+(defn qos-2-send [keys topic {:keys [payload] publisher-key :client-key :as msg}]
   (some-> (filter qos-0? keys)
           (seq)
           (qos-0 topic msg false))
@@ -284,12 +503,9 @@
   (doseq [key (some->> (filter qos-2? keys)
                        (seq)
                        (mapv :client-key))]
-    (send-buffer [key] (MqttPublish/encode {:packet-type       :PUBLISH
-                                            :payload           payload
-                                            :topic             topic
-                                            :qos               2
-                                            :retain?           false
-                                            :packet-identifier (get-packet-identifier)}))))
+    (when-let [client-id (:client-id (get @*clients* key))]
+      (deliver-or-queue! key client-id {:topic topic :payload payload :qos 2}
+                         publisher-key))))
 
 ;;there is no need to do
 (defn pubrel
@@ -302,9 +518,13 @@
     (qos-2-send keys topic msg)
     (swap! *inflight* dissoc [client-key packet-identifier])))
 
-(defn pubcomp [{:keys [packet-identifier] :as msg}]
+(defn pubcomp [{:keys [packet-identifier client-key] :as msg}]
   (log/debug "received PUBCOMP:" (dissoc msg :client-key))
-  (put-packet-identifier packet-identifier))
+  (let [client-id (:client-id (get @*clients* client-key))]
+    (if (release-packet-identifier! client-id packet-identifier)
+      (drain-pending! client-key client-id)
+      (log/debug "PUBCOMP from" client-id "for identifier" packet-identifier
+                 "which was never issued to it - ignored"))))
 
 (defn add-subscriber [subscribers topic key]
   (if (contains? subscribers topic)
