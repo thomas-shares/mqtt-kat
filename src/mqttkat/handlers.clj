@@ -155,11 +155,12 @@
   (log/trace "key:" key)
   (if (get-in @*clients* [key :clean-session?] true)
     (let [client-id (get-in @*clients* [key :client-id])]
-      ;; A clean session keeps nothing. Its in-flight record would otherwise
-      ;; sit in *outbound* for the life of the process, since only a reconnect
-      ;; under the same client-id ever reads it again.
+      ;; A clean session keeps nothing. Its in-flight records would otherwise
+      ;; sit in *outbound* and *inflight* for the life of the process, since
+      ;; only a reconnect under the same client-id ever reads them again.
       (when client-id
-        (swap! *outbound* dissoc client-id))
+        (swap! *outbound* dissoc client-id)
+        (swap! *inflight* #(into {} (remove (fn [[[id _] _]] (= id client-id))) %)))
       (swap! *clients* dissoc key))
     (let [client (get @*clients* key)
           client-id (:client-id client)
@@ -220,15 +221,26 @@
       :else                             candidate)))
 
 (defn- reserve
-  "Record `msg` against a fresh identifier, or leave the state alone when the
-   client's in-flight window is full."
-  [state msg]
-  (let [inflight (:inflight state {})]
-    (if (>= (count inflight) inflight-window)
-      state
-      (if-let [id (next-identifier state)]
-        (assoc state :next-id id :inflight (assoc inflight id msg))
-        state))))
+  "Record `msg` against a fresh identifier, or leave the state alone when it
+   cannot be sent yet.
+
+   It cannot be sent when the in-flight window is full — and also when anything
+   is already waiting, unless this message is the head of that queue. MQTT
+   3.1.1 §4.6 requires a client's messages to be delivered in the order they
+   were published, and without the second check a fresh publish could take a
+   slot the moment an acknowledgement freed one, overtaking everything queued
+   behind it. That showed up as a handful of messages arriving early out of two
+   hundred: the fan-out thread and the thread draining the queue on each
+   acknowledgement were competing for the same slots."
+  ([state msg] (reserve state msg false))
+  ([state msg from-pending?]
+   (let [inflight (:inflight state {})]
+     (if (or (>= (count inflight) inflight-window)
+             (and (not from-pending?) (seq (:pending state))))
+       state
+       (if-let [id (next-identifier state)]
+         (assoc state :next-id id :inflight (assoc inflight id msg))
+         state)))))
 
 (defn acquire-packet-identifier!
   "Reserve an identifier for `client-id` and record `msg` against it.
@@ -298,7 +310,9 @@
         (swap-vals! *outbound* update client-id
                     (fn [state]
                       (if-let [msg (peek (:pending state))]
-                        (let [reserved (reserve state msg)]
+                        ;; from-pending?: this message *is* the head, so the
+                        ;; queue being non-empty must not block it.
+                        (let [reserved (reserve state msg true)]
                           (if (identical? reserved state)
                             state                     ; window still full
                             (update reserved :pending pop)))
@@ -405,17 +419,20 @@
     (.sendMessageBuffer ^MqttServer s keys buf true publisher-key)))
 
 (defn qos-0 [keys topic {:keys [payload] publisher-key :client-key} retain]
-  (log/trace "--> respond QOS 0 topic:" topic " retained: " retain  " payload: " payload  " count keys: " (count keys))
-  (send-buffer-droppable (mapv :client-key keys)
-                         (MqttPublish/encode {:packet-type :PUBLISH
-                                              :payload     payload
-                                              :topic       topic
-                                              :qos         0
-                                              :retain?     retain})
-                         ;; nil for a will or a replayed retained message:
-                         ;; the broker is the publisher there and there is
-                         ;; nothing to slow down.
-                         publisher-key))
+  (log/trace "--> respond QOS 0 topic:" topic " retained: " retain " payload: " payload " count keys: " (count keys))
+  ;; Nothing is owed to the publisher at QoS 0, so with no subscribers there is
+  ;; nothing to do — and no reason to encode a packet for nobody.
+  (when (seq keys)
+    (send-buffer-droppable (mapv :client-key keys)
+                           (MqttPublish/encode {:packet-type :PUBLISH
+                                                :payload     payload
+                                                :topic       topic
+                                                :qos         0
+                                                :retain?     retain})
+                           ;; nil for a will or a replayed retained message:
+                           ;; the broker is the publisher there and there is
+                           ;; nothing to slow down.
+                           publisher-key)))
 
 (defn qos-1-send [keys topic {:keys [payload] publisher-key :client-key}]
   (log/trace "respond qos 1:" (count keys) )
@@ -457,9 +474,20 @@
 ;    (log/trace "K" k)
 ;    (swap! outbound assoc (:client-key k) (:packet-identifier msg))))))
 
-(defn qos-2 [keys topic {:keys [client-key packet-identifier] :as recv-msg}]
+(defn qos-2 [_keys topic {:keys [client-key packet-identifier] :as recv-msg}]
   (log/trace "QOS 2")
-  (swap! *inflight* assoc [client-key packet-identifier] {:msg recv-msg :topic topic :keys keys})
+  ;; Keyed by client-id, not by the SelectionKey. A client that disconnects
+  ;; between PUBREC and PUBREL comes back on a different key, and the broker
+  ;; could then never find the message it had already taken responsibility for:
+  ;; it answered the PUBCOMP and dropped the publish, and the entry sat in
+  ;; *inflight* for the life of the process.
+  ;;
+  ;; The matched subscribers are deliberately not stored either. MQTT 3.1.1
+  ;; §4.3.3 publishes the message when PUBREL arrives, so the subscribers are
+  ;; whoever is subscribed then — and any key captured at PUBLISH time may
+  ;; belong to a connection that has since gone.
+  (let [client-id (:client-id (get @*clients* client-key))]
+    (swap! *inflight* assoc [client-id packet-identifier] {:msg recv-msg :topic topic}))
   (send-buffer [client-key]
                (MqttPubRec/encode {:packet-type       :PUBREC
                                    :packet-identifier packet-identifier})))
@@ -474,7 +502,15 @@
     (if (empty? payload)
       (swap! *retained* dissoc topic)
       (swap! *retained* assoc topic {:qos qos :payload payload})))
-  (when-let [keys (tr/matching-vals @*subscriber-trie* topic)]
+  ;; `let` rather than `when-let`, which is what this was. The two behave the
+  ;; same here only because triennium returns #{} for a topic nobody is
+  ;; subscribed to, and an empty set is truthy — so the acknowledgements below
+  ;; were always sent. `let` says that on purpose instead of by accident:
+  ;; PUBACK and PUBREC are the receiver's answer for the packet, not a report
+  ;; on delivery (§4.3.2, §4.3.3), so they must not be conditional on there
+  ;; being subscribers. A `matching-vals` that returned nil for no match would
+  ;; otherwise have left a QoS 1 publisher retrying for ever.
+  (let [keys (tr/matching-vals @*subscriber-trie* topic)]
     (case (long qos)
       0 (qos-0 keys topic msg false)
       1 (qos-1 keys topic msg)
@@ -518,9 +554,11 @@
   (send-buffer [client-key]
                (MqttPubComp/encode {:packet-type       :PUBCOMP
                                     :packet-identifier packet-identifier}))
-  (let [{:keys [keys topic msg]} (get @*inflight* [client-key packet-identifier])]
-    (qos-2-send keys topic msg)
-    (swap! *inflight* dissoc [client-key packet-identifier])))
+  (let [client-id (:client-id (get @*clients* client-key))
+        {:keys [topic msg]} (get @*inflight* [client-id packet-identifier])]
+    (when topic
+      (qos-2-send (tr/matching-vals @*subscriber-trie* topic) topic msg))
+    (swap! *inflight* dissoc [client-id packet-identifier])))
 
 (defn pubcomp [{:keys [packet-identifier client-key] :as msg}]
   (log/debug "received PUBCOMP:" (dissoc msg :client-key))

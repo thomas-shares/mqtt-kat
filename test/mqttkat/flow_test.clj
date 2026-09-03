@@ -274,7 +274,11 @@
       (tu/wait-for-parked-session! id)
 
       ;; Same client id, so the broker owes us the message we never acked.
-      (let [b (tu/connect! nil :id id :clean-session? false)]
+      ;; Ordered: the CONNACK and the redelivery go out back to back, and the
+      ;; default client hands each arriving packet to its own go block, so which
+      ;; reaches the channel first is a race. That is the harness, not the
+      ;; broker — it failed this test about one run in eight.
+      (let [b (tu/connect! nil :id id :clean-session? false :ordered? true)]
         (is (true? (:session-present? (:connack b))))
         ;; A generous deadline: the redelivery is triggered by the reconnect,
         ;; and the rest of the suite can be keeping the broker busy. `when msg`

@@ -63,13 +63,15 @@
       (.flush out))
     sock)))
 
-(defn- subscribe! [{:keys [client ch]} topic]
+(defn- subscribe!
+  ([c topic] (subscribe! c topic 0))
+  ([{:keys [client ch]} topic qos]
   (client/send-message client {:packet-type :SUBSCRIBE :packet-identifier 1
-                               :topics [{:qos 0 :topic-filter topic}]})
+                               :topics [{:qos qos :topic-filter topic}]})
   ;; expect-eventually!, not expect!: the SUBACK is queued by the subscribe
   ;; handler while a publisher's fan-out thread may be queueing a PUBLISH to
   ;; the same connection, so the two can arrive in either order.
-  (tu/expect-eventually! ch :SUBACK 2000))
+  (tu/expect-eventually! ch :SUBACK 2000)))
 
 (defn- settle!
   "Wait until the broker has worked through the burst.
@@ -274,4 +276,66 @@
       (.close ^Socket deaf)
       (tu/close! pub)
       ;; Do not hand the next namespace a broker still working through this.
+      (settle!))))
+
+;; ── QoS 1: the other half of the window ──────────────────────────────────
+
+(deftest qos-1-pending-messages-drain-as-acknowledgements-arrive
+  (testing "messages queued past the in-flight window are released by acks"
+    ;; The queueing half was covered; the draining half was not. take-pending!
+    ;; — reserving an identifier for a message that had to wait, and popping it
+    ;; off the queue — had six lines that no test executed, because the one
+    ;; test that filled a window used a subscriber that never acknowledged
+    ;; anything, so nothing ever drained.
+    (let [topic  (tu/topic "qos1-drain")
+          sub-id (tu/client-id "qos1-drain-sub")
+          ;; Ordered, with room for the lot: this test asserts a sequence, and
+          ;; the default client reports arrival order only approximately.
+          sub    (tu/connect! nil :id sub-id :ordered? true :buffer 1024)
+          pub    (tu/connect! "qos1-drain-pub")
+          n      (+ h/inflight-window 72)]        ; more than one window's worth
+      (subscribe! sub topic 1)
+
+      ;; Publish everything before acknowledging anything, so the window fills
+      ;; and the remainder has to queue.
+      (dotimes [i n]
+        (client/send-message (:client pub)
+                             {:packet-type :PUBLISH :qos 1 :packet-identifier (inc i)
+                              :retain? false :topic topic :payload (str "seq-" i)}))
+
+      (let [deadline (+ (System/currentTimeMillis) 5000)]
+        (loop []
+          (when (and (zero? (h/pending-count sub-id))
+                     (< (System/currentTimeMillis) deadline))
+            (Thread/sleep 25)
+            (recur))))
+      (is (pos? (h/pending-count sub-id))
+          "more than a window of messages should have left some of them queued")
+
+      ;; Now acknowledge, which is what releases them one at a time.
+      (let [received (loop [acc []]
+                       (if (= n (count acc))
+                         acc
+                         (if-let [msg (tu/take! (:ch sub) 5000)]
+                           (if (= :PUBLISH (:packet-type msg))
+                             (do (client/puback (:client sub) (:packet-identifier msg))
+                                 (recur (conj acc (tu/payload-str msg))))
+                             (recur acc))
+                           acc)))]
+        (is (= n (count received))
+            "every message should arrive once the window keeps being released")
+        (is (= (map #(str "seq-" %) (range n)) received)
+            "and in the order published: the pending queue is FIFO"))
+
+      (let [deadline (+ (System/currentTimeMillis) 5000)]
+        (loop []
+          (when (and (pos? (+ (h/inflight-count sub-id) (h/pending-count sub-id)))
+                     (< (System/currentTimeMillis) deadline))
+            (Thread/sleep 25)
+            (recur))))
+      (is (zero? (h/pending-count sub-id)) "the queue should have emptied")
+      (is (zero? (h/inflight-count sub-id)) "and nothing should still be outstanding")
+
+      (tu/close! sub)
+      (tu/close! pub)
       (settle!))))

@@ -2,6 +2,124 @@
 
 In this file will go my thoughts and ramblings about this project and what I have done and what I might do next.
 
+## 20260903
+
+### How much of QoS 1 and 2 had ever run
+
+The question was how well QoS 1 and 2 are tested against a real broker, and
+cloverage answered it plainly. `mqttkat.handlers` was at 52.84% of forms, and
+the shape of what was missing mattered more than the number:
+
+| function | lines never executed |
+|---|---|
+| `qos-2` | 5 |
+| `qos-2-send` | 12 |
+| `pubrec` | 4 |
+| `pubrel` | 7 |
+| `pubcomp` | 5 |
+| `take-pending!` | 6 |
+
+The one "covered" line on each QoS 2 function was its `defn` being evaluated at
+load. There was no `:qos 2` anywhere in the default suite, so the whole
+four-packet handshake and the `*inflight*` map it turns on had never run
+outside production. `core-test` round-trips every packet through encode and
+decode, which covers the wire format and says nothing about the protocol;
+`client_generator_2` has a genuine QoS 2 flow over a socket but is tagged
+^:performance and so excluded from `lein test`.
+
+`take-pending!` was the other gap, and a self-inflicted one: the queueing half
+of the QoS 1 window was covered and the draining half was not, because the only
+test that filled a window used a subscriber that never acknowledged anything.
+
+Three tests later — the QoS 2 handshake end to end, the pending queue draining
+on acknowledgements, and QoS 2 across a reconnect — the same measurement reads
+61.92% of forms and 93.49% of lines, and both of those functions are down to a
+line or two.
+
+### The broker said "done" and dropped the message
+
+`*inflight*`, which holds a QoS 2 publish between PUBREC and PUBREL, was keyed
+by `[client-key packet-identifier]` — the SelectionKey. A client that
+disconnects in the middle of that exchange comes back on a different key, so
+the entry could never be found again:
+
+```
+inflight keys after publish: [[sun.nio.ch.SelectionKeyImpl 777]]
+inflight after disconnect: 1        <- and it stays
+session-present: true
+after pubrel, got: :PUBCOMP         <- the broker says it is done
+sub got: nil                        <- the message is gone
+```
+
+Worse than losing it. `pubrel` sends the PUBCOMP before it looks anything up,
+so the publisher is told the delivery completed while the message is discarded,
+and the entry sits in `*inflight*` for the life of the process. The same leak
+shape as the identifier pool the day before: state keyed to a connection when
+it belongs to a session.
+
+Keyed by client-id now, and cleared in `remove-client!` for a clean session.
+The matched subscribers are no longer stored either — §4.3.3 publishes the
+message when PUBREL arrives, so the subscribers are whoever is subscribed
+*then*, and anything captured at PUBLISH time may point at a connection that
+has since gone.
+
+### Messages jumping the queue
+
+The pending-drain test caught this on its first run: 200 messages published in
+order, and `seq-150` arrived before `seq-151`, `seq-171` before `seq-155`.
+
+`reserve` only checked whether the in-flight window was full. So the moment an
+acknowledgement freed a slot, a fresh publish on the fan-out thread could take
+it while older messages sat waiting in the queue — the fan-out thread and the
+thread draining on each acknowledgement competing for the same slots. MQTT
+3.1.1 §4.6 requires a client's messages to arrive in the order they were
+published.
+
+It now refuses a slot whenever anything is queued, unless the message asking is
+the head of that queue. My own bug, from two days ago, in code nothing had
+exercised.
+
+### The flake I had been chasing all week
+
+`qos-1-test` had been failing about one run in eight since the packet
+identifier work, and I had blamed it on load spilling out of the back-pressure
+tests twice, and tightened the settling twice. Both times it came back.
+
+Printing the whole offending packet instead of just its type ended it:
+
+```
+expected :CONNACK, got {:duplicate? true, :packet-identifier 1,
+                        :packet-type :PUBLISH, :qos 1, ...}
+```
+
+A redelivery arriving before the CONNACK. Not on the wire — `tu/client!` hands
+every arriving packet to its own `go` block, and go blocks finish in whatever
+order the pool gets to them, so two packets sent back to back can surface in
+either order. The harness, not the broker, and it had been quietly making the
+suite untrustworthy.
+
+`client!` and `connect!` take `:ordered?` now, which puts inline from the
+client's own read thread. Opt-in rather than the default, because an inline put
+stalls the client's reader once the channel fills, which would change how every
+test that does not drain behaves. The tests that assert a sequence use it — and
+the ordering violation in the section above was only visible *because* one of
+them did.
+
+### A bug I reported that was not there
+
+I said a publish to a topic with no subscribers got no PUBACK, because the
+dispatch sat inside a `when-let` on the matched subscribers. It does not.
+Triennium returns `#{}` for no match, and an empty set is truthy, so the body
+always ran and the acknowledgement always went out. I asserted that from
+reading the code without running it; reverting the change and watching the new
+test still pass is what showed it.
+
+The change stayed anyway, as a `let` with an honest comment. The correctness of
+an acknowledgement should not rest on which empty value a library happens to
+return. So did the test, which now covers PUBACK, the full QoS 2 exchange and
+retained replay on topics nobody is subscribed to — none of which was covered
+before, and all of which would break the day that lookup starts returning nil.
+
 ## 20260902
 
 ### The packet identifier pool had a countdown in it

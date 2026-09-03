@@ -46,12 +46,23 @@
 
 (defn client!
   "A client attached to the test broker at the socket level — no CONNECT sent.
-   Returns {:client <MqttClient>, :ch <channel of the packets it receives>}."
+   Returns {:client <MqttClient>, :ch <channel of the packets it receives>}.
+
+   `ordered?` puts each packet on the channel from the client's own read
+   thread instead of from a go block. The default hands each packet to a go
+   block, and go blocks finish in whatever order the pool gets to them, so the
+   channel reflects arrival order only loosely — fine for a test that waits for
+   one packet, useless for a test that asserts a sequence. Ordered clients need
+   a buffer deep enough for what they will receive, because the put is inline
+   and a full channel stalls the client's reader."
   ([] (client! 16))
-  ([buffer]
-   (let [ch (chan buffer)]
-     {:client (client/client host port
-                             (MqttHandler. ^clojure.lang.IFn (fn [msg _] (go (>! ch msg))) 1))
+  ([buffer] (client! buffer false))
+  ([buffer ordered?]
+   (let [ch (chan buffer)
+         on-packet (if ordered?
+                     (fn [msg _] (async/>!! ch msg))
+                     (fn [msg _] (go (>! ch msg))))]
+     {:client (client/client host port (MqttHandler. ^clojure.lang.IFn on-packet 1))
       :ch     ch})))
 
 (defn take!
@@ -169,9 +180,9 @@
 (defn connect!
   "Create a client and complete the CONNECT/CONNACK handshake.
    Returns {:client :ch :connack}."
-  [prefix & {:keys [clean-session? keep-alive will id]
-             :or   {clean-session? true keep-alive 100}}]
-  (let [{:keys [client ch] :as c} (client!)
+  [prefix & {:keys [clean-session? keep-alive will id ordered? buffer]
+             :or   {clean-session? true keep-alive 100 ordered? false buffer 16}}]
+  (let [{:keys [client ch] :as c} (client! buffer ordered?)
         msg (cond-> {:packet-type      :CONNECT
                      :protocol-name    "MQTT"
                      :protocol-version 4
