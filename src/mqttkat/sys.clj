@@ -15,9 +15,6 @@
 
    Not implemented, and why:
 
-     - `$SYS/broker/load/...`, the 1/5/15-minute moving averages. They need
-       their own sampling and an average per metric rather than a counter read,
-       which is a different piece of work from the rest of this.
      - `$SYS/broker/connection/#`, which is about bridges. There are none.
      - `shared_subscriptions/count`: shared subscriptions are MQTT 5.
      - `publish/bytes/received` and `/sent`: receivedBytes and writtenBytes
@@ -50,6 +47,79 @@
   (atom {:clients 0 :heap 0}))
 
 (defn- sum ^long [^LongAdder a] (.sum a))
+
+(defn- sum-type ^long [^"[Ljava.util.concurrent.atomic.LongAdder;" counters ^long packet-type]
+  (sum (aget counters (int packet-type))))
+
+;; ── load averages ────────────────────────────────────────────────────────
+
+(def load-windows
+  "The averaging windows Mosquitto publishes, in minutes, with their topic
+   names."
+  [[1 "1min"] [5 "5min"] [15 "15min"]])
+
+(defn load-rate
+  "One step of Mosquitto's smoothing, and the reason these numbers need
+   explaining.
+
+   `delta` is the count since the last sample and `elapsed` the seconds since
+   it. That is first scaled to a rate **per minute**, then blended into the
+   previous average with exp(-elapsed / (60 * minutes)). What gets published is
+   therefore \"how many of these happen in a minute, averaged over N minutes\" —
+   not a total, and not a per-second rate. A short window follows a burst
+   quickly and a long one barely notices it, which is why there are three."
+  ^double [^double previous ^double delta ^double elapsed ^double minutes]
+  (let [per-minute (* delta (/ 60.0 elapsed))
+        exponent   (Math/exp (- (/ elapsed (* 60.0 minutes))))]
+    (+ per-minute (* exponent (- previous per-minute)))))
+
+(def ^:private load-metrics
+  "Topic suffix, and how to read the running total it is the rate of."
+  [["load/connections"       #(sum-type MqttStat/receivedByType 1)]
+   ["load/sockets"           #(sum MqttStat/socketConnections)]
+   ["load/bytes/received"    #(sum MqttStat/receivedBytes)]
+   ["load/bytes/sent"        #(sum MqttStat/writtenBytes)]
+   ["load/messages/received" #(sum MqttStat/receivedMessages)]
+   ["load/messages/sent"     #(sum MqttStat/writtenMessages)]
+   ["load/publish/received"  #(sum-type MqttStat/receivedByType 3)]
+   ["load/publish/sent"      #(sum-type MqttStat/sentByType 3)]
+   ["load/publish/dropped"   #(+ (sum MqttStat/droppedMessages)
+                                 (sum MqttStat/discardedMessages))]])
+
+(defonce ^:private load-state (atom {:totals {} :averages {}}))
+
+(defn- two-places
+  "Locale/ROOT, so a machine set to a comma decimal separator does not publish
+   1,50 to a topic every other broker publishes 1.50 on."
+  [^double v]
+  (String/format java.util.Locale/ROOT "%.2f" (to-array [v])))
+
+(defn advance-load!
+  "Move the averages on by `elapsed` seconds and return their topics.
+
+   Takes the elapsed time rather than reading a clock, so it can be driven
+   deterministically from a test. Only the publisher calls it, so the
+   read-then-write is not guarded: two callers at once would each want a
+   different elapsed anyway."
+  [^double elapsed]
+  (if-not (pos? elapsed)
+    {}
+    (let [{:keys [totals averages]} @load-state
+          now (into {} (map (fn [[suffix f]] [suffix (long (f))])) load-metrics)
+          next-averages
+          (into {}
+                (for [[suffix total] now
+                      [minutes label] load-windows]
+                  ;; First time out the previous total is taken as this one, so
+                  ;; the delta is zero: a broker up for hours before anyone
+                  ;; subscribes does not report its whole history as a spike.
+                  (let [delta (- total (get totals suffix total))]
+                    [[suffix label]
+                     (load-rate (get averages [suffix label] 0.0)
+                                (double delta) elapsed (double minutes))])))]
+      (reset! load-state {:totals now :averages next-averages})
+      (into {} (for [[[suffix label] v] next-averages]
+                 [(str prefix suffix "/" label) (two-places v)])))))
 
 (def ^:private mqtt-packet-topics
   "Per-packet-type counts, following Mosquitto in publishing one direction for
@@ -157,16 +227,26 @@
                       MqttStat/sentByType)
                     ^int (int type)))])))))
 
+(defonce ^:private last-publish (atom nil))
+
 (defn publish-once!
-  "Publish the current values. Retained and at QoS 0, like Mosquitto's."
+  "Publish the current values. Retained and at QoS 0, like Mosquitto's.
+
+   The load averages advance by the time actually elapsed since the last call
+   rather than by the nominal interval, so a publisher that was held up does
+   not overstate the rate."
   []
-  (doseq [[topic value] (stats)]
-    (h/publish {:packet-type :PUBLISH
-                :topic       topic
-                :qos         0
-                :retain?     true
-                :payload     (str value)
-                :client-key  nil})))
+  (let [now     (System/nanoTime)
+        prev    @last-publish
+        elapsed (if prev (/ (- now prev) 1e9) (double sys-interval))]
+    (reset! last-publish now)
+    (doseq [[topic value] (merge (stats) (advance-load! elapsed))]
+      (h/publish {:packet-type :PUBLISH
+                  :topic       topic
+                  :qos         0
+                  :retain?     true
+                  :payload     (str value)
+                  :client-key  nil}))))
 
 (defonce ^:private running (atom false))
 

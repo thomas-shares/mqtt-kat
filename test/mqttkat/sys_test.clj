@@ -146,3 +146,71 @@
             "nothing should be published after stop!"))
       (finally
         (sys/stop!)))))
+
+;; ── load averages ────────────────────────────────────────────────────────
+
+(deftest load-rate-is-a-per-minute-rate-not-a-count
+  (testing "a steady load converges on the events-per-minute figure"
+    ;; 30 events every 10 seconds is 180 a minute, and that is what the average
+    ;; must settle on — not 30, and not 3. Getting this wrong is the easiest
+    ;; way to publish a number that looks plausible and means nothing.
+    (let [elapsed 10.0
+          delta   30.0
+          settled (reduce (fn [prev _] (sys/load-rate prev delta elapsed 1.0))
+                          0.0 (range 200))]
+      (is (< (Math/abs (- settled 180.0)) 0.01)
+          (str "a steady 30 per 10s should settle at 180/min, got " settled)))))
+
+(deftest load-rate-windows-differ-in-how-fast-they-react
+  (testing "the short window follows a burst and the long one barely moves"
+    ;; The only reason to publish three of these is that they disagree; if they
+    ;; did not, two of them would be noise.
+    (let [elapsed 10.0
+          burst   100.0
+          after   (fn [minutes] (sys/load-rate 0.0 burst elapsed minutes))]
+      (is (> (after 1.0) (after 5.0)) "1min should react faster than 5min")
+      (is (> (after 5.0) (after 15.0)) "5min should react faster than 15min")
+      (is (< (after 15.0) (* 0.2 (after 1.0)))
+          "and 15min should be far behind after a single sample"))))
+
+(deftest load-rate-decays-back-to-zero
+  (testing "an idle broker's averages fall away"
+    (let [quiet (reduce (fn [prev _] (sys/load-rate prev 0.0 10.0 1.0))
+                        600.0 (range 100))]
+      (is (< quiet 0.01) (str "idle should decay to nothing, got " quiet)))))
+
+(deftest load-topics-are-published
+  (testing "every load metric appears at all three windows"
+    (let [topics (set (keys (sys/advance-load! 10.0)))]
+      (is (= 27 (count topics)) "nine metrics at three windows")
+      (doseq [suffix ["load/connections" "load/sockets"
+                      "load/bytes/received" "load/bytes/sent"
+                      "load/messages/received" "load/messages/sent"
+                      "load/publish/received" "load/publish/sent"
+                      "load/publish/dropped"]
+              window ["1min" "5min" "15min"]]
+        (is (contains? topics (str "$SYS/broker/" suffix "/" window))
+            (str suffix "/" window " should be published"))))))
+
+(deftest load-values-are-formatted-for-any-locale
+  (testing "a decimal point, whatever the machine's locale"
+    ;; Published to the same topics a Mosquitto dashboard reads, so "1,50"
+    ;; would be a parse error somewhere else rather than a display quirk here.
+    (let [values (vals (sys/advance-load! 10.0))]
+      (is (seq values))
+      (is (every? #(re-matches #"-?\d+\.\d{2}" %) values)
+          (str "expected two decimal places with a point, got "
+               (pr-str (take 3 (remove #(re-matches #"-?\d+\.\d{2}" %) values))))))))
+
+(deftest load-does-not-report-history-as-a-spike
+  (testing "the first sample after a cold start reports nothing"
+    ;; The counters are cumulative and the broker may have been up for hours,
+    ;; so a first delta taken against zero would publish the whole history as
+    ;; though it had happened in the last interval. Reaching into the private
+    ;; state is the point of the test: what is being checked is precisely what
+    ;; happens with no previous totals recorded.
+    (reset! @#'sys/load-state {:totals {} :averages {}})
+    (let [first-pass (sys/advance-load! 10.0)
+          non-zero   (remove (comp #{"0.00"} val) first-pass)]
+      (is (empty? non-zero)
+          (str "a cold first sample should be all zeroes, got " (pr-str non-zero))))))
