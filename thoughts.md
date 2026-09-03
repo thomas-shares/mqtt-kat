@@ -120,6 +120,104 @@ return. So did the test, which now covers PUBACK, the full QoS 2 exchange and
 retained replay on topics nobody is subscribed to — none of which was covered
 before, and all of which would break the day that lookup starts returning nil.
 
+### Somebody else's test suite
+
+Ran the Paho interoperability suite — `client_test.py` from
+eclipse-paho/paho.mqtt.testing — against the broker for the first time. Ten
+tests, three failures, and every one of them something the unit suite had no
+opinion about. Worth doing much earlier: a suite written by people who did not
+write this broker asks questions I would not have thought to ask.
+
+First, what is *not* wrong with it. The suite is dormant — last commit January
+2024, and the local checkout is level with origin, so there is nothing newer to
+pull. On Python 3.14 it makes two kinds of noise, both its own:
+
+* `DeprecationWarning: It is deprecated to return a value that is not None from
+  a test case`. Every test ends `return succeeded`. Deprecated since 3.11, and
+  one day an error.
+* `OSError(9, 'Bad file descriptor')` out of the client's receive thread.
+  Errno 9 is the giveaway: EBADF means *this process* closed the descriptor. A
+  peer closing a connection gives ECONNRESET or a clean EOF, never EBADF, so
+  the broker cannot produce it. It is a teardown race in the suite's own client
+  — `disconnect()` ends by resetting `stopping = False`, and `connect()` then
+  closes the old socket without stopping a receiver that may still be reading
+  it, so the stray read gets logged rather than swallowed.
+
+Neither explains a single failing assertion. Useful to have established, since
+"the tooling is old" is a comfortable place to stop looking.
+
+### $ topics, and four session bugs behind them
+
+**A wildcard filter matched a $ topic.** §4.7.2: a filter beginning with `#` or
+`+` must not match a topic name beginning with `$`. `+/+` was happily matching
+`$TopicA/B`. Triennium does not know the rule, so each subscription now records
+the filter it was made with and `matching-subscribers` sieves the matches. The
+rule is about the first level of the *filter*, not about `$` appearing
+anywhere: `$SYS/#` still matches `$SYS/foo`, and a blunt "drop anything
+starting with $" would have passed the first test and broken that one.
+
+**Session Present was reported on a clean connect.** §3.2.2.2 requires 0
+whenever CleanSession is 1. This answered with whatever happened to be parked
+under the client-id, so a client asking for a fresh session was told it had
+resumed one — and a client that believes that does not re-subscribe.
+
+**A clean connect did not discard the stored session.** §3.1.2.4. The parked
+entry, its subscriptions and its queued messages all survived, so the *next*
+persistent connect resumed a session the client had explicitly asked to be rid
+of, and nothing ever cleaned it up.
+
+**Nothing was kept for an offline session.** §4.1 requires QoS 1 and 2 messages
+matching a persistent session's subscriptions to be held while its client is
+away. Those subscriptions were deleted from the trie on disconnect, so a
+publish in between matched nothing at all and there was nothing to keep. They
+now move to an `*offline-trie*` on disconnect and back on reconnect; what
+matches there is queued against the client-id and flushed when the client
+returns. QoS 2 is queued at PUBREL rather than at PUBLISH, because that is when
+the message is published (§4.3.3). QoS 0 is deliberately not kept — the spec
+requires it only of QoS 1 and 2, and the suite agrees: "This server is not
+queueing QoS 0 messages for offline clients" is a pass.
+
+**A retained QoS 2 message was never replayed.** Found while chasing the one
+above. `process-retained-messages` rebuilt its subscriber maps as
+`{:client-key k}` with no `:qos`, and `qos-2-send` dispatches on exactly that
+key — so the QoS 2 branch matched nothing and silently sent nothing. QoS 0 and
+1 came through, which is why it takes a test covering all three levels to see
+it.
+
+### A failure that was a consequence, not a bug
+
+`test_unsubscribe` started failing after the session fixes, having passed
+before. It was not a regression. `test_retained_messages` had been failing at
+its *first* assertion, before it published anything; with Session Present fixed
+it got further, published three retained messages, and then failed at a later
+assertion — so it never reached its own cleanup and left them set for the next
+test to trip over. Fixing the retained replay fixed both.
+
+Worth remembering the shape of that: in a suite of order-dependent tests
+sharing two clients and a broker, a test getting *further* can break the one
+after it. The second failure was information about the first, not a new
+problem.
+
+Nine of ten pass now. The tenth, `test_subscribe_failure`, expects SUBACK
+`0x80` for `test/nosubscribe` — a topic hardcoded in the suite's own broker
+(`mqtt/brokers/V311/MQTTBrokers.py:351`). It tests that a broker configured to
+refuse a subscription says so properly. This broker refuses nothing: it has no
+authorization at all, and `MqttConnect` parses username and password into the
+message map that no handler ever reads. `0x80` is not a missing return code, it
+is a missing policy, so the test is left alone deliberately rather than
+outstanding.
+
+### And one of my own assertions, wrong again
+
+`qos-0-throttles-the-publisher-when-back-pressure-is-on` asserted that a
+throttled publisher could not finish writing, and failed two runs in five. At
+the `maxQueued` of 20 the test sets, the resume threshold is two packets, so
+the broker pauses and resumes fast enough that the writer gets through all of
+them. The broker was doing exactly what it was built to do. That is three
+separate times now that a test of mine has asserted something timing-dependent
+and blamed the code for it; the pause counter is what is actually promised, and
+that is all it checks now.
+
 ## 20260902
 
 ### The packet identifier pool had a countdown in it

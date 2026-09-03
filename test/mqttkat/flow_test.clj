@@ -293,3 +293,62 @@
             (client/send-message (:client b) {:packet-type :PUBACK
                                               :packet-identifier (:packet-identifier msg)})))
         (tu/close! b)))))
+
+(deftest dollar-topics-are-not-matched-by-wildcard-filters
+  (testing "a filter beginning with a wildcard must not match a $ topic"
+    ;; MQTT 3.1.1 §4.7.2. Topic names beginning with $ are the server's own —
+    ;; $SYS and the like — so a client asking for `#` is asking for the
+    ;; application's traffic and must not be handed the broker's. The rule is
+    ;; about the first level of the *filter*, not about $ appearing anywhere,
+    ;; so a filter naming the $ level itself still matches (next test).
+    ;;
+    ;; Each filter gets a topic it would match were it not for the $, so that
+    ;; every case actually exercises the rule: `+` against a two-level topic,
+    ;; or `+/B` against one whose second level is not B, would pass whatever
+    ;; the broker did.
+    ;; The tail sets the topic's depth to whatever the filter needs: `+/+`
+    ;; against a three-level topic, or `+` against a two-level one, would pass
+    ;; whatever the broker did.
+    (doseq [[wildcard tail] [["#"   "/a/b"]
+                             ["+/+" "/a"]
+                             ["+"   ""]
+                             ["+/B" "/B"]]]
+      (testing (str "filter " wildcard)
+        (let [suffix    (tu/client-id "dollar")
+              reserved  (str "$" suffix tail)
+              ordinary  (str suffix tail)
+              sub       (tu/connect! "dollar-sub" :ordered? true)
+              pub       (tu/connect! "dollar-pub")]
+          (client/send-message (:client sub) (subscribe-msg wildcard 0 1))
+          (tu/expect! (:ch sub) :SUBACK)
+          (client/send-message (:client pub) (publish-msg reserved "reserved" :qos 0))
+          ;; An ordinary topic the same filter matches, published second, so
+          ;; the assertion is that the $ one did not arrive rather than that
+          ;; nothing had arrived yet.
+          (client/send-message (:client pub) (publish-msg ordinary "allowed" :qos 0))
+          (let [msgs      (tu/take-n! (:ch sub) 2 1500)
+                topics    (map :topic (:PUBLISH msgs))
+                forbidden (filter #(clojure.string/starts-with? % "$") topics)]
+            (is (empty? forbidden)
+                (str wildcard " must not match a $ topic; it received " (pr-str forbidden))))
+          (tu/close! sub)
+          (tu/close! pub))))))
+
+(deftest dollar-topics-match-filters-that-name-the-dollar-level
+  (testing "$SYS/# still matches $SYS topics"
+    ;; The other half of §4.7.2, and the half a blunt "drop anything starting
+    ;; with $" would break.
+    (let [suffix (tu/client-id "dollar-ok")
+          topic  (str "$SYS/" suffix "/detail")
+          sub    (tu/connect! "dollar-explicit-sub" :ordered? true)
+          pub    (tu/connect! "dollar-explicit-pub")]
+      (client/send-message (:client sub) (subscribe-msg (str "$SYS/" suffix "/#") 0 1))
+      (tu/expect! (:ch sub) :SUBACK)
+      (client/send-message (:client pub) (publish-msg topic "server news" :qos 0))
+      (let [msg (tu/expect-eventually! (:ch sub) :PUBLISH 2000)]
+        (is (some? msg) "a filter naming the $ level explicitly should still match")
+        (when msg
+          (is (= topic (:topic msg)))
+          (is (= "server news" (tu/payload-str msg)))))
+      (tu/close! sub)
+      (tu/close! pub))))

@@ -1,6 +1,7 @@
 (ns mqttkat.handlers.connect
   (:require [clojure.tools.logging :as log]
-            [mqttkat.handlers :refer [*clients* *retained* *outbound* send-buffer add-client! add-timer!]]
+            [mqttkat.handlers :refer [*clients* *retained* *outbound* send-buffer add-client!
+                                      add-timer! flush-pending!]]
             [mqttkat.handlers.disconnect :refer :all])
   (:import [org.mqttkat.packages MqttConnAck MqttPublish]))
 
@@ -29,7 +30,7 @@
   (disconnect-client client-key))
 
 (defn handle-success
-  [{:keys [client-key keep-alive client-id] :as msg}]
+  [{:keys [client-key keep-alive client-id clean-session?] :as msg}]
   (log/trace "SUCCESS here now...." (contains? @*clients* client-id))
   (when (and (contains? msg :will) (true? (get-in msg [:will :will-retain])))
     (let [topic (get-in msg [:will :will-topic])
@@ -41,8 +42,14 @@
         (swap! *retained* dissoc topic)
         (swap! *retained* assoc topic {:qos qos :payload payload}))))
   
+  ;; §3.2.2.2: Session Present is 0 whenever CleanSession is 1, whatever the
+  ;; server happens to have stored — the session is about to be discarded, so
+  ;; saying it is present would be a lie the client acts on. This reported
+  ;; whatever was parked under the client-id regardless of clean-session, so a
+  ;; client asking for a fresh session was told it had resumed one.
   (send-buffer [client-key] (MqttConnAck/encode {:packet-type :CONNACK
-                                                 :session-present? (contains? @*clients* client-id)
+                                                 :session-present? (and (false? clean-session?)
+                                                                        (contains? @*clients* client-id))
                                                  :connect-return-code 0x00}))
   (add-client! msg)
   ;; After add-client!, never before: it replaces this key's whole entry, which
@@ -82,4 +89,7 @@
                                         :qos               qos
                                         :retain?           false
                                         :duplicate?        true
-                                        :packet-identifier stalled-id})))))
+                                        :packet-identifier stalled-id}))))
+  ;; Then whatever arrived while this session was away — after the
+  ;; redeliveries above, which were already on their way before it left.
+  (flush-pending! client-key client-id))

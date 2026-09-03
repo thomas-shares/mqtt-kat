@@ -217,8 +217,13 @@
               (recur)))
           (is (> (.sum MqttStat/publisherPauses) before-throttled)
               "the publisher should have been paused rather than have its messages dropped")
-          (is (< @sent n)
-              "and being unread, it should not have managed to write everything")
+          ;; Whether the publisher actually stalls is not asserted, and was for
+          ;; a while: it depends on the socket buffer sizes and on the resume
+          ;; threshold, which at the tiny maxQueued this test uses is two
+          ;; packets — so the broker pauses and resumes fast enough that the
+          ;; writer can still get through all of them. That made the assertion
+          ;; fail about two runs in five while the broker was behaving exactly
+          ;; as designed. The pause count is the part that is actually promised.
 
           ;; Teardown, not assertion. Closing the stalled subscriber releases
           ;; the publisher; closing the publisher unblocks its writer whether

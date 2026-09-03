@@ -56,8 +56,56 @@
 (def ^:dynamic *clients* (atom {}))
 (def ^:dynamic *inflight* (atom {}))
 (def ^:dynamic *subscriber-trie* (atom (tr/make-trie)))
+
+(def ^:dynamic *offline-trie*
+  "Subscriptions belonging to persistent sessions whose client is not connected.
+
+   §3.1.2.4 makes a CleanSession 0 session outlive its connection, and §4.1
+   requires QoS 1 and 2 messages matching its subscriptions to be kept for it
+   while it is away. Those subscriptions used to be deleted from the live trie
+   on disconnect and restored on reconnect, so a publish in between matched
+   nothing and there was nothing to keep.
+
+   They live in a trie of their own rather than staying in the live one because
+   the fan-out writes to a SelectionKey, and an offline session has none: what
+   matches here is queued against the client-id instead of written to a socket."
+  (atom (tr/make-trie)))
 (def ^:dynamic *outbound* (atom {}))
 (def ^:dynamic *retained* (atom {}))  ;; {:topic {:qos qos :payload payload}})
+
+(defn- wildcard-rooted?
+  "Whether a topic filter begins with a wildcard level."
+  [^String topic-filter]
+  (and topic-filter
+       (or (.startsWith topic-filter "#")
+           (.startsWith topic-filter "+"))))
+
+(defn- sieve-dollar
+  "Drop wildcard-rooted filters when the topic name begins with $."
+  [^String topic matched]
+  (if (and topic (.startsWith topic "$"))
+    (into #{} (remove (comp wildcard-rooted? :topic-filter)) matched)
+    matched))
+
+(defn matching-offline-sessions
+  "Persistent sessions subscribed to `topic` whose client is not connected."
+  [^String topic]
+  (sieve-dollar topic (tr/matching-vals @*offline-trie* topic)))
+
+(defn matching-subscribers
+  "The subscribers a message on `topic` should go to.
+
+   MQTT 3.1.1 §4.7.2: a topic filter beginning with a wildcard must not match a
+   topic name beginning with $. Those names are the server's own — $SYS and the
+   like — and a client subscribing to `#` is asking for the application's
+   traffic, not the broker's internals. A filter that names the $ level
+   itself, `$SYS/#`, still matches, so the rule is about the first level of the
+   filter rather than about $ appearing anywhere.
+
+   The trie does not know this rule, so the filter each subscription was made
+   with is kept alongside it and the matches are sieved here."
+  [^String topic]
+  (sieve-dollar topic (tr/matching-vals @*subscriber-trie* topic)))
 
 (def my-pool (at/mk-pool))
 (declare qos-0)
@@ -67,7 +115,7 @@
 
 (defn publish-will [{:keys [topic qos retain payload]}]
   (log/trace "Sending will message on topic:" payload)
-  (when-let [keys (tr/matching-vals @*subscriber-trie* topic)]
+  (when-let [keys (matching-subscribers topic)]
     (log/trace "Will keys:" keys)
     (case (long qos)
       0 (qos-0 keys topic {:payload payload} retain)
@@ -129,6 +177,17 @@
     (at/kill timer)
     (swap! *clients* assoc-in [key :timer] nil)))
 
+(defn discard-session!
+  "Forget everything stored under `client-id`: the parked session, the
+   subscriptions held for it while offline, and anything queued or in flight."
+  [client-id]
+  (doseq [topic (:subscribed-topics (get @*clients* client-id))]
+    (swap! *offline-trie* tr/delete (:topic-filter topic)
+           {:client-id client-id :qos (:qos topic) :topic-filter (:topic-filter topic)}))
+  (swap! *clients* dissoc client-id)
+  (swap! *outbound* dissoc client-id)
+  (swap! *inflight* #(into {} (remove (fn [[[id _] _]] (= id client-id))) %)))
+
 (defn add-client! [{:keys [client-key client-id clean-session?] :as msg}]
   (if (and (false? clean-session?)
            (contains? @*clients* client-id))
@@ -138,12 +197,22 @@
         (log/trace "subscriptions:" subscriptions)
         (doseq [topic subscriptions]
           (log/trace "Adding to sub-trie for topic:" (:topic-filter topic)  "   qos: " (:qos topic))
-          (swap! *subscriber-trie* tr/insert (:topic-filter topic) {:client-key client-key :qos (:qos topic)})))
+          (swap! *offline-trie* tr/delete (:topic-filter topic)
+                 {:client-id client-id :qos (:qos topic) :topic-filter (:topic-filter topic)})
+          (swap! *subscriber-trie* tr/insert (:topic-filter topic)
+                 {:client-key client-key :qos (:qos topic) :topic-filter (:topic-filter topic)})))
       (log/trace "client-id:" client-id)
       (swap! *clients* assoc client-key client)
       (swap! *clients* dissoc client-id))
     (let [client (dissoc msg :packet-type :client-key)
           client-added (update-in client [:subscribed-topics] (fnil conj #{}) )]
+      ;; §3.1.2.4: connecting with CleanSession 1 discards any session stored
+      ;; under this client-id. Without this the parked entry, its offline
+      ;; subscriptions and its queued messages stayed for the life of the
+      ;; process, and the next persistent connect resumed a session the client
+      ;; had explicitly asked to be rid of.
+      (when (contains? @*clients* client-id)
+        (discard-session! client-id))
       (swap! *clients* assoc client-key client-added)))
  (log/trace "ADD: Subscriber trie POST:" @*subscriber-trie*)
  (log/trace "ADD: Clients:" @*clients*))
@@ -168,7 +237,14 @@
       (log/trace "Removing subscribed topics: :" subscribed-topics)
       (doseq [topic subscribed-topics]
         (log/trace "Removing from sub-trie for topic:"  (:topic-filter topic)  "   qos: " (:qos topic))
-        (swap! *subscriber-trie* tr/delete (:topic-filter  topic) {:client-key key :qos (:qos topic)}))
+        (swap! *subscriber-trie* tr/delete (:topic-filter topic)
+               ;; tr/delete matches on the whole value, so this has to carry
+               ;; every key tr/insert put there.
+               {:client-key key :qos (:qos topic) :topic-filter (:topic-filter topic)})
+        ;; Parked rather than forgotten: a publish arriving while this session
+        ;; is away still has to match it, or there is nothing to queue.
+        (swap! *offline-trie* tr/insert (:topic-filter topic)
+               {:client-id client-id :qos (:qos topic) :topic-filter (:topic-filter topic)}))
       ;; Parking the session under its client-id happens once, not once per
       ;; subscribed topic: these two were inside the doseq above, so a
       ;; persistent session with no subscriptions was dropped instead of kept,
@@ -365,6 +441,34 @@
       (when (>= (pending-count client-id) pause-threshold)
         (throttle-publisher! key publisher-key)))))
 
+(defn queue-for-offline-sessions!
+  "Keep a publish for persistent sessions that are subscribed but not connected.
+
+   QoS 0 is deliberately not kept. §4.1 requires this of QoS 1 and 2 only, and
+   at-most-once means a message for a client that is not there has already been
+   delivered as well as it is going to be. The QoS stored is the lesser of the
+   publish and the subscription, as it would be on delivery."
+  [topic {:keys [qos payload]}]
+  (when (pos? (long qos))
+    (doseq [{:keys [client-id] sub-qos :qos} (matching-offline-sessions topic)]
+      (when client-id
+        (queue-pending! client-id {:topic   topic
+                                   :payload payload
+                                   :qos     (min (long qos) (long sub-qos))})))))
+
+(defn flush-pending!
+  "Send what was queued for `client-id` while it was away.
+
+   Bounded by the in-flight window rather than by the queue: take-pending!
+   returns nil once the window is full, and the rest drains on acknowledgements
+   the ordinary way."
+  [key client-id]
+  (loop [sent 0]
+    (when (< sent pending-limit)
+      (when-let [[packet-identifier msg] (take-pending! client-id)]
+        (send-publish! key msg packet-identifier)
+        (recur (inc sent))))))
+
 (defn- drain-pending!
   "Send the next message waiting on this client's window, if any, and let any
    throttled publishers go once the queue is comfortably clear.
@@ -494,7 +598,7 @@
 
 (defn publish [{:keys [topic qos retain? payload] :as msg}]
   (log/debug "PUBLISH:" (dissoc msg :client-key))
-  (log/trace "Matched Keys:" (tr/matching-vals @*subscriber-trie* topic))
+  (log/trace "Matched Keys:" (matching-subscribers topic))
   ;(log/trace (str "valid publish: " (s/valid? :mqtt/publish msg)))
   ;(s/explain :mqtt/publish msg)
   (when retain?
@@ -510,10 +614,13 @@
   ;; on delivery (§4.3.2, §4.3.3), so they must not be conditional on there
   ;; being subscribers. A `matching-vals` that returned nil for no match would
   ;; otherwise have left a QoS 1 publisher retrying for ever.
-  (let [keys (tr/matching-vals @*subscriber-trie* topic)]
+  (let [keys (matching-subscribers topic)]
     (case (long qos)
       0 (qos-0 keys topic msg false)
-      1 (qos-1 keys topic msg)
+      1 (do (qos-1 keys topic msg)
+            (queue-for-offline-sessions! topic msg))
+      ;; Not for QoS 2: that message is not published until its PUBREL
+      ;; arrives (§4.3.3), so it is kept for offline sessions there.
       2 (qos-2 keys topic msg))))
 
 (defn puback [{:keys [packet-identifier client-key]}]
@@ -557,7 +664,8 @@
   (let [client-id (:client-id (get @*clients* client-key))
         {:keys [topic msg]} (get @*inflight* [client-id packet-identifier])]
     (when topic
-      (qos-2-send (tr/matching-vals @*subscriber-trie* topic) topic msg))
+      (qos-2-send (matching-subscribers topic) topic msg)
+      (queue-for-offline-sessions! topic msg))
     (swap! *inflight* dissoc [client-id packet-identifier])))
 
 (defn pubcomp [{:keys [packet-identifier client-key] :as msg}]
@@ -573,24 +681,24 @@
     (update-in subscribers [topic] conj key)
     (assoc subscribers topic [key])))
 
-(defn process-retained-messages [key]
-  (log/trace "key:" key)
-  (log/trace "subscribers:" @*subscriber-trie*)
-  (log/trace "retained topics:"  (keys @*retained*))
+(defn process-retained-messages
+  "Replay whatever is retained on the topics `key` has just subscribed to.
+
+   The subscriber maps are the real ones from the trie, carrying the QoS the
+   subscription was granted. They used to be rebuilt here as `{:client-key k}`
+   with no :qos at all, and qos-2-send dispatches by exactly that key — so a
+   retained QoS 2 message matched none of its branches and was silently never
+   replayed, while QoS 0 and 1 came through."
+  [key]
   (doseq [retained-topic (keys @*retained*)]
-    (log/trace "Total subscribed:"   @*subscriber-trie*)
-    (log/trace "subscribed  -->:" (tr/matching-vals @*subscriber-trie* retained-topic))
-    (let [keys (set (mapv #(:client-key %) (tr/matching-vals @*subscriber-trie* retained-topic)))]
-      (log/trace "Yes there are keys subscribed to this topic:" (> (count keys) 0))
-      (log/trace "key is contained:" (contains? keys key))
-      (log/trace "retained topic:" (get-in @*retained* [retained-topic]))
-      (when (contains? keys key)
+    (let [subs (filter #(= key (:client-key %)) (matching-subscribers retained-topic))]
+      (when (seq subs)
         (when-let [payload (get-in @*retained* [retained-topic :payload])]
           (log/trace "retained payload:" payload)
           (case (long (get-in @*retained* [retained-topic :qos]))
-            0 (qos-0 [{:client-key key}] retained-topic {:payload payload} true)
-            1 (qos-1-send [{:client-key key}] retained-topic {:payload payload})
-            2 (qos-2-send [{:client-key key}] retained-topic {:payload payload})))))))
+            0 (qos-0 subs retained-topic {:payload payload} true)
+            1 (qos-1-send subs retained-topic {:payload payload})
+            2 (qos-2-send subs retained-topic {:payload payload})))))))
 
 (defn subscribe [{:keys [client-key topics packet-identifier] :as msg}]
   (log/debug "SUBSCRIBE:" (dissoc msg :client-key))
@@ -598,7 +706,8 @@
   (doseq [{:keys [topic-filter qos]} topics]
     ;(swap! subscribers add-subscriber (:topic-filter t) client-key)
     (swap! *clients* update-in [client-key :subscribed-topics] conj {:topic-filter topic-filter :qos qos})
-    (swap! *subscriber-trie* tr/insert topic-filter {:client-key client-key :qos qos}))
+    (swap! *subscriber-trie* tr/insert topic-filter
+           {:client-key client-key :qos qos :topic-filter topic-filter}))
   (log/trace "subscribers POST ADD:" @*subscriber-trie*)
   (send-buffer [client-key]
                (MqttSubAck/encode
@@ -617,7 +726,8 @@
       (log/trace "Unsubscribing from topic:" topic qos)
       (swap! *clients* update-in [client-key :subscribed-topics] disj {:topic-filter topic :qos qos})
       (log/trace "Unsubscribing from trie :" topic " client-key: " client-key)
-      (swap! *subscriber-trie* tr/delete topic {:client-key client-key :qos qos})))
+      (swap! *subscriber-trie* tr/delete topic
+             {:client-key client-key :qos qos :topic-filter topic})))
   (send-buffer [client-key]
                (MqttUnSubAck/encode
                 {:packet-type       :UNSUBACK
