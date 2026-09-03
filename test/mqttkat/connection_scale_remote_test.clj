@@ -57,7 +57,12 @@
    prints every ten seconds is how this test sees what the broker thinks, and
    an undrained pipe would eventually block the broker itself."
   [lines]
-  (let [pb (doto (ProcessBuilder. ^java.util.List ["java" "-Xmx3G" "-jar" uberjar (str broker-port)])
+  ;; The command goes through a hinted local rather than being hinted in
+  ;; place: ProcessBuilder has both a List and a String... constructor, and a
+  ;; tag on the vector literal is not enough to pick between them — it compiles
+  ;; but resolves the call reflectively every time.
+  (let [^java.util.List command ["java" "-Xmx3G" "-jar" uberjar (str broker-port)]
+        pb (doto (ProcessBuilder. command)
              (.redirectErrorStream true))
         proc (.start pb)]
     (.start (Thread. (fn []
@@ -118,7 +123,8 @@
   "Resident size of a pid, via ps. /proc is not readable from this JVM."
   [pid]
   (try
-    (let [p (.start (doto (ProcessBuilder. ^java.util.List ["ps" "-o" "rss=" "-p" (str pid)])
+    (let [^java.util.List command ["ps" "-o" "rss=" "-p" (str pid)]
+          p (.start (doto (ProcessBuilder. command)
                       (.redirectErrorStream true)))]
       (with-open [r (io/reader (.getInputStream p))]
         (some-> (first (line-seq r)) str/trim not-empty Long/parseLong (quot 1024))))
