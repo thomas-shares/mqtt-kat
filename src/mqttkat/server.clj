@@ -64,9 +64,16 @@
     (alter-meta! *server* #(assoc % :timeout 1000))
     (reset! *server* nil)))
 
-(defn -main [& _]
-  (start!)
-  (util/info))
+(defn -main
+  "Start the broker and report on it until killed.
+
+   Takes an optional port, so a second instance can be run alongside one that
+   already has 1883 — which the out-of-process scale test needs, and which is
+   generally useful for trying something without stopping what is there."
+  [& args]
+  (let [port (if-let [p (first args)] (Long/parseLong (str p)) 1883)]
+    (start! "0.0.0.0" (int port))
+    (util/info)))
 
 (comment
   (start!)

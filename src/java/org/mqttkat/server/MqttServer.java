@@ -199,11 +199,17 @@ public class MqttServer implements Runnable {
 				closeKey(key);
 			}
 		} catch (IOException e) {
-			key.cancel();
-			if (connection != null) {
-				connection.close();
-			}
-			ch.close();
+			// The same teardown as an orderly close, which this did not do. A
+			// client that goes without a FIN — a reset, which is what Linux
+			// sends when a socket is closed with data still unread on it —
+			// arrives here rather than at the read < 0 above. Cancelling the
+			// key stops the I/O but dispatches no DISCONNECT, so remove-client!
+			// never ran: the session stayed in *clients*, its subscriptions
+			// stayed in the trie, and the broker went on counting it as
+			// connected for the life of the process. Ten thousand clients
+			// killed that way were still being reported as present.
+			log.debug("read failed on connection, closing it", e);
+			closeKey(key);
 		}
 	}
 

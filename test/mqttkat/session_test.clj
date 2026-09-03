@@ -6,7 +6,13 @@
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [mqttkat.client :as client]
             [mqttkat.handlers :as h]
-            [mqttkat.test-util :as tu]))
+            [mqttkat.util :as util]
+            [mqttkat.test-util :as tu])
+  (:import [java.nio ByteBuffer]
+           [org.mqttkat.packages MqttConnect MqttSubscribe]))
+
+(defn- ^"[B" ->bytes [^ByteBuffer b]
+  (let [a (byte-array (.remaining b))] (.get (.duplicate b) a) a))
 
 (use-fixtures :once tu/broker-fixture)
 
@@ -180,3 +186,51 @@
                 (client/pubrel (:client pub) id)
                 (tu/expect-eventually! (:ch pub) :PUBCOMP 2000))))
       (tu/close! pub))))
+
+;; ── abrupt disconnects ───────────────────────────────────────────────────
+
+(defn- connected-client-ids []
+  (set (keep :client-id (vals @h/*clients*))))
+
+(deftest subscriptions-go-when-a-clean-session-disconnects
+  (testing "a clean session takes its subscriptions with it"
+    ;; remove-client! removed subscriptions from the trie only for a persistent
+    ;; session. A clean one — the common case — left them behind pointing at a
+    ;; dead SelectionKey, for the life of the broker: the trie grew by every
+    ;; client that had ever connected, and every publish matched all of them.
+    ;;
+    ;; These clients never read, so their CONNACK and SUBACK are still in the
+    ;; socket buffer when they go, which is how a real client that crashes
+    ;; leaves. That part is deliberate but not what is asserted here.
+    (let [topic (tu/topic "reset")
+          ids   (mapv (fn [_] (tu/client-id "reset")) (range 5))]
+      (doseq [id ids]
+        (let [sock (java.net.Socket.)]
+          (.connect sock (java.net.InetSocketAddress. ^String tu/host ^int (int tu/port)))
+          (let [^java.io.OutputStream out (.getOutputStream sock)]
+            (.write out ^bytes (->bytes (MqttConnect/encode
+                                         {:packet-type :CONNECT :protocol-name "MQTT"
+                                          :protocol-version 4 :keep-alive 0
+                                          :clean-session? true :client-id id})))
+            (.write out ^bytes (->bytes (MqttSubscribe/encode
+                                         {:packet-type :SUBSCRIBE :packet-identifier 1
+                                          :topics [{:qos 0 :topic-filter topic}]})))
+            (.flush out))
+          ;; No read at all, so the CONNACK and SUBACK are still sitting in the
+          ;; receive buffer: this close is a reset, not a FIN.
+          (Thread/sleep 100)
+          (.close sock)))
+
+      ;; Asserted against these five by name rather than against a total: the
+      ;; broker is shared with the rest of the suite, and a count taken before
+      ;; and after picks up whoever else happened to come or go.
+      (let [deadline (+ (System/currentTimeMillis) 5000)]
+        (loop []
+          (when (and (some (connected-client-ids) ids)
+                     (< (System/currentTimeMillis) deadline))
+            (Thread/sleep 50)
+            (recur))))
+      (is (not-any? (connected-client-ids) ids)
+          "every reset connection should have been cleaned up")
+      (is (empty? (h/matching-subscribers topic))
+          "and its subscriptions should have gone with it"))))

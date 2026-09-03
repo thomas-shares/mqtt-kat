@@ -222,35 +222,42 @@
   (remove-timer! key)
   (log/trace "REMOVE: clean session?" (get-in @*clients* [key :clean-session?] true))
   (log/trace "key:" key)
-  (if (get-in @*clients* [key :clean-session?] true)
-    (let [client-id (get-in @*clients* [key :client-id])]
-      ;; A clean session keeps nothing. Its in-flight records would otherwise
-      ;; sit in *outbound* and *inflight* for the life of the process, since
-      ;; only a reconnect under the same client-id ever reads them again.
-      (when client-id
-        (swap! *outbound* dissoc client-id)
-        (swap! *inflight* #(into {} (remove (fn [[[id _] _]] (= id client-id))) %)))
-      (swap! *clients* dissoc key))
-    (let [client (get @*clients* key)
-          client-id (:client-id client)
-          subscribed-topics (:subscribed-topics client)]
-      (log/trace "Removing subscribed topics: :" subscribed-topics)
-      (doseq [topic subscribed-topics]
-        (log/trace "Removing from sub-trie for topic:"  (:topic-filter topic)  "   qos: " (:qos topic))
-        (swap! *subscriber-trie* tr/delete (:topic-filter topic)
-               ;; tr/delete matches on the whole value, so this has to carry
-               ;; every key tr/insert put there.
-               {:client-key key :qos (:qos topic) :topic-filter (:topic-filter topic)})
+  (let [client            (get @*clients* key)
+        client-id         (:client-id client)
+        clean-session?    (get client :clean-session? true)
+        subscribed-topics (:subscribed-topics client)]
+    ;; Out of the live trie either way. This used to happen only for a
+    ;; persistent session, so a clean one left its subscriptions behind
+    ;; pointing at a dead SelectionKey — for the life of the broker, growing
+    ;; the trie with every client that ever connected and matching them on
+    ;; every publish.
+    (doseq [topic subscribed-topics]
+      (log/trace "Removing from sub-trie for topic:" (:topic-filter topic) "  qos:" (:qos topic))
+      (swap! *subscriber-trie* tr/delete (:topic-filter topic)
+             ;; tr/delete matches on the whole value, so this has to carry
+             ;; every key tr/insert put there.
+             {:client-key key :qos (:qos topic) :topic-filter (:topic-filter topic)}))
+    (if clean-session?
+      (do
+        ;; A clean session keeps nothing. Its in-flight records would otherwise
+        ;; sit in *outbound* and *inflight* for the life of the process, since
+        ;; only a reconnect under the same client-id ever reads them again.
+        (when client-id
+          (swap! *outbound* dissoc client-id)
+          (swap! *inflight* #(into {} (remove (fn [[[id _] _]] (= id client-id))) %)))
+        (swap! *clients* dissoc key))
+      (do
         ;; Parked rather than forgotten: a publish arriving while this session
         ;; is away still has to match it, or there is nothing to queue.
-        (swap! *offline-trie* tr/insert (:topic-filter topic)
-               {:client-id client-id :qos (:qos topic) :topic-filter (:topic-filter topic)}))
-      ;; Parking the session under its client-id happens once, not once per
-      ;; subscribed topic: these two were inside the doseq above, so a
-      ;; persistent session with no subscriptions was dropped instead of kept,
-      ;; and CONNACK then reported session-present? false on the reconnect.
-      (swap! *clients* dissoc key)
-      (swap! *clients* assoc client-id client)))
+        (doseq [topic subscribed-topics]
+          (swap! *offline-trie* tr/insert (:topic-filter topic)
+                 {:client-id client-id :qos (:qos topic) :topic-filter (:topic-filter topic)}))
+        ;; Parking the session under its client-id happens once, not once per
+        ;; subscribed topic: these two were inside the doseq above, so a
+        ;; persistent session with no subscriptions was dropped instead of
+        ;; kept, and CONNACK then reported session-present? false on reconnect.
+        (swap! *clients* dissoc key)
+        (swap! *clients* assoc client-id client))))
   (log/trace "REMOVE: Subscriber trie POST:" @*subscriber-trie*)
   (log/trace "REMOVE: Clients:" @*clients*))
 
