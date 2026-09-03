@@ -347,6 +347,88 @@ perfectly well. It printed `?` every time. A metric that never works on the
 machine it was written for is worse than not having it, so the docstring says
 to watch `ss -tan | grep -c TIME-WAIT` instead.
 
+### Fifty thousand, with the broker in its own process
+
+The in-process test could not go past 25,000 because that is 50,000 sockets in
+one JVM and the kernel's buffers for them are native memory the OOM reaper
+counts and the heap does not. So: `connection-scale-remote-test`, which starts
+the uberjar as a subprocess and connects to it from the test JVM, each carrying
+only its own half.
+
+Three things that made it work:
+
+* **Source addresses across 127.0.0.0/8.** A connection is the whole
+  four-tuple, so every source address brings its own range of local ports and
+  the ~28,232 ephemeral ports stop being the ceiling. Linux lets any user bind
+  to any 127.x.y.z with nothing configured first — checked before relying on
+  it, along with whether the JVM could read /proc for the numbers. It cannot,
+  so broker memory comes from `ps`.
+* **No thread and no reader per connection.** The CONNACKs are left unread in
+  the socket buffers. What proves the broker took them is the broker's own
+  stats line, parsed out of its stdout — a better witness than the client's
+  opinion, since it comes from the process under test.
+* **`-main` takes a port now**, so a second broker can run beside one that
+  already has 1883. A broker that cannot be told where to listen was a real
+  limitation, not just an inconvenience for a test.
+
+| connections | in-process | out-of-process |
+|---|---|---|
+| 10,000 | 1,328 ms — 7,530/s | **1,031 ms — 9,699/s**, broker RSS 245 MB |
+| 25,000 | **SIGKILLed** | 28,042 ms, broker RSS 328 MB |
+| 50,000 | — | 56,832 ms, **broker RSS 484 MB** |
+
+Fifty thousand connections for 484 MB. The same total socket count that killed
+one JVM is comfortable across two.
+
+### Two ways a gone client stayed
+
+The remote test failed the first time it ran properly, and not on the numbers:
+
+```
+10000 connections in 1030 ms (9709/s)
+timed out waiting for the broker to notice they had gone; broker last reported 10000
+timed out waiting for 25000 connections; broker last reported 35000
+```
+
+Ten thousand closed sockets, and the broker still counted them. The next rung
+then saw 35,000 — the stale ten thousand plus the new twenty-five.
+
+**`handleRead` had two teardowns and only one of them tidied up.** A clean FIN
+gives `read < 0` and goes through `closeKey`, which queues a DISCONNECT for the
+connection to handle in order, so `remove-client!` runs. An `IOException` — a
+reset, which is what Linux sends when a socket is closed with data still unread
+on it, and these clients never read their CONNACKs — went to a different branch
+that cancelled the key and closed the channel and dispatched nothing. So the
+session stayed in `*clients*`, its subscriptions stayed in the trie, and the
+broker counted it as present for the life of the process. Both paths go through
+`closeKey` now.
+
+**And `remove-client!` only ever unsubscribed persistent sessions.** The clean
+ones — the common case, and every client in this test — left their
+subscriptions in the live trie pointing at a dead SelectionKey. The trie grew
+by every client that had ever connected, and every publish matched all of them.
+
+Neither of these is visible in-process, because clients there have a reader
+thread that drains the CONNACK, so they leave by FIN and take the tidy path.
+
+### Being wrong about my own test, again
+
+I wrote a unit test for the reset bug and it **passed with the fix reverted**,
+so it was not testing that at all. Checking which fix it did exercise — revert
+one, run, revert the other, run — it was the clean-session unsubscribe. It is
+called `subscriptions-go-when-a-clean-session-disconnects` now, which is what
+it actually proves.
+
+That left the reset fix asserted and unproven, with two changes made at once.
+So I put back only that one and ran the remote test again: "broker last
+reported 10000". The leak returned exactly, and the fix is what removes it.
+
+Worth keeping the shape of that. A test passing does not mean it covers what
+you wrote it for, and the cheapest way to find out is to break the thing on
+purpose and watch it fail. Three times this week an assertion of mine has been
+measuring something other than what I thought — and the only ones I caught were
+the ones I tried to break.
+
 ## 20260902
 
 ### The packet identifier pool had a countdown in it
