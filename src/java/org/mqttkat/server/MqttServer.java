@@ -27,6 +27,14 @@ public class MqttServer implements Runnable {
 	static final String THREAD_NAME = "server-loop";
 
 	private final Selector selector;
+	/**
+	 * How many connections the kernel may hold for us between accepts. Capped
+	 * by /proc/sys/net/core/somaxconn, so asking for more than that is
+	 * silently reduced rather than an error.
+	 */
+	private static final int ACCEPT_BACKLOG =
+			Integer.getInteger("mqttkat.acceptBacklog", 1024).intValue();
+
 	private final ServerSocketChannel serverChannel;
 	private final IHandler handler;
 	private final int port;
@@ -37,7 +45,12 @@ public class MqttServer implements Runnable {
 		this.serverChannel = ServerSocketChannel.open();
 		this.handler = handler;
 		this.serverChannel.configureBlocking(false);
-		this.serverChannel.socket().bind(new InetSocketAddress(ip, port));
+		// With a backlog, and a generous one. bind() without it asks for Java's
+		// default of 50, so under a burst of connects the accept queue filled,
+		// the kernel dropped the SYNs it could not queue, and the clients fell
+		// back on the TCP retransmission timer — connections completed at about
+		// 126 a second, and none of that time was spent in this broker.
+		this.serverChannel.socket().bind(new InetSocketAddress(ip, port), ACCEPT_BACKLOG);
 		this.serverChannel.register(selector, OP_ACCEPT);
 		this.port = port;
 	}
@@ -135,7 +148,21 @@ public class MqttServer implements Runnable {
 	}
 
 	private void handleAccept(SelectionKey key) throws IOException {
-		SocketChannel sc = ((ServerSocketChannel) key.channel()).accept();
+		// Drain the queue rather than taking one per select(). Readiness is
+		// reported once for however many are waiting, so accepting a single
+		// connection per wake-up left the rest queued until the next one — and
+		// once the queue was full the kernel simply dropped the SYNs. The null
+		// check is also the reason this is a loop: accept() on a non-blocking
+		// channel returns null when there is nothing left, and the old code
+		// would have dereferenced it if readiness had been reported spuriously.
+		ServerSocketChannel server = (ServerSocketChannel) key.channel();
+		SocketChannel sc;
+		while ((sc = server.accept()) != null) {
+			accepted(sc);
+		}
+	}
+
+	private void accepted(SocketChannel sc) throws IOException {
 		sc.configureBlocking(false);
 		// Nagle's algorithm holds a small write back until the previous one has
 		// been acknowledged; combined with the peer's delayed ACK (40ms on

@@ -272,6 +272,81 @@ of `handlers` reads well and still leaves the entire QoS 1 congestion path
 unexecuted; 3.79% of `util` looks alarming and is mostly a loop that cannot be
 called. Both of those are only visible per function.
 
+### Ten thousand connections, and the accept queue
+
+Wrote a scale test — `connection-scale-test`, tagged ^:performance — that opens
+a lot of connections at once, checks every one got a CONNACK and that the
+broker agrees on the count, then closes them all and checks it noticed. The
+ramp is 10,000 and 20,000 by default, `-Dmqttkat.scaleRamp=...` to push it.
+
+It found something on its first run. Ten thousand connections took **63
+seconds** — 158 a second, about 8ms each, on loopback. That is absurd, and the
+useful move was not to read the code but to take MQTT out of the picture:
+
+```
+raw SocketChannel open x3000: 23721 ms (126/s)
+MqttClient ctor x3000:        19507 ms (154/s)
+ctor + CONNECT x3000:         20662 ms (145/s)
+```
+
+Opening a bare socket with no protocol on it at all was just as slow. So none
+of it was this broker's code, and the accept path was the only thing left.
+
+Two things there, and they compound:
+
+* `bind()` was called with no backlog, so Java asked for its default of 50.
+  `/proc/sys/net/core/somaxconn` on this machine is 4096.
+* `handleAccept` took exactly one connection per `select()` return. Readiness
+  is reported once for however many are queued, so the rest waited for the next
+  wake-up.
+
+Between them the accept queue stayed full, the kernel dropped the SYNs it could
+not queue, and the clients fell back on the TCP retransmission timer. Every one
+of those 8 milliseconds was a client waiting to retry.
+
+The backlog is 1024 now (`-Dmqttkat.acceptBacklog`) and handleAccept drains the
+queue in a loop, which also removes a latent NPE: `accept()` on a non-blocking
+channel returns null when there is nothing there, and the old code would have
+dereferenced it.
+
+| | before | after |
+|---|---|---|
+| 10,000 connections | 63,418 ms — 158/s | **1,328 ms — 7,530/s** |
+
+Forty-seven times faster, and the interoperability suite is unchanged at 9 of
+10 afterwards, so nothing was traded for it.
+
+### What the broker costs per connection
+
+At 20,000 connections: **359 MB of heap and 35 platform threads** — the same 35
+as at rest. Forty thousand virtual threads for no platform threads at all,
+which is the plainest evidence yet that the rebuild on virtual threads was
+worth doing.
+
+Three limits showed up and none of them is the broker:
+
+* **28,232 ephemeral ports** (32768-60999). Every connection to one listener
+  from one address needs one, so that is the ceiling for a loopback test
+  whatever the broker does.
+* **TIME-WAIT between ramp steps.** Closing ten thousand connections holds ten
+  thousand ports for a minute — measured 26,169 sockets in TIME-WAIT holding
+  26,023 of the 28,232. So only the *first* step of a ramp measures a clean
+  accept rate; the 1,334/s at 20,000 is port starvation, not the broker
+  slowing down. Worth remembering before reading anything into a ramp that
+  gets slower as it climbs.
+* **25,000 got the JVM killed** by the kernel's OOM reaper — SIGKILL, not an
+  OutOfMemoryError. The heap was 443 MB at 20,000, so it was never heap: both
+  ends run in the one process, so 25,000 connections is 50,000 sockets, and the
+  kernel's buffers for those are native memory the JVM never accounts for.
+  Out of the default ramp, with the reason written down.
+
+One thing I put in and took out again: a TIME-WAIT count in the test's own
+output. `/proc/net/tcp` throws `IOException: Invalid argument` when read from
+the JVM — `slurp` and `line-seq` alike — while `cat` and python read it
+perfectly well. It printed `?` every time. A metric that never works on the
+machine it was written for is worse than not having it, so the docstring says
+to watch `ss -tan | grep -c TIME-WAIT` instead.
+
 ## 20260902
 
 ### The packet identifier pool had a countdown in it
