@@ -218,6 +218,60 @@ separate times now that a test of mine has asserted something timing-dependent
 and blamed the code for it; the pause counter is what is actually promised, and
 that is all it checks now.
 
+### Where the coverage actually is
+
+Since cloverage is what started this, the numbers after a day of it. Whole
+project, default test suite (the ^:performance generators excluded, as
+`lein test` excludes them):
+
+```
+lein cloverage --ns-regex 'mqttkat\..*' \
+  --test-ns-regex 'mqttkat\.(flow|connection|connect|ping|smoke|keep-alive|core|backpressure|packet-identifier|qos2|session)-test'
+```
+
+|                   Namespace | % Forms | % Lines |
+|-----------------------------|---------|---------|
+|              mqttkat.client |   41.25 |   69.01 |
+|            mqttkat.handlers |   67.36 |   95.48 |
+|    mqttkat.handlers.connack |    9.52 |   66.67 |
+|    mqttkat.handlers.connect |   71.33 |   98.11 |
+| mqttkat.handlers.disconnect |   71.43 |  100.00 |
+|                   mqttkat.s |   90.91 |  100.00 |
+|              mqttkat.server |   52.87 |   76.74 |
+|                mqttkat.spec |   78.20 |  100.00 |
+|                mqttkat.util |    3.79 |   20.45 |
+|-----------------------------|---------|---------|
+|                   ALL FILES |   66.43 |   87.68 |
+
+`mqttkat.handlers` started the day at **52.84% of forms and 81.93% of lines**
+and is now at 67.36% and 95.48%. That is the QoS 2 handshake, the pending-queue
+drain, the session lifecycle and the retained replay going from never executed
+to executed — and three of the bugs above were found by tests written to close
+those gaps rather than by reading the code.
+
+What is left in `handlers`, by lines never run: `throttle-publisher!` and
+`deliver-or-queue!` (the QoS 1 congestion path, which needs a subscriber slow
+enough to fill a window and a publisher to throttle for it), `add-subscriber`
+(dead — nothing calls it), `publish-will`, and single lines in half a dozen
+others.
+
+Two namespaces are worth naming rather than averaging away:
+
+* **`mqttkat.util` at 3.79%** is not really a gap. It is the stats loop, which
+  runs forever by design and is the thing keeping `-main` alive, so no test
+  calls it. The parts worth testing — the rate arithmetic, the backlog
+  clamping, the connected-versus-parked counting — are pure functions sitting
+  inside a `loop` nothing can enter. Pulling `stats` out of `info` far enough
+  to call it with two snapshots would cover most of it.
+* **`mqttkat.handlers.connack` at 9.52%** is the client's side of the
+  handshake. The broker sends CONNACKs constantly, but nothing in the suite
+  makes the broker *receive* one, which is what that namespace handles.
+
+The percentages are worth exactly as much as knowing which lines they are. 95%
+of `handlers` reads well and still leaves the entire QoS 1 congestion path
+unexecuted; 3.79% of `util` looks alarming and is mostly a loop that cannot be
+called. Both of those are only visible per function.
+
 ## 20260902
 
 ### The packet identifier pool had a countdown in it

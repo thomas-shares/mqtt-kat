@@ -6,16 +6,45 @@ The idea is to see if a MQTT Broker could be as scalable as http-kit and handle 
 
 ## What does it do at the moment?
 
-Well... with the latest push it can actually forward a `PUBLISH`ed message to multiple clients that have `SUBSCRIBE`d to a particular topic. I have tested this with three subscribers concurrently.
+Thanks to Claude I have extended the test cases and made them more meaning full.
+
+## What it doesn't do:
+There is no TLS support or support for username/passwords. Anything will be accepted. 
+
+### Will this be added in the future? 
+No idea yet. Depends (but I don't know what it depends)
 
 ## Are there any bugs?
-Yes!
+Probably, but testing has become a lot better:
 
-Loads. Too many to mention actually. But here are a few I know of:
+```
+Ran 64 tests containing 1116 assertions.
+0 failures, 0 errors.
+```
+and
 
-* Disconnecting clients in error cases is not fully implemented.
-* At the moment the message flows for good path QOS 0, 1 and 2 is in place. But there is no error recovery if one of the packets gets lost. So no resending of packets.
-* Also latency is rather high, to be investigated.
+```
+lein test mqttkat.client-generator-2
+13:47:01.776 INFO  [main] m.client-generator-2 - simulation summary
+    events         10000 events in 10.34s
+    publishes      qos0 4965  qos1 2551  qos2 2481  (total 9997, 3 skipped)
+  round trip, milliseconds (publish sent -> last acknowledgement)
+    all            n 9997  min 0.02     med 0.29     mean 0.71     sd 1.11     p95 2.84     p99 5.71     max 16.22
+    qos 0          n 4965  min 0.02     med 0.16     mean 0.40     sd 0.67     p95 1.75     p99 2.73     max 16.22
+    qos 1          n 2551  min 0.05     med 0.30     mean 0.53     sd 0.63     p95 1.78     p99 2.79     max 10.92
+    qos 2          n 2481  min 0.37     med 0.65     mean 1.50     sd 1.68     p95 5.08     p99 6.91     max 13.07
+  client-side prepare, milliseconds (spec generation + encode)
+    all            n 9997  min 0.15     med 0.26     mean 0.30     sd 0.27     p95 0.47     p99 0.60     max 14.36
+  broker throughput over this test only
+    messages       3865.62 msg/s in, 3865.62 msg/s out
+    bytes          551.24 KB/s in, 560.55 KB/s out
+
+Ran 2 tests containing 24958 assertions.
+0 failures, 0 errors.
+```
+
+most of these tests pass now as well: https://github.com/eclipse-paho/paho.mqtt.testing
+The one failing there is a SUBACK failure.
 
 ## What about the name?
 
@@ -23,11 +52,11 @@ I first thought of calling it mqtt-kit... but then decide that mqtt-kat made mor
 
 ## Will it ever be a proper MQTT broker supporting QOS > 0?
 
-Probably not.
+It actually does not... but memory only, there is no storing to disk. So a broker crash would loose most inflight message (I guess some would be recovered if a client retries)
 
 ## Will it ever support MQTT version 5?
 
-Probably not.
+Maybe... with Claude's help I might be able to add this now.
 
 ## And here are some links with info to help me:
 https://gist.github.com/Botffy/3860641
