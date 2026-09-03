@@ -54,4 +54,41 @@ public class MqttStat {
 
 	public static LongAdder receivedMessages = new LongAdder();
 	public static LongAdder receivedBytes = new LongAdder();
+
+	/** Sockets accepted, whether or not the MQTT connection that followed worked. */
+	public static LongAdder socketConnections = new LongAdder();
+
+	/**
+	 * Packets in and out by MQTT packet type — the high nibble of the fixed
+	 * header, 1 to 15.
+	 *
+	 * Indexed by type so that counting is one array lookup in the two places a
+	 * packet actually crosses the boundary: Connection.dispatch on the way in,
+	 * where the type has just been framed, and the writer thread on the way
+	 * out, where it is read back off the first byte of the encoded packet.
+	 * Counting where each packet is built instead would mean an increment in
+	 * every handler, and would count packets encoded rather than packets sent.
+	 */
+	public static final LongAdder[] receivedByType = newCounters();
+	public static final LongAdder[] sentByType = newCounters();
+
+	private static LongAdder[] newCounters() {
+		LongAdder[] counters = new LongAdder[16];
+		for (int i = 0; i < counters.length; i++) {
+			counters[i] = new LongAdder();
+		}
+		return counters;
+	}
+
+	public static void countReceived(int packetType) {
+		if (packetType > 0 && packetType < receivedByType.length) {
+			receivedByType[packetType].increment();
+		}
+	}
+
+	public static void countSent(int packetType) {
+		if (packetType > 0 && packetType < sentByType.length) {
+			sentByType[packetType].increment();
+		}
+	}
 }

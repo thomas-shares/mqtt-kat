@@ -163,6 +163,7 @@ public class MqttServer implements Runnable {
 	}
 
 	private void accepted(SocketChannel sc) throws IOException {
+		MqttStat.socketConnections.increment();
 		sc.configureBlocking(false);
 		// Nagle's algorithm holds a small write back until the previous one has
 		// been acknowledged; combined with the peer's delayed ACK (40ms on

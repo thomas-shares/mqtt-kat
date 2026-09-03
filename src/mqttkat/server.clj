@@ -4,6 +4,7 @@
             [mqttkat.handlers.connect :as connect]
             [mqttkat.handlers.disconnect :as disconnect]
             [mqttkat.handlers.connack :as connack]
+            [mqttkat.sys :as sys]
             [mqttkat.util :as util]
             [mqttkat.s :refer [*server*]]
             [overtone.at-at :as at]
@@ -73,6 +74,10 @@
   [& args]
   (let [port (if-let [p (first args)] (Long/parseLong (str p)) 1883)]
     (start! "0.0.0.0" (int port))
+    ;; Started here rather than in start!, so the test suite's broker does not
+    ;; spend its life publishing retained $SYS messages into the state the
+    ;; tests are asserting about. Anything that wants them calls sys/start!.
+    (sys/start!)
     (util/info)))
 
 (comment

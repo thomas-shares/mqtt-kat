@@ -491,6 +491,7 @@ public class Connection {
 			}
 			MqttStat.receivedMessages.increment();
 			MqttStat.receivedBytes.add(body.length);
+			MqttStat.countReceived(type);
 			// Run the handler here rather than handing it to a pool: this thread
 			// belongs to one connection, so running it inline is what keeps a
 			// client's packets in order.
@@ -510,6 +511,11 @@ public class Connection {
 					break;                               // everything queued before it is written
 				}
 				queuedCount.decrementAndGet();
+				// Absolute get, so it does not matter that writeFully is about
+				// to move the position: the packet type is the high nibble of
+				// the fixed header, and this is the one place every outgoing
+				// packet passes through with its bytes still intact.
+				int packetType = (buffer.get(0) >> 4) & 0x0f;
 				// QoS 0 has no acknowledgement to hang a resume off, so the
 				// queue draining is the signal. The emptiness check keeps this
 				// off the hot path for the overwhelming majority of writes,
@@ -524,6 +530,7 @@ public class Connection {
 				if (!buffer.hasRemaining()) {
 					MqttStat.writtenMessages.increment();
 					MqttStat.writtenBytes.add(size);
+					MqttStat.countSent(packetType);
 				}
 			}
 		} catch (InterruptedException e) {
