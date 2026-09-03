@@ -400,18 +400,22 @@
    these: QoS 0 is at-most-once, so dropping degrades that subscriber's feed
    instead of costing the broker unbounded memory. Refusals show up as
    :dropped in the stats line."
-  [keys buf]
+  [keys buf publisher-key]
   (let [{s :server} (meta @*server*)]
-    (.sendMessageBuffer ^MqttServer s keys buf true)))
+    (.sendMessageBuffer ^MqttServer s keys buf true publisher-key)))
 
-(defn qos-0 [keys topic {:keys [payload]} retain]
+(defn qos-0 [keys topic {:keys [payload] publisher-key :client-key} retain]
   (log/trace "--> respond QOS 0 topic:" topic " retained: " retain  " payload: " payload  " count keys: " (count keys))
   (send-buffer-droppable (mapv :client-key keys)
-               (MqttPublish/encode {:packet-type :PUBLISH
-                                    :payload     payload
-                                    :topic       topic
-                                    :qos         0
-                                    :retain?     retain})))
+                         (MqttPublish/encode {:packet-type :PUBLISH
+                                              :payload     payload
+                                              :topic       topic
+                                              :qos         0
+                                              :retain?     retain})
+                         ;; nil for a will or a replayed retained message:
+                         ;; the broker is the publisher there and there is
+                         ;; nothing to slow down.
+                         publisher-key))
 
 (defn qos-1-send [keys topic {:keys [payload] publisher-key :client-key}]
   (log/trace "respond qos 1:" (count keys) )

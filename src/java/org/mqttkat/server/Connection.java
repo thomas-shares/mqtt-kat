@@ -54,6 +54,30 @@ public class Connection {
 	private static volatile int maxQueued =
 			Integer.getInteger("mqttkat.maxQueuedMessages", 10_000).intValue();
 
+	/**
+	 * Whether a QoS 0 publisher is throttled when a subscriber it feeds falls
+	 * behind, rather than having its messages dropped.
+	 *
+	 * QoS 0 is at-most-once, so dropping is legitimate and is what this did
+	 * originally: it keeps one slow subscriber from slowing anyone else down.
+	 * The cost is that a fan-out beyond what the subscribers can take loses
+	 * most of it — 85% of 45M in the run that prompted this. Throttling trades
+	 * that for the head-of-line cost: a publisher held back for one congested
+	 * subscriber is also held back for every other subscriber it feeds.
+	 *
+	 * -Dmqttkat.qos0BackPressure=false restores dropping.
+	 */
+	private static volatile boolean qos0BackPressure =
+			Boolean.parseBoolean(System.getProperty("mqttkat.qos0BackPressure", "true"));
+
+	public static boolean isQos0BackPressure() {
+		return qos0BackPressure;
+	}
+
+	public static void setQos0BackPressure(boolean on) {
+		qos0BackPressure = on;
+	}
+
 	/** The limit in force. 0 means unbounded. */
 	public static int getMaxQueued() {
 		return maxQueued;
@@ -113,6 +137,30 @@ public class Connection {
 
 	private volatile boolean readingPaused = false;
 
+	/**
+	 * Why reading is stopped. Two independent reasons, tracked apart because
+	 * different parties set and clear them: a subscriber releasing its waiters
+	 * must not undo a pause this connection put on itself, or the other way
+	 * round.
+	 */
+	private volatile boolean pausedByPeers = false;
+	private volatile boolean pausedByInbound = false;
+
+	/**
+	 * Chunks this connection may have waiting to be framed before the selector
+	 * stops reading it, and the depth it has to fall back to before reading
+	 * resumes.
+	 *
+	 * Without a bound here the selector reads as fast as the kernel will give
+	 * it, so a publisher's whole payload is inside the broker before any
+	 * subscriber looks congested — and stopping OP_READ then throttles nothing,
+	 * because everything it was going to send has already arrived. On the QoS 1
+	 * path the acknowledgement window limits how far ahead a publisher can get;
+	 * QoS 0 has no such coupling, and this is what replaces it.
+	 */
+	private static final int INBOUND_HIGH_WATER = 64;
+	private static final int INBOUND_LOW_WATER = 16;
+
 	private volatile boolean running = true;
 	private Thread reader;
 	private Thread writer;
@@ -135,6 +183,13 @@ public class Connection {
 	public void offer(byte[] chunk) {
 		if (running) {
 			inbound.offer(chunk);
+			// On the selector thread: stop reading this socket once its own
+			// backlog is deep enough, so the broker cannot run arbitrarily far
+			// ahead of the thread that has to frame and dispatch it.
+			if (!pausedByInbound && inbound.size() >= INBOUND_HIGH_WATER) {
+				pausedByInbound = true;
+				applyReadInterest();
+			}
 		}
 	}
 
@@ -174,6 +229,23 @@ public class Connection {
 	public boolean isBacklogged() {
 		int limit = maxQueued;
 		return limit > 0 && queuedCount.get() >= limit;
+	}
+
+	/**
+	 * Far enough behind that the publishers feeding it should be slowed down.
+	 * Deliberately half the hard limit: pausing only once the queue is full
+	 * would mean dropping everything already in flight towards it, which is
+	 * the outcome the pause exists to avoid.
+	 */
+	public boolean isCongested() {
+		int limit = maxQueued;
+		return qos0BackPressure && limit > 0 && queuedCount.get() >= limit / 2;
+	}
+
+	/** Queue depth at which throttled publishers are let go again. */
+	private int resumeAt() {
+		int limit = maxQueued;
+		return limit > 0 ? Math.max(1, limit / 8) : 0;
 	}
 
 	public boolean writeDroppable(ByteBuffer buffer) {
@@ -229,37 +301,37 @@ public class Connection {
 	// subscribes to would each hold a thread waiting on the other's window,
 	// and neither would ever process the acknowledgements that release it.
 
-	/** Stop reading this connection's socket. Idempotent. */
-	public synchronized void pauseReading() {
-		if (readingPaused) {
+	/** Apply whichever of the two reasons currently hold to the interest ops. */
+	private synchronized void applyReadInterest() {
+		boolean pause = pausedByPeers || pausedByInbound;
+		if (pause == readingPaused) {
 			return;
 		}
-		readingPaused = true;
-		MqttStat.publisherPauses.increment();
+		readingPaused = pause;
+		if (pause) {
+			MqttStat.publisherPauses.increment();
+		}
 		try {
 			if (key.isValid()) {
-				key.interestOps(key.interestOps() & ~SelectionKey.OP_READ);
+				int ops = key.interestOps();
+				key.interestOps(pause ? (ops & ~SelectionKey.OP_READ) : (ops | SelectionKey.OP_READ));
 				key.selector().wakeup();
 			}
 		} catch (CancelledKeyException e) {
-			// the connection went away; nothing left to pause
+			// the connection went away; nothing left to pause or resume
 		}
 	}
 
-	/** Start reading it again. Idempotent. */
-	public synchronized void resumeReading() {
-		if (!readingPaused) {
-			return;
-		}
-		readingPaused = false;
-		try {
-			if (key.isValid()) {
-				key.interestOps(key.interestOps() | SelectionKey.OP_READ);
-				key.selector().wakeup();
-			}
-		} catch (CancelledKeyException e) {
-			// the connection went away; nothing left to resume
-		}
+	/** Stop reading this connection's socket on a congested subscriber's behalf. */
+	public void pauseReading() {
+		pausedByPeers = true;
+		applyReadInterest();
+	}
+
+	/** Release the pause a subscriber put on this connection. */
+	public void resumeReading() {
+		pausedByPeers = false;
+		applyReadInterest();
 	}
 
 	public boolean isReadingPaused() {
@@ -279,6 +351,21 @@ public class Connection {
 		}
 		waiters.add(publisher);
 		publisher.pauseReading();
+		// Re-check, because the two lines above are not one step. If this
+		// connection drained, or closed, between the add and the pause, then
+		// the drained() that would have released this publisher has already
+		// run and seen an empty set — leaving it paused with nothing left to
+		// wake it. On the QoS 1 path that heals on the next acknowledgement;
+		// QoS 0 has none, and a subscriber that has gone will never drain
+		// again, so the publisher would stay stopped for good.
+		//
+		// Locking instead would mean holding this connection's monitor while
+		// taking the publisher's, and two clients each publishing to a topic
+		// the other subscribes to would take those two monitors in opposite
+		// orders.
+		if (!running || queuedCount.get() <= resumeAt()) {
+			drained();
+		}
 	}
 
 	/**
@@ -319,6 +406,10 @@ public class Connection {
 				}
 				append((byte[]) item);
 				frameAndDispatch();
+				if (pausedByInbound && inbound.size() <= INBOUND_LOW_WATER) {
+					pausedByInbound = false;
+					applyReadInterest();
+				}
 			}
 		} catch (InterruptedException e) {
 			Thread.currentThread().interrupt();          // closing
@@ -419,6 +510,13 @@ public class Connection {
 					break;                               // everything queued before it is written
 				}
 				queuedCount.decrementAndGet();
+				// QoS 0 has no acknowledgement to hang a resume off, so the
+				// queue draining is the signal. The emptiness check keeps this
+				// off the hot path for the overwhelming majority of writes,
+				// which have nobody waiting on them.
+				if (!waiters.isEmpty() && queuedCount.get() <= resumeAt()) {
+					drained();
+				}
 				int size = buffer.remaining();
 				writeFully(buffer);
 				// writeFully also returns when the channel has gone, so ask the

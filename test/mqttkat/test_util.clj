@@ -66,7 +66,10 @@
    (let [msg (take! ch ms)]
      (is (= type (:packet-type msg))
          (if msg
-           (str "expected " type ", got " (:packet-type msg))
+           ;; The whole packet, not just its type: when the wrong one turns up
+           ;; the question is always which one, and a type alone cannot answer
+           ;; it for an intermittent failure that may not repeat.
+           (str "expected " type ", got " (pr-str (dissoc msg :client-key)))
            (str "timed out after " ms "ms waiting for " type)))
      msg)))
 

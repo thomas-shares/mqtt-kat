@@ -248,7 +248,12 @@ public class MqttServer implements Runnable {
 	// }
 
 	public void sendMessageBuffer(final clojure.lang.PersistentVector keys, final ByteBuffer buffer) {
-		sendMessageBuffer(keys, buffer, false);
+		sendMessageBuffer(keys, buffer, false, null);
+	}
+
+	public void sendMessageBuffer(final clojure.lang.PersistentVector keys, final ByteBuffer buffer,
+			final boolean droppable) {
+		sendMessageBuffer(keys, buffer, droppable, null);
 	}
 
 	/**
@@ -257,13 +262,31 @@ public class MqttServer implements Runnable {
 	 *                  — control packets, QoS 1 and 2 publishes — must be
 	 *                  delivered and is queued unconditionally.
 	 */
+	/**
+	 * @param publisherKey the connection this publish came from, so a
+	 *                     subscriber that is falling behind can have it slowed
+	 *                     down rather than have its messages dropped. Null for
+	 *                     a publish of the broker's own making — a will, or a
+	 *                     retained message replayed on subscribe — where there
+	 *                     is no publisher to throttle.
+	 */
 	public void sendMessageBuffer(final clojure.lang.PersistentVector keys, final ByteBuffer buffer,
-			final boolean droppable) {
+			final boolean droppable, final Object publisherKey) {
+		Connection publisher = null;
+		if (droppable && publisherKey instanceof SelectionKey) {
+			publisher = (Connection) ((SelectionKey) publisherKey).attachment();
+		}
 		for (Object o : keys) {
 			SelectionKey key = (SelectionKey) o;
 			Connection connection = (Connection) key.attachment();
 			if (connection == null) {
 				continue;                            // already gone
+			}
+			if (droppable && publisher != null && connection.isCongested()) {
+				// Slow the source down before the queue fills. The message
+				// below still goes on the queue: the pause is what stops the
+				// next thousand, not this one.
+				connection.pauseUntilDrained(publisher);
 			}
 			if (droppable && connection.isBacklogged()) {
 				// Checked before duplicate(): under overload most subscribers

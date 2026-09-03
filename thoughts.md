@@ -147,6 +147,68 @@ afterwards, from four failures in eight before.
 
 Neither was a bug in the broker. Both would have been blamed on one.
 
+### Back-pressure for QoS 0, and why it barely helps
+
+QoS 0 was still losing 85% of a 150x150 fan-out, so the throttling built for
+QoS 1 now applies to it too: a subscriber past half of `maxQueued` pauses the
+publishers feeding it, and releases them at an eighth. Same pause/resume
+machinery, wired through `sendMessageBuffer`. `-Dmqttkat.qos0BackPressure`,
+default on, and `Connection/setQos0BackPressure` at runtime.
+
+It works, and it does not rescue this load:
+
+| run | dropped | delivered | throttled |
+|---|---|---|---|
+| off | 38,421,062 | 6,579,547 | 0 |
+| on | 37,963,336 | 7,037,273 | 361 |
+| on, plus the read-ahead bound below | 38,102,946 | 6,897,650 | 481 |
+
+About 1%. It is not that nothing happens — ingest over the first interval falls
+from 29,997/s to 5,663/s, and the throttle counter climbs — but the publishers
+still get all 300,000 in and the drop count hardly moves.
+
+The reason is that **dropping relieves the very congestion the throttling keys
+on**. The queue reaches the congestion mark, the publishers are paused, and the
+queue then discards its way back below the resume mark and lets them straight
+through again. The two mechanisms undo each other. QoS 1 does not have this
+problem because its pending queue *retains* what it cannot send yet, so the
+pressure persists until something is acknowledged.
+
+At 7x overload — 45M deliveries against roughly 500k/s — that is close to
+unwinnable without giving up the drop backstop, which would hand QoS 0 QoS 1's
+memory profile. At the mild overload this is actually for, the queue stays
+congested and publishers stay held. Worth remembering that the 150x150 config
+is pathological, not typical.
+
+The trade the flag buys or sells: with it on, a publisher held back for one
+congested subscriber is held back for **every** subscriber it feeds. That
+head-of-line cost is exactly the isolation that dropping gives you, and it is
+why `a-stalled-subscriber-does-not-starve-a-healthy-one` now pins the flag off
+— that property is only true while QoS 0 drops. Both behaviours are wanted and
+both are pinned by a test, so neither can be changed by accident.
+
+### Two things found while doing it
+
+**A pause that could never be released.** `pauseUntilDrained` added the
+publisher to the subscriber's waiters and *then* paused it. Those are two
+steps: a `drained()` running in between saw an empty set, and the publisher was
+paused a moment later with nobody left to wake it. On the QoS 1 path that heals
+on the next acknowledgement. QoS 0 has no acknowledgement, and a subscriber that
+has closed will never drain again, so the publisher stopped for good. It
+re-checks after pausing now. Locking instead would mean holding the
+subscriber's monitor while taking the publisher's, and two clients each
+publishing to a topic the other subscribes to would take those two monitors in
+opposite orders.
+
+**`Connection.inbound` is bounded now** — 64 chunks to stop reading, 16 to
+start again — which closes an item left open in the entry below. Without it the
+selector reads as fast as the kernel will hand it over, so a publisher's whole
+payload is inside the broker before any subscriber looks congested, and
+stopping OP_READ throttles nothing because everything it was going to send has
+already arrived. On the QoS 1 path the acknowledgement window limits the
+read-ahead; QoS 0 had nothing playing that role. It is the right change and, as
+the table above shows, not the one that was going to save this benchmark.
+
 ## 20260901
 
 ### The latency question, answered: Nagle
@@ -452,9 +514,6 @@ case pass and the other three fail, which is the check worth having.
   channel is the wrong shape with virtual threads; a blocking channel parks on
   the JDK poller instead, with no 1 ms granularity. It was not the bottleneck,
   so it is still there.
-* **`Connection.inbound` is unbounded too.** The selector thread offers chunks
-  with no limit, so a slow reader means bytes pile up in heap rather than
-  applying TCP back-pressure to the publisher. Only 67 MB at this scale.
 * **53 of 150 subscriber sockets had an empty Send-Q** while the rest were
   saturated. With uniform fan-out to one topic they should look alike. Never
   explained.

@@ -72,12 +72,16 @@
   (tu/expect-eventually! ch :SUBACK 2000))
 
 (defn- settle!
-  "Wait until the broker stops dropping, i.e. it has worked through the burst,
-   so a subscriber joining now sees only what is published after it."
+  "Wait until the broker has worked through the burst.
+
+   Keyed on messages written rather than messages dropped: with back-pressure
+   on there is nothing to drop, so a drop-based check returns instantly and
+   hands the next namespace a broker still fanning out tens of thousands of
+   publishes. That is what made flow-test's reconnect race."
   []
-  (let [deadline (+ (System/currentTimeMillis) 15000)]
+  (let [deadline (+ (System/currentTimeMillis) 20000)]
     (loop [previous -1]
-      (let [now (.sum MqttStat/droppedMessages)]
+      (let [now (.sum MqttStat/writtenMessages)]
         (when (and (not= now previous) (< (System/currentTimeMillis) deadline))
           (Thread/sleep 250)
           (recur now))))))
@@ -100,8 +104,12 @@
     before))
 
 (deftest qos-0-to-a-stalled-subscriber-is-dropped-not-queued
-  (let [was (Connection/getMaxQueued)]
+  (let [was (Connection/getMaxQueued)
+        was-bp (Connection/isQos0BackPressure)]
     (try
+      ;; Pinned off: this is about what dropping does. Throttling instead is
+      ;; the other half of the choice and has a test of its own below.
+      (Connection/setQos0BackPressure false)
       (Connection/setMaxQueued limit)
       (let [topic (tu/topic "backpressure")
             deaf  (deaf-subscriber! topic)
@@ -113,11 +121,18 @@
         (.close ^Socket deaf)
         (tu/close! pub))
       (finally
+        (Connection/setQos0BackPressure was-bp)
         (Connection/setMaxQueued was)))))
 
 (deftest a-stalled-subscriber-does-not-starve-a-healthy-one
-  (let [was (Connection/getMaxQueued)]
+  (let [was (Connection/getMaxQueued)
+        was-bp (Connection/isQos0BackPressure)]
     (try
+      ;; Only true while QoS 0 drops. This is exactly what dropping is for and
+      ;; exactly what throttling gives up: with back-pressure on, the publisher
+      ;; is held back for the stalled subscriber and the healthy one gets
+      ;; nothing either. Both behaviours are wanted, so both are pinned.
+      (Connection/setQos0BackPressure false)
       (Connection/setMaxQueued limit)
       (let [topic (tu/topic "isolation")
             deaf  (deaf-subscriber! topic)
@@ -151,7 +166,71 @@
         (.close ^Socket deaf)
         (tu/close! pub))
       (finally
+        (Connection/setQos0BackPressure was-bp)
         (Connection/setMaxQueued was)))))
+
+(deftest qos-0-throttles-the-publisher-when-back-pressure-is-on
+  (testing "with back-pressure on, a stalled QoS 0 subscriber blocks its publisher"
+    ;; What is actually guaranteed is that the publisher stops being read, and
+    ;; so eventually cannot write. Not that nothing is dropped: when the pause
+    ;; lands there are already messages in the socket buffer and the inbound
+    ;; queue, and every one of them still fans out. The headroom for that
+    ;; overshoot is the gap between the congestion mark and the hard limit —
+    ;; half of maxQueued, which is 10 messages at the limit this test uses and
+    ;; 5,000 at the default. So the assertions here are that throttling
+    ;; happened and that it took effect, not a drop count.
+    (let [was    (Connection/getMaxQueued)
+          was-bp (Connection/isQos0BackPressure)]
+      (try
+        (Connection/setQos0BackPressure true)
+        (Connection/setMaxQueued limit)
+        (let [topic   (tu/topic "qos0-throttle")
+              deaf    (deaf-subscriber! topic 0)
+              _       (Thread/sleep 200)
+              pub     (tu/connect! "qos0-throttle-pub")
+              n       4000
+              sent    (atom 0)
+              ;; 2 KB each, so the total is far more than the socket buffers
+              ;; can absorb: without that the publisher never blocks however
+              ;; hard the broker pushes back.
+              writer  (future
+                        ;; Ends either by finishing or by the socket closing
+                        ;; under it in the teardown below; both are fine, and
+                        ;; neither should throw out of a future nobody derefs
+                        ;; for a value.
+                        (try
+                          (dotimes [i n]
+                            (client/send-message (:client pub)
+                                                 {:packet-type :PUBLISH :qos 0 :retain? false
+                                                  :topic topic :payload (str i "-" payload)})
+                            (swap! sent inc))
+                          :done
+                          (catch Exception _ :stopped)))
+              before-throttled (.sum MqttStat/publisherPauses)
+              deadline (+ (System/currentTimeMillis) 15000)]
+          (loop []
+            (when (and (= before-throttled (.sum MqttStat/publisherPauses))
+                       (< (System/currentTimeMillis) deadline))
+              (Thread/sleep 50)
+              (recur)))
+          (is (> (.sum MqttStat/publisherPauses) before-throttled)
+              "the publisher should have been paused rather than have its messages dropped")
+          (is (< @sent n)
+              "and being unread, it should not have managed to write everything")
+
+          ;; Teardown, not assertion. Closing the stalled subscriber releases
+          ;; the publisher; closing the publisher unblocks its writer whether
+          ;; or not that release reached it. Asserting the writer runs to
+          ;; completion looked appealing and was simply flaky: how much it gets
+          ;; through after the release depends on how much of the burst the
+          ;; broker still has queued.
+          (.close ^Socket deaf)
+          (tu/close! pub)
+          (deref writer 20000 :timed-out)
+          (settle!))
+        (finally
+          (Connection/setQos0BackPressure was-bp)
+          (Connection/setMaxQueued was))))))
 
 ;; ── QoS 1: back-pressure instead of dropping ─────────────────────────────
 
