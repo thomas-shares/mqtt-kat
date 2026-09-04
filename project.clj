@@ -16,6 +16,14 @@
    [clojurewerkz/triennium "1.0.0-beta2"]
    [overtone/at-at "1.4.65"]
    [http-kit "2.8.1"]
+   [hiccup "2.0.0"]
+   ;; ring-core only: wrap-resource, wrap-content-type and wrap-not-modified,
+   ;; which serve the console's stylesheets out of resources/public. http-kit
+   ;; is the adapter, so none of ring's own server is wanted.
+   [ring/ring-core "1.13.0"]
+   ;; The websocket payload carries a history array now, which is past what a
+   ;; hand-rolled writer should be asked to do.
+   [cheshire "5.13.0"]
    ;;[djblue/portal "0.6.1"]
    ;[io.zalky/cues  "0.2.1"]
    [org.clojure/tools.logging "1.3.0"]

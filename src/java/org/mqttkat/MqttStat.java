@@ -1,5 +1,6 @@
 package org.mqttkat;
 
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
@@ -57,6 +58,34 @@ public class MqttStat {
 
 	/** Sockets accepted, whether or not the MQTT connection that followed worked. */
 	public static LongAdder socketConnections = new LongAdder();
+
+	/**
+	 * Clients connected now, and the most that have been at once.
+	 *
+	 * Counted as sessions come and go rather than sampled when $SYS is
+	 * published: a client that connects and leaves between two samples would
+	 * otherwise never be seen at all, which made clients/maximum read 0 on a
+	 * broker that had just handled a burst.
+	 */
+	private static final AtomicInteger connected = new AtomicInteger();
+	private static final AtomicInteger maxConnected = new AtomicInteger();
+
+	public static void clientConnected() {
+		int now = connected.incrementAndGet();
+		maxConnected.accumulateAndGet(now, Math::max);
+	}
+
+	public static void clientDisconnected() {
+		connected.decrementAndGet();
+	}
+
+	public static int connectedClients() {
+		return connected.get();
+	}
+
+	public static int maxConnectedClients() {
+		return maxConnected.get();
+	}
 
 	/**
 	 * Packets in and out by MQTT packet type — the high nibble of the fixed

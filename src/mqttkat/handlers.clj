@@ -2,7 +2,8 @@
   (:require [clojure.tools.logging :as log]
             [mqttkat.s :refer [*server*]]
             [overtone.at-at :as at]
-            [clojurewerkz.triennium.mqtt :as tr])
+            [clojurewerkz.triennium.mqtt :as tr]
+            [mqttkat.events :as events])
   (:import [java.util.concurrent.atomic LongAdder]
            [org.mqttkat MqttStat]
            [java.nio.channels SelectionKey]
@@ -214,12 +215,26 @@
       (when (contains? @*clients* client-id)
         (discard-session! client-id))
       (swap! *clients* assoc client-key client-added)))
+ (MqttStat/clientConnected)
+ ;; The id goes with the event so a watcher can say *which* client, which is
+ ;; the difference between a console that reports a number and one that
+ ;; reports what happened.
+ (events/emit! {:event     :client-connected
+                :client-id client-id
+                :clients   (MqttStat/connectedClients)})
  (log/trace "ADD: Subscriber trie POST:" @*subscriber-trie*)
  (log/trace "ADD: Clients:" @*clients*))
 
 
 (defn remove-client! [key]
   (remove-timer! key)
+  ;; Only for a client that was actually there: remove-client! can be reached
+  ;; twice for one connection, and a count that drifts is worse than no count.
+  (when (contains? @*clients* key)
+    (MqttStat/clientDisconnected)
+    (events/emit! {:event     :client-disconnected
+                   :client-id (get-in @*clients* [key :client-id])
+                   :clients   (MqttStat/connectedClients)}))
   (log/trace "REMOVE: clean session?" (get-in @*clients* [key :clean-session?] true))
   (log/trace "key:" key)
   (let [client            (get @*clients* key)

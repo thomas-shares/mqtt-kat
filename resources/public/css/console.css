@@ -1,0 +1,275 @@
+
+/* MQTT Console — application layer.
+   Loads after modernist.css and takes every value from its tokens. */
+
+html, body { height: 100%; }
+body { font-size: 14px; }
+
+.num { font-variant-numeric: tabular-nums; }
+.label {
+  font-size: 10px; font-weight: 700; letter-spacing: 0.14em;
+  text-transform: uppercase; color: var(--color-neutral-600);
+}
+
+/* ── shell ─────────────────────────────────────────────────────────── */
+
+.app {
+  display: grid;
+  grid-template-columns: 224px minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+.side {
+  display: flex; flex-direction: column;
+  border-right: 2px solid var(--color-divider);
+}
+.side-brand { padding: 26px 20px 22px; border-bottom: 2px solid var(--color-divider); }
+.side-mark {
+  font-family: var(--font-heading); font-weight: var(--font-heading-weight);
+  font-size: 19px; line-height: 1.05; letter-spacing: -0.01em; text-transform: uppercase;
+}
+.side-brand .label { margin-top: 10px; }
+
+.side-nav { display: flex; flex-direction: column; }
+.nav-item {
+  display: flex; align-items: center; gap: var(--space-3);
+  padding: 15px 20px; font-size: 14px; font-weight: 500;
+  color: inherit; text-decoration: none; cursor: pointer;
+}
+.nav-item + .nav-item { border-top: 1px solid var(--color-divider); }
+.nav-item:hover { background: var(--color-neutral-200); }
+.nav-item.is-active,
+.nav-item.is-active:hover {
+  background: var(--color-accent); color: var(--color-bg); font-weight: 700;
+}
+.nav-item.is-active:active { background: var(--color-accent-600); }
+.nav-item.is-disabled { opacity: 0.45; pointer-events: none; }
+.nav-item svg { flex: none; }
+
+.side-foot {
+  margin-top: auto; padding: 20px;
+  border-top: 2px solid var(--color-divider);
+  display: flex; flex-direction: column; gap: var(--space-1) ;
+}
+.side-foot-name { font-size: 13px; font-weight: 600; line-height: 1.35; }
+.side-foot-sub { font-size: 12px; color: var(--color-neutral-700); word-break: break-all; }
+.live { display: flex; align-items: center; gap: var(--space-2); margin-top: var(--space-2); }
+.live-dot { width: 9px; height: 9px; background: var(--color-accent); }
+.live-text { font-size: 11px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; }
+
+.main { display: grid; grid-template-rows: auto auto minmax(0, 1fr); min-width: 0; }
+.main--settings { grid-template-rows: auto minmax(0, 1fr) auto; }
+
+/* ── page head ─────────────────────────────────────────────────────── */
+
+.page-head {
+  display: flex; align-items: flex-end; justify-content: space-between;
+  gap: var(--space-6); padding: var(--space-6) var(--space-8) var(--space-4);
+  border-bottom: 2px solid var(--color-divider);
+}
+.page-title-group { display: flex; flex-direction: column; gap: var(--space-1); }
+.page-title { margin: 0; font-size: 38px; line-height: 1; letter-spacing: -0.02em; }
+.page-tools { display: flex; align-items: center; gap: var(--space-3); }
+.page-stamp { font-size: 12px; color: var(--color-neutral-700); font-variant-numeric: tabular-nums; }
+
+/* ── metric row ────────────────────────────────────────────────────── */
+
+.metrics {
+  display: grid; grid-template-columns: repeat(4, 1fr);
+  border-bottom: 2px solid var(--color-divider);
+}
+.metric {
+  padding: 22px var(--space-6) 20px;
+  display: flex; flex-direction: column; gap: var(--space-3);
+}
+.metric + .metric { border-left: 2px solid var(--color-divider); }
+.metric-value { display: flex; align-items: baseline; gap: var(--space-2); }
+.metric-num {
+  font-family: var(--font-heading); font-weight: var(--font-heading-weight);
+  font-size: 42px; line-height: 0.9; letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+.metric-unit { font-size: 12px; font-weight: 600; color: var(--color-neutral-700); }
+.metric-note { font-size: 11px; color: var(--color-neutral-700); }
+.spark { width: 100%; height: 32px; display: block; }
+
+/* ── stat strip (topics) ───────────────────────────────────────────── */
+
+.stat-row {
+  display: grid; grid-template-columns: repeat(3, 1fr);
+  border-bottom: 2px solid var(--color-divider);
+}
+.stat { padding: var(--space-4) var(--space-6); display: flex; flex-direction: column; gap: var(--space-1); }
+.stat + .stat { border-left: 2px solid var(--color-divider); }
+.stat-value {
+  font-family: var(--font-heading); font-weight: var(--font-heading-weight);
+  font-size: 24px; line-height: 1; font-variant-numeric: tabular-nums;
+}
+.stat-value small { font-family: var(--font-body); font-size: 12px; font-weight: 600; color: var(--color-neutral-700); }
+
+/* ── panels & charts ───────────────────────────────────────────────── */
+
+.panels { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); min-height: 0; }
+.panel { display: flex; flex-direction: column; min-width: 0; }
+.panel--ruled { border-right: 2px solid var(--color-divider); }
+.panel-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: var(--space-4); padding: 22px var(--space-6) var(--space-3);
+}
+.panel-title { margin: 0; font-size: 17px; letter-spacing: -0.01em; }
+.panel-body { padding: 0 var(--space-6); }
+.panel-body--split { margin-top: 22px; border-top: 2px solid var(--color-divider); padding-top: 20px; }
+
+.legend { display: flex; align-items: center; gap: 18px; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
+.legend-item { display: flex; align-items: center; gap: 7px; }
+.legend-key { width: 14px; height: 3px; background: var(--color-accent); }
+.legend-key--out { background: var(--color-neutral-800); }
+
+.chart { width: 100%; display: block; }
+.chart--tall { height: 220px; }
+.chart--short { height: 120px; }
+.chart-grid { stroke: var(--color-neutral-300); stroke-width: 1; }
+.chart-base { stroke: var(--color-text); stroke-width: 2; }
+/* The gradients are declared once in the document (see console.clj) and
+   referenced here by fragment, which CSS resolves against the document. A
+   flat fill made the two series hard to tell apart where they overlap. */
+.series-in-fill { fill: url(#grad-in); }
+.series-in-line { fill: none; stroke: var(--color-accent); stroke-width: 2; stroke-linejoin: round; }
+.series-out-fill { fill: url(#grad-out); }
+.series-out-line { fill: none; stroke: var(--color-neutral-800); stroke-width: 2; stroke-linejoin: round; }
+.grad-in-top { stop-color: var(--color-accent); stop-opacity: 0.34; }
+.grad-in-bottom { stop-color: var(--color-accent); stop-opacity: 0.02; }
+.grad-out-top { stop-color: var(--color-neutral-800); stop-opacity: 0.22; }
+.grad-out-bottom { stop-color: var(--color-neutral-800); stop-opacity: 0.02; }
+.chart [vector-effect] { vector-effect: non-scaling-stroke; }
+
+.axis {
+  display: flex; justify-content: space-between; padding-top: var(--space-2);
+  font-size: 11px; color: var(--color-neutral-600); font-variant-numeric: tabular-nums;
+}
+
+/* ── events ────────────────────────────────────────────────────────── */
+
+.events {
+  margin-top: auto; border-top: 2px solid var(--color-divider);
+  padding: 20px var(--space-6); display: flex; flex-direction: column; gap: var(--space-3);
+}
+.event-list { display: flex; flex-direction: column; gap: var(--space-3); }
+.event { display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: var(--space-3); font-size: 13px; }
+.event-time { color: var(--color-neutral-600); font-variant-numeric: tabular-nums; }
+.event strong { font-weight: 600; }
+
+/* ── tables ────────────────────────────────────────────────────────── */
+
+.table-wrap { padding: 0 var(--space-6) var(--space-6); overflow: hidden; }
+.table .num, .table .cell-right { font-variant-numeric: tabular-nums; }
+.cell-right { text-align: right; }
+.cell-strong { font-weight: 600; }
+.cell-dim { color: var(--color-neutral-700); }
+
+.tree-branch { background: var(--color-neutral-200); }
+.tree-branch td { font-weight: 700; }
+.tree-name { display: inline-flex; align-items: center; gap: var(--space-2); }
+.tree-leaf { padding-left: 42px !important; }
+
+/* ── settings ──────────────────────────────────────────────────────── */
+
+.settings-cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); overflow: hidden; }
+.settings-col { padding: 26px 28px; display: flex; flex-direction: column; gap: 22px; }
+.settings-col + .settings-col { border-left: 0; }
+.settings-col--ruled { border-right: 2px solid var(--color-divider); }
+.group { display: flex; flex-direction: column; gap: var(--space-4); }
+.group-title {
+  margin: 0; font-size: 15px; letter-spacing: 0.02em; text-transform: uppercase;
+}
+.row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); }
+.row-2-1 { display: grid; grid-template-columns: 2.2fr 1fr; gap: var(--space-3); }
+.choice { display: flex; flex-direction: column; gap: var(--space-2); }
+.choice-label { font-size: 12px; color: var(--color-neutral-700); }
+.choice-row { display: flex; gap: 26px; }
+.note { font-size: 12px; color: var(--color-neutral-700); line-height: 1.5; }
+.note strong { font-weight: 600; }
+
+.cert {
+  border: 1px solid var(--color-divider); background: var(--color-neutral-100);
+  padding: var(--space-3) var(--space-4);
+  display: flex; flex-direction: column; gap: var(--space-1);
+}
+.cert-cn { font-size: 13px; font-weight: 600; }
+.cert-meta { font-size: 12px; color: var(--color-neutral-700); font-variant-numeric: tabular-nums; }
+
+.page-foot {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--space-6); padding: 18px 28px;
+  border-top: 2px solid var(--color-divider);
+}
+/* ── chart overlay ─────────────────────────────────────────────────────
+   Everything that has to line up with the plot but must not be stretched by
+   preserveAspectRatio="none" lives over the SVG rather than inside it. */
+
+.chart-wrap { position: relative; }
+.chart-grid-lines { pointer-events: none; }
+.chart-wrap .chart { position: relative; z-index: 1; }
+
+/* Value labels for the grid lines, so a peak can be read and not just seen. */
+.chart-ticks { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
+.chart-tick {
+  position: absolute; left: 0; transform: translateY(-50%);
+  padding-left: 2px;
+  font-size: 10px; font-weight: 600; letter-spacing: 0.04em;
+  color: var(--color-neutral-600); font-variant-numeric: tabular-nums;
+  background: color-mix(in srgb, var(--color-bg) 78%, transparent);
+}
+
+.chart-scale { font-size: 11px; color: var(--color-neutral-600); }
+
+.chart-cursor {
+  position: absolute; top: 0; bottom: 0; width: 0;
+  border-left: 1px dashed var(--color-neutral-600);
+  z-index: 3; pointer-events: none;
+}
+
+/* The latest reading, marked so the eye lands on the current value first. */
+.chart-dot {
+  position: absolute; width: 7px; height: 7px; margin: -4px 0 0 -4px;
+  z-index: 4; pointer-events: none;
+}
+.chart-dot--in { background: var(--color-accent); }
+.chart-dot--out { background: var(--color-neutral-800); }
+
+.chart-tip {
+  position: absolute; z-index: 5; pointer-events: none;
+  transform: translate(-50%, 0);
+  padding: 7px 10px; min-width: 96px;
+  background: var(--color-text); color: var(--color-bg);
+  font-size: 11px; line-height: 1.5; font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.chart-tip-time { font-weight: 700; letter-spacing: 0.06em; }
+.chart-tip-row { display: flex; justify-content: space-between; gap: var(--space-3); }
+.chart-tip-key { display: inline-flex; align-items: center; gap: 6px; opacity: 0.75; }
+.chart-tip-key::before { content: ""; width: 8px; height: 2px; background: currentColor; }
+.chart-tip-row--in .chart-tip-key::before { background: var(--color-accent-400); }
+
+/* ── liveness ──────────────────────────────────────────────────────── */
+
+/* The socket is down: hollow rather than a different colour, because a solid
+   dot in any colour still reads as "something is being reported". */
+.live-dot.is-down {
+  background: transparent;
+  box-shadow: inset 0 0 0 2px var(--color-neutral-500);
+}
+.live-text { transition: opacity 120ms linear; }
+.live-dot.is-down + .live-text { color: var(--color-neutral-600); }
+
+.event-empty { font-size: 13px; color: var(--color-neutral-600); }
+.event-list .event { animation: event-in 240ms ease-out; }
+@keyframes event-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.tag { display: inline-block; padding: 2px 7px; font-size: 10px; font-weight: 700;
+       letter-spacing: 0.08em; text-transform: uppercase; }
+.tag-accent { background: var(--color-accent-200); color: var(--color-accent-700); }
+.tag-neutral { background: var(--color-neutral-200); color: var(--color-neutral-700); }

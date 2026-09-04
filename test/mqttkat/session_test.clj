@@ -70,6 +70,15 @@
 
       (let [c (tu/connect! nil :id id :clean-session? true)]
         (tu/close! c))
+      ;; Wait for that connection to be torn down before asking what the broker
+      ;; kept. Without this the next CONNECT could be handled before the clean
+      ;; one's disconnect, and the answer depended on which won.
+      (let [deadline (+ (System/currentTimeMillis) 5000)]
+        (loop []
+          (when (and (contains? @h/*clients* id)
+                     (< (System/currentTimeMillis) deadline))
+            (Thread/sleep 25)
+            (recur))))
       ;; The clean connect discarded it, so a persistent one now finds nothing.
       (let [d (tu/connect! nil :id id :clean-session? false)]
         (is (false? (:session-present? (:connack d)))

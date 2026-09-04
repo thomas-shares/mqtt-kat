@@ -41,10 +41,10 @@
 (def ^:private prefix "$SYS/broker/")
 
 (defonce ^:private high-water
-  ;; Sampled at each update rather than tracked on every connect: the counting
-  ;; would have to happen on the connect path, and a peak between two samples
-  ;; is not worth putting work there for.
-  (atom {:clients 0 :heap 0}))
+  ;; Heap only. The client high-water is counted as sessions come and go — see
+  ;; MqttStat.clientConnected — because sampling it here missed any client that
+  ;; connected and left between two updates, which is most of them.
+  (atom {:heap 0}))
 
 (defn- sum ^long [^LongAdder a] (.sum a))
 
@@ -180,9 +180,7 @@
   (let [{:keys [connected parked-sessions]} (util/client-counts)
         rt      (Runtime/getRuntime)
         heap    (- (.totalMemory rt) (.freeMemory rt))
-        peaks   (swap! high-water #(-> %
-                                       (update :clients max connected)
-                                       (update :heap max heap)))
+        peaks   (swap! high-water #(update % :heap max heap))
         queued  (max 0 (- (sum MqttStat/sentMessages)
                           (sum MqttStat/writtenMessages)
                           (sum MqttStat/discardedMessages)))
@@ -196,7 +194,7 @@
        ;; currently connected, which is exactly a parked session here.
        [(str prefix "clients/disconnected") parked-sessions]
        [(str prefix "clients/total") (+ connected parked-sessions)]
-       [(str prefix "clients/maximum") (:clients peaks)]
+       [(str prefix "clients/maximum") (MqttStat/maxConnectedClients)]
        ;; Always 0: nothing expires a persistent session yet, so there is no
        ;; persistent_client_expiration to have removed anything.
        [(str prefix "clients/expired") 0]
@@ -226,6 +224,17 @@
                       MqttStat/receivedByType
                       MqttStat/sentByType)
                     ^int (int type)))])))))
+
+(defn load-averages
+  "The load averages as they stand, without moving them on.
+
+   Reading them must not advance them: advance-load! is driven by the
+   publisher's clock, and a second caller passing an elapsed of its own would
+   corrupt the smoothing for everyone. A status page refreshed twice a second
+   would otherwise flatten every average it was displaying."
+  []
+  (into {} (for [[[suffix label] v] (:averages @load-state)]
+             [(str prefix suffix "/" label) (two-places v)])))
 
 (defonce ^:private last-publish (atom nil))
 

@@ -5,6 +5,7 @@
             [mqttkat.handlers.disconnect :as disconnect]
             [mqttkat.handlers.connack :as connack]
             [mqttkat.sys :as sys]
+            [mqttkat.web.server :as web]
             [mqttkat.util :as util]
             [mqttkat.s :refer [*server*]]
             [overtone.at-at :as at]
@@ -66,18 +67,24 @@
     (reset! *server* nil)))
 
 (defn -main
-  "Start the broker and report on it until killed.
+  "Start the broker, the $SYS publisher and the status page, and report until
+   killed.
 
-   Takes an optional port, so a second instance can be run alongside one that
-   already has 1883 — which the out-of-process scale test needs, and which is
-   generally useful for trying something without stopping what is there."
+   Takes the MQTT port and then the HTTP one, both optional: a second instance
+   can be run alongside one that already has 1883, which the out-of-process
+   scale test needs and which is generally useful for trying something without
+   stopping what is there."
   [& args]
-  (let [port (if-let [p (first args)] (Long/parseLong (str p)) 1883)]
+  (let [port      (if-let [p (first args)] (Long/parseLong (str p)) 1883)
+        http-port (if-let [p (second args)] (Long/parseLong (str p)) web/default-port)]
     (start! "0.0.0.0" (int port))
     ;; Started here rather than in start!, so the test suite's broker does not
     ;; spend its life publishing retained $SYS messages into the state the
     ;; tests are asserting about. Anything that wants them calls sys/start!.
     (sys/start!)
+    ;; http-kit brings its own threads, so this returns as soon as it is
+    ;; listening; util/info below is still what holds the main thread.
+    (web/start! http-port)
     (util/info)))
 
 (comment
