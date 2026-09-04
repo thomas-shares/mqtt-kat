@@ -35,7 +35,9 @@
    :discarded (.sum ^LongAdder MqttStat/discardedMessages)
    :dropped   (.sum ^LongAdder MqttStat/droppedMessages)
    :throttled (.sum ^LongAdder MqttStat/publisherPauses)
-   :received  (.sum ^LongAdder MqttStat/receivedMessages)})
+   :received  (.sum ^LongAdder MqttStat/receivedMessages)
+   :writes    (.sum ^LongAdder MqttStat/socketWrites)
+   :stalls    (.sum ^LongAdder MqttStat/writeStalls)})
 
 (defn- backlog
   "Packets queued for a client and neither written nor dropped yet.
@@ -81,7 +83,16 @@
    :dropped   {:per-second (rate :dropped before now) :total (:dropped now)}
    ;; How often a publisher was stopped so a subscriber could catch up. Rising
    ;; means back-pressure is doing the work that dropping would otherwise do.
-   :throttled (:throttled now)})
+   :throttled (:throttled now)
+   ;; Packets per write() call, and how often a write found the socket buffer
+   ;; full. The first says whether the writer is doing one syscall per packet;
+   ;; the second whether the millisecond poll in writeFully is a real cost.
+   :writes    {:per-second (rate :writes before now)
+               :total (:writes now)
+               :packets-each (if (pos? (long (:writes now)))
+                               (round1 (/ (double (:written now)) (:writes now)))
+                               0.0)}
+   :stalls    (:stalls now)})
 
 (defn info
   "Log the broker's counters every `interval` seconds, forever.

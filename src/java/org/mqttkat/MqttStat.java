@@ -53,6 +53,21 @@ public class MqttStat {
 	 */
 	public static LongAdder publisherPauses = new LongAdder();
 
+	/**
+	 * write() calls made on the outbound path, and how many of those returned
+	 * zero bytes because the socket buffer was full.
+	 *
+	 * Here to answer two questions with measurements rather than opinion.
+	 * writtenMessages divided by socketWrites is packets per syscall — one, as
+	 * long as the writer takes a single packet off the queue and writes it, and
+	 * higher once it gathers whatever is already queued into one writev. And
+	 * writeStalls says whether the poll in writeFully is a real cost or a
+	 * theoretical one: the Thread.sleep(1) it does on a full buffer is a
+	 * millisecond of latency each time, and worth fixing only if it happens.
+	 */
+	public static LongAdder socketWrites = new LongAdder();
+	public static LongAdder writeStalls = new LongAdder();
+
 	public static LongAdder receivedMessages = new LongAdder();
 	public static LongAdder receivedBytes = new LongAdder();
 

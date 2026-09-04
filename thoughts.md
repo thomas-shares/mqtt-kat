@@ -156,6 +156,95 @@ is doing and is invisible in a message count. `$SYS/broker/messages/received` is
 unchanged and still counts every packet — that is Mosquitto's definition, and
 anything pointed at both brokers should keep reading the same thing.
 
+### Would turning Nagle off buy throughput?
+
+The question came the other way round — whether disabling Nagle trades latency
+for throughput — and it is worth writing down which way it actually goes.
+Nagle *on* coalesces small writes into fuller packets: better throughput per
+byte, worse latency. Nagle *off* sends every write immediately: better latency,
+more packets. So turning it off buys latency at throughput's expense, not the
+reverse.
+
+It is already off here, on both ends — `MqttServer` line 174 and `MqttClient`
+line 96 — and the comment on the second says why both are needed: with only one
+end set, the acknowledgement half still waits on the delayed-ACK timer. Turning
+it back on would be actively bad on this broker. At QoS 1 the measured
+bottleneck is time publishers spend waiting for PUBACKs — 7,394 seconds summed
+across 200 publishers in one 12 second run — and Nagle's whole effect would be
+to delay those PUBACKs, up to 40 ms each time it met the peer's delayed ACK.
+
+But the instinct behind the question was right. CPU sat at 1900-2100% — 19 to
+21 of 24 cores — at 318,000 packets a second out. Something was being paid per
+packet. Nagle is simply the wrong tool for it.
+
+### Measuring before changing, for once
+
+Two candidates: the writer made one `write()` syscall per packet, and
+`writeFully` polled a full socket buffer with `Thread.sleep(1)`. Rather than
+argue about which mattered, two counters went in first — `socketWrites` and
+`writeStalls` — surfaced in the ten-second stats line as packets-per-write and
+a stall count.
+
+They answered both questions before a line of the write path changed.
+
+**Packets per write: exactly 1.0.** At saturation that is 806,000 syscalls a
+second. Worth attacking.
+
+**Stalls: zero.** Not "few" — zero, in every run, including at full saturation.
+`channel.write` never once returned zero, because the queue limit stops the
+broker long before the kernel send buffer fills. The `Thread.sleep(1)` that had
+been sitting in the not-fixed list as a suspected cost does not execute at all
+on loopback with a reader that keeps up. I would have spent an afternoon on it.
+
+### Gathering writes
+
+Not Nagle: gathering only ever collects what is **already** on the queue and
+never waits for more. One packet queued is one packet written, immediately, so
+it costs no latency by construction — it engages only when the writer is
+already behind, which is exactly when the syscall per packet was costing
+something.
+
+The writer now takes its first packet with `take()`, drains up to 63 more with
+non-blocking `poll()`, and hands the array to `channel.write(buffers, 0, n)` —
+one `writev`. `-Dmqttkat.gatherWrites=1` restores the old behaviour, which is
+how the two were compared without swapping binaries.
+
+Five runs each, 50 publishers, 1,000 subscribers, 50 topics, QoS 0, unlimited
+rate:
+
+| | deliveries/s | sd | median | p99 | packets/write |
+|---|---|---|---|---|---|
+| one write per packet | 796,750 | 7,184 | 2202 ms | 4116 ms | 1.0 |
+| gathered | **853,458** | 15,783 | **1927 ms** | **2988 ms** | 13.5-17.6 |
+
++7.1% throughput, -27% at p99, -12.5% at the median, and about 93% fewer
+syscalls. Better on both axes at once, which is the sign it is cheaper work
+rather than a trade: less CPU per packet means the queue drains faster, so the
+latency falls out of it.
+
+**QoS 1 gains nothing**: 38,451 against 38,381 deliveries a second, inside the
+noise, even though packets-per-write still reaches 14. That path is bound on
+PUBACK round trips and the in-flight window, not on syscalls, and writing more
+cheaply buys nothing there. Worth stating plainly, because "it made QoS 0 7%
+faster" invites the assumption that it made everything faster.
+
+Delivery ratio was 1.0000 in every run of both arms, across roughly 40M
+messages. The other end-to-end tests are all paced, so the writer takes one
+packet off an empty queue and the multi-buffer path never runs; there is now a
+test that drives an unpaced burst specifically to cover it.
+
+### The poll, fixed on shape rather than on measurement
+
+`Thread.sleep(1)` is gone anyway, replaced by a backoff from 50 us doubling to
+a millisecond. This is not a measured win and the comment in the code says so:
+stalls were zero everywhere, so on loopback with a reader that keeps up the
+path does not run. The case that would run it — a client on a real network that
+stops reading — is precisely the one a loopback benchmark cannot produce, and a
+flat millisecond per attempt is the wrong answer for it. The channel is
+registered with the selector for reads so it cannot be switched to blocking
+mode and waited on properly, which is what makes backing off the best available
+shape rather than the right one.
+
 ### Found on the way, not chased
 
 A 300k message QoS 1 run at 5,000 subscribers lost **540 of 6,000,000**
@@ -1103,10 +1192,12 @@ case pass and the other three fail, which is the check worth having.
   a `ClassCastException: String cannot be cast to SelectionKey` out of
   `check-timer` — a timer outliving the re-keying in `remove-client!`. Caught
   and logged, so harmless today.
-* **`writeFully` still polls.** `Thread.sleep(1)` against a non-blocking
-  channel is the wrong shape with virtual threads; a blocking channel parks on
-  the JDK poller instead, with no 1 ms granularity. It was not the bottleneck,
-  so it is still there.
+* ~~**`writeFully` still polls.**~~ Fixed on 20260904, and the suspicion that
+  prompted it was wrong: a counter on that branch measured **zero** stalls
+  under every load tried, up to 806,000 deliveries a second. It was not the
+  bottleneck because it never ran. Replaced with a 50 us backoff anyway, for
+  the case a loopback benchmark cannot produce — a client on a real network
+  that stops reading.
 * **53 of 150 subscriber sockets had an empty Send-Q** while the rest were
   saturated. With uniform fan-out to one topic they should look alike. Never
   explained.

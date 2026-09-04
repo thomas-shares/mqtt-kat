@@ -184,6 +184,25 @@
           "expectation is built from what was actually published, not planned")
       (is (= 1.0 (:delivery-ratio r))))))
 
+(deftest a-burst-is-gathered-and-still-arrives-intact
+  (testing "an unpaced burst builds a queue, which is when writes are gathered"
+    ;; The other end-to-end tests here are paced, so the writer takes one
+    ;; packet off an empty queue and the multi-buffer path never runs. At an
+    ;; unlimited rate the queue builds and the writer gathers what is waiting
+    ;; into one writev — measured at around fourteen packets per write under
+    ;; load. This is the test that covers that path at all: a dropped or
+    ;; reordered buffer in a gathered write would show up as a delivery ratio
+    ;; below one.
+    (let [r (runner/execute (merge runner/defaults
+                                   {:host tu/host :port tu/port
+                                    :publishers 4 :subscribers 20 :topics 2
+                                    :messages 20000 :rate 0 :qos 0
+                                    :size 64 :progress-ms 0 :drain-ms 3000}))]
+      (is (= 20000 (:published (:counts r))))
+      (is (= (:expected r) (:received (:counts r)))
+          "every message reached every subscriber of its topic")
+      (is (= 1.0 (:delivery-ratio r))))))
+
 (deftest the-drain-waits-for-the-whole-tail
   (testing "the quiet window restarts every time something arrives"
     ;; The bug this replaces: the deadline was absolute from the moment
