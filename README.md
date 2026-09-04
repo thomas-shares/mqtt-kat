@@ -52,7 +52,7 @@ I first thought of calling it mqtt-kit... but then decide that mqtt-kat made mor
 
 ## Will it ever be a proper MQTT broker supporting QOS > 0?
 
-It actually does not... but memory only, there is no storing to disk. So a broker crash would loose most inflight message (I guess some would be recovered if a client retries)
+It actually does now... but memory only, there is no storing to disk. So a broker crash would loose most inflight message (I guess some would be recovered if a client retries)
 
 ## Will it ever support MQTT version 5?
 
@@ -85,6 +85,32 @@ https://github.com/hobbyquaker/awesome-mqtt
 ## Usage
 
 I call `(start)` function in the repl and then use an MQTT client to send packets to it and wait for it to crash.
+
+or create an uberjar with `lein uberjar` and start it with `java -Dmqttkat.sysInterval=5  -jar target/mqtt-kat-0.0.1-standalone.jar  1883 8081`
+
+Run the test client with 
+
+`lein run -m mqttkat.load.runner --publishers 2000 --subscribers 20000 --topics 1000 --messages 2000000 --rate 10000 --qos 1 --drain-ms 5000 --source-ips 1`
+
+and here are the other options:
+
+```
+  --host HOST        broker host (localhost)
+  --port PORT        broker port (1883)
+  --publishers N     publishing clients (10)
+  --subscribers N    subscribing clients (10)
+  --topics N         topics, shared between both pools (5)
+  --messages N       total messages to publish; 0 to keep going until stopped (100000)
+  --duration N       stop after N seconds; 0 for no time limit (0)
+  --progress-ms N    how often to print a progress line while running (5000)
+  --rate N           target messages per second, aggregate; 0 for unlimited (10000)
+  --qos 0|1|2        publish and subscribe QoS (0)
+  --size N           payload bytes, minimum 28 (128)
+  --window N         unacknowledged publishes allowed per publisher (100)
+  --drain-ms N       quiet period that counts as fully drained (5000)
+  --max-drain-ms N   cap on the whole drain, however much is still arriving (300000)
+  --source-ips N     spread clients over N source addresses; 0 to choose automatically
+```
 
 ## Thank you
 
