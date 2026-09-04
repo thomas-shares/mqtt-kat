@@ -234,7 +234,12 @@
        [:div.panel
         [:div.panel-head [:h2.panel-title "Broker counters"]]
         [:div.table-wrap
-         [:table.table
+         [:table.table.table--fixed
+          ;; The number columns are pinned so they cannot be re-measured as the
+          ;; figures change; the label column takes whatever is left. Without
+          ;; this the whole column shifts every time a counter gains a digit,
+          ;; once a second, which is movement that reads as data.
+          [:colgroup [:col] [:col.col-value] [:col.col-rate]]
           [:thead [:tr [:th "Counter"] [:th.cell-right "Value"] [:th.cell-right "Rate"]]]
           [:tbody
            (for [{:keys [id name rate]} state/counter-rows]

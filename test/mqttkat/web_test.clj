@@ -13,7 +13,8 @@
             [mqttkat.test-util :as tu]
             [mqttkat.web.console :as console]
             [mqttkat.web.page :as page]
-            [mqttkat.web.server :as web])
+            [mqttkat.web.server :as web]
+            [mqttkat.web.state :as state])
   (:import [java.net URI]
            [java.net.http HttpClient HttpRequest HttpResponse$BodyHandlers]))
 
@@ -150,6 +151,42 @@
                          ["topics"   (console/topics-page)]]]
       (is (str/includes? html "<th class=\"cell-right\"")
           (str "the " name " table should mark its right-aligned headings")))))
+
+(deftest the-counters-table-cannot-shift-as-its-figures-change
+  (testing "one figure per row, so a cell is never as wide as two counters"
+    ;; This is what made the column jump. `PUBLISH in / out` held two
+    ;; independent counters in one cell, so the cell — and with it every
+    ;; number in the column — moved whenever either of them gained a digit.
+    ;; It also made the column impossible to pin: a pair of seven-digit
+    ;; counters alongside the longest label needs 380px in a 348px panel.
+    (let [reading (state/current)]
+      (doseq [{:keys [id name value]} state/counter-rows]
+        (is (not (str/includes? (value reading) " / "))
+            (str "the " name " row puts two figures in one cell"))
+        (is (not (str/includes? name " / "))
+            (str "and the " id " label reads as a pair")))))
+
+  (testing "and the columns are pinned rather than measured"
+    (let [html (console/overview-page)
+          css  (slurp (io/resource "public/css/console.css"))]
+      (is (str/includes? html "table--fixed") "the table opts into a fixed layout")
+      (is (str/includes? html "col-value") "with the number columns declared")
+      (is (str/includes? html "col-rate"))
+      (is (re-find #"\.table--fixed\s*\{[^}]*table-layout:\s*fixed" css)
+          "and the stylesheet actually fixes it — the colgroup alone does nothing")))
+
+  (testing "the widths are proportions, so they survive a narrow panel"
+    ;; These were absolute, sized off the longest figure the counters reach.
+    ;; That holds at the width the panel is usually at and starves at any
+    ;; other: in a 1000px window the panel is 250px and the two number columns
+    ;; took 184 of it, wrapping the labels in nine rows out of twelve.
+    (let [css     (slurp (io/resource "public/css/console.css"))
+          percent #(some-> (re-find (re-pattern (str "\\.col-" % "\\s*\\{\\s*width:\\s*(\\d+)%")) css)
+                           second parse-long)]
+      (is (percent "value") "the value column is a percentage")
+      (is (percent "rate") "and so is the rate column")
+      (is (< (+ (percent "value") (percent "rate")) 70)
+          "leaving the label column the larger share"))))
 
 (deftest every-class-in-the-markup-is-styled
   (testing "the pages use no class the stylesheets do not define"

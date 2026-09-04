@@ -198,8 +198,8 @@
    [:bytes-in "bytes-in"] [:bytes-out "bytes-out"]
    [:dropped "dropped"] [:sockets "sockets"]
    [:publish-in "publish-in"] [:publish-out "publish-out"]
-   [:connects "connects"] [:subscriptions "subscriptions"]
-   [:retained "retained"]])
+   [:connects "connects"] [:disconnects "disconnects"]
+   [:subscriptions "subscriptions"] [:retained "retained"]])
 
 (defonce ^:private previous (atom nil))
 (defonce ^:private latest-rates (atom {}))
@@ -261,17 +261,25 @@
 (def counter-rows
   "The counters table: element id, label, and how to read value and rate out
    of a `reading`. Defined once so the server renders the rows and the browser
-   fills the same ids — a row added here appears in both."
+   fills the same ids — a row added here appears in both.
+
+   One figure per row, never two. `PUBLISH in / out` and `Connect /
+   disconnect` used to put a pair in one cell, and that is what made the
+   column jump: the cell was as wide as two independent counters happened to
+   be, so it grew whenever either of them crossed a digit — 0 / 680 to
+   0 / 5,440 — and every number in the column shifted with it. It also made
+   the widest cell too wide to pin, since a pair of seven-digit counters plus
+   the longest label needs 380px in a 348px panel."
   [{:id "subscriptions" :name "Subscriptions"     :value #(commas (:subscriptions %))}
    {:id "retained"      :name "Retained messages" :value #(commas (:retained %))}
    {:id "dropped"       :name "Dropped messages"  :value #(commas (:dropped %))}
    {:id "throttled"     :name "Publisher pauses"  :value #(commas (:throttled %))}
    {:id "bytes-in"      :name "Bytes in"          :value #(bytes-str (:bytes-in %))}
    {:id "bytes-out"     :name "Bytes out"         :value #(bytes-str (:bytes-out %))}
-   {:id "publish-in"    :name "PUBLISH in / out"  :value #(str (commas (:publish-in %)) " / "
-                                                               (commas (:publish-out %)))}
-   {:id "connects"      :name "Connect / disconnect"
-    :value #(str (commas (:connects %)) " / " (commas (:disconnects %)))}
+   {:id "publish-in"    :name "PUBLISH in"        :value #(commas (:publish-in %))}
+   {:id "publish-out"   :name "PUBLISH out"       :value #(commas (:publish-out %))}
+   {:id "connects"      :name "Connects"          :value #(commas (:connects %))}
+   {:id "disconnects"   :name "Disconnects"       :value #(commas (:disconnects %))}
    {:id "sockets"       :name "Sockets accepted"  :value #(commas (:sockets %))}
    {:id "uptime"        :name "Broker uptime"     :value #(duration-str (:uptime %)) :rate :none}])
 

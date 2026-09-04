@@ -179,6 +179,21 @@ body { font-size: 14px; }
 /* ── tables ────────────────────────────────────────────────────────── */
 
 .table-wrap { padding: 0 var(--space-6) var(--space-6); overflow: hidden; }
+
+/* Columns sized here rather than by the browser measuring the content. The
+   counters are rewritten once a second, and auto layout re-measures every
+   time: a counter gaining a digit widened its column and shifted every figure
+   in the table sideways.
+
+   Proportions, not absolute widths. These were `calc(11ch + padding)`, sized
+   off the longest figure the counters can reach, which holds at the width the
+   panel is usually at and starves at any other: in a 1000px window the panel
+   is 250px, the two number columns took 184 of it and the labels wrapped onto
+   two lines in nine rows out of twelve. As percentages all three shrink
+   together. */
+.table--fixed { table-layout: fixed; }
+.table--fixed .col-value { width: 30%; }
+.table--fixed .col-rate { width: 24%; }
 .table .num, .table .cell-right { font-variant-numeric: tabular-nums; }
 /* Scoped to .table so it outweighs modernist's `.table th { text-align: left }`
    — same specificity, and that rule loads first, so a bare .cell-right lost
