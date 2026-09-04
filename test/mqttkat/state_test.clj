@@ -8,6 +8,7 @@
    downstream to catch it."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
+            [mqttkat.client :as client]
             [mqttkat.test-util :as tu]
             [mqttkat.web.state :as state]))
 
@@ -50,9 +51,9 @@
 (deftest a-reading-is-every-number-the-page-needs
   (testing "and nothing is missing or negative"
     (let [r (state/reading)]
-      (doseq [k [:clients :parked :max-clients :received :written :bytes-in :bytes-out
+      (doseq [k [:clients :parked :max-clients :packets-in :packets-out :bytes-in :bytes-out
                  :queued :inflight :dropped :throttled :sockets :connects :disconnects
-                 :subscriptions :retained :heap :heap-max :uptime]]
+                 :publish-in :publish-out :subscriptions :retained :heap :heap-max :uptime]]
         (is (number? (k r)) (str k " should be a number"))
         (is (not (neg? (k r))) (str k " should never be negative")))
       (is (pos? (:heap-max r)) "the heap limit is known")
@@ -144,3 +145,51 @@
     (let [f (state/fields (state/current))]
       (is (string? (f "m-mem")) "a percentage, or a dash")
       (is (re-find #"\d+ cores" (f "m-mem-note")) "with the core count for scale"))))
+
+(deftest the-headline-counts-messages-not-packets
+  (testing "in and out are PUBLISH, which is what a message is"
+    ;; The console displayed "messages in / out" from counters that Connection
+    ;; increments for every packet. Under a QoS 1 fan-out to 20,000
+    ;; subscribers that showed 122,000/s each way for a broker doing 24,000
+    ;; publishes in and 98,000 out — because every one of those deliveries
+    ;; brings back a PUBACK. Both numbers looked plausible, which is why this
+    ;; needs a test rather than an eye.
+    (let [by-id (into {} (map (fn [[k id]] [id k])) @#'state/rated)]
+      (is (= :publish-in (by-id "in")))
+      (is (= :publish-out (by-id "out")))))
+
+  (testing "packets are never fewer than messages"
+    (let [r (state/reading)]
+      (is (>= (:packets-in r) (:publish-in r)))
+      (is (>= (:packets-out r) (:publish-out r)))))
+
+  (testing "and a QoS 1 exchange moves more packets than it does messages"
+    ;; The difference is the acknowledgement traffic, which is most of what a
+    ;; broker at QoS 1 is doing and is invisible in a message count.
+    (let [before (state/reading)
+          c      (tu/connect! "state-packets")
+          topic  (tu/topic "packets")]
+      (try
+        (client/send-message (:client c) {:packet-type :SUBSCRIBE :packet-identifier 1
+                                          :topics [{:qos 1 :topic-filter topic}]})
+        (tu/expect! (:ch c) :SUBACK)
+        (client/send-message (:client c) {:packet-type :PUBLISH :topic topic :qos 1
+                                          :packet-identifier 2
+                                          :payload (.getBytes "hello" "UTF-8")
+                                          :retain? false :duplicate? false})
+        ;; PUBACK for the publish, then the delivery of it — this client is
+        ;; its own subscriber. Both, so the exchange is finished before the
+        ;; counters are read.
+        (tu/expect! (:ch c) :PUBACK)
+        (tu/expect! (:ch c) :PUBLISH)
+        (Thread/sleep 300)
+        (let [after (state/reading)]
+          (is (> (- (:packets-in after) (:packets-in before))
+                 (- (:publish-in after) (:publish-in before)))
+              "the SUBSCRIBE and the acknowledgements are packets, not messages"))
+        (finally (tu/close! c)))))
+
+  (testing "both are on the page"
+    (let [ids (set (map :id state/counter-rows))]
+      (doseq [id ["publish-in" "publish-out" "packets-in" "packets-out"]]
+        (is (contains? ids id) (str id " should be a counter row"))))))

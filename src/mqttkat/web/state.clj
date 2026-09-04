@@ -169,8 +169,15 @@
        :clients       connected
        :parked        parked-sessions
        :max-clients   (MqttStat/maxConnectedClients)
-       :received      (sum MqttStat/receivedMessages)
-       :written       written
+       ;; Packets, not messages: Connection increments these once for every
+       ;; packet that crosses the boundary, right beside countReceived and
+       ;; countSent. Named for what they are — they used to be :received and
+       ;; :written and were displayed under "messages in / out", which at QoS 1
+       ;; with a fan-out is about five times the message rate, because every
+       ;; delivery brings back a PUBACK. 24k publishes/s in and 98k out showed
+       ;; as 122k each way.
+       :packets-in    (sum MqttStat/receivedMessages)
+       :packets-out   written
        :bytes-in      (sum MqttStat/receivedBytes)
        :bytes-out     (sum MqttStat/writtenBytes)
        :queued        queued
@@ -194,7 +201,11 @@
 (def ^:private rated
   "The counters a per-second rate is worked out for, and the id of the cell it
    is shown in."
-  [[:received "in"] [:written "out"]
+  ;; "in" and "out" are the headline pair and the two lines of the throughput
+  ;; chart, and they are PUBLISH — what a message is. The packet rates are
+  ;; alongside them rather than instead of them.
+  [[:publish-in "in"] [:publish-out "out"]
+   [:packets-in "packets-in"] [:packets-out "packets-out"]
    [:bytes-in "bytes-in"] [:bytes-out "bytes-out"]
    [:dropped "dropped"] [:sockets "sockets"]
    [:publish-in "publish-in"] [:publish-out "publish-out"]
@@ -278,6 +289,12 @@
    {:id "bytes-out"     :name "Bytes out"         :value #(bytes-str (:bytes-out %))}
    {:id "publish-in"    :name "PUBLISH in"        :value #(commas (:publish-in %))}
    {:id "publish-out"   :name "PUBLISH out"       :value #(commas (:publish-out %))}
+   ;; Every packet, not just the ones carrying a payload. Next to the PUBLISH
+   ;; rows on purpose: the gap between them is the acknowledgement traffic,
+   ;; which at QoS 1 with a wide fan-out is most of what the broker is doing
+   ;; and is invisible in a message count.
+   {:id "packets-in"    :name "Packets in"        :value #(commas (:packets-in %))}
+   {:id "packets-out"   :name "Packets out"       :value #(commas (:packets-out %))}
    {:id "connects"      :name "Connects"          :value #(commas (:connects %))}
    {:id "disconnects"   :name "Disconnects"       :value #(commas (:disconnects %))}
    {:id "sockets"       :name "Sockets accepted"  :value #(commas (:sockets %))}
@@ -293,6 +310,8 @@
      {"stamp"          (str "Updated " (clock-str (:t reading)))
       "uptime-foot"    (str "up " (duration-str (:uptime reading)))
 
+      ;; PUBLISH only, which is what "messages" means to whoever is reading it
+      ;; and what the load generator counts. The packet rate is in the table.
       "m-throughput"      (commas (Math/round (double msg-rate)))
       "m-throughput-note" (str (rate-str (get r "in" 0.0)) " in · "
                                (rate-str (get r "out" 0.0)) " out")

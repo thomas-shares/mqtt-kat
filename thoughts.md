@@ -2,6 +2,172 @@
 
 In this file will go my thoughts and ramblings about this project and what I have done and what I might do next.
 
+## 20260904
+
+### A load generator of our own
+
+The whole line of work that started with mqttloader reporting 9.8 second
+latencies ended with the finding that the *client* was the bottleneck, not the
+broker. Everything since has been about measuring the broker honestly — the
+queued/written/discarded/dropped split, the back-pressure counters, `$SYS`, the
+console — while the thing generating the load stayed borrowed and opaque. This
+closes that.
+
+    lein run -m mqttkat.load.runner --publishers 200 --subscribers 2000 \
+      --topics 100 --messages 2000000 --rate 20000 --qos 1
+
+Or from the uberjar, which is the better way when the run is one you might want
+to interrupt, because signals then reach the JVM rather than the `lein` wrapper:
+
+    java -cp target/mqtt-kat-0.0.1-standalone.jar clojure.main \
+      -m mqttkat.load.runner --publishers 200 --subscribers 2000 --messages 0
+
+It knows nothing about this broker beyond `--host` and `--port`, so the same
+run can be pointed at mosquitto for a comparison that means something.
+
+### The options
+
+| option | default | what it does |
+|---|---|---|
+| `--host HOST` | localhost | broker to connect to |
+| `--port PORT` | 1883 | broker port |
+| `--publishers N` | 10 | clients that only publish |
+| `--subscribers N` | 10 | clients that only subscribe |
+| `--topics N` | 5 | topics, shared between both pools |
+| `--messages N` | 100000 | total to publish; **0 runs until stopped** |
+| `--duration N` | 0 | stop after N seconds; 0 for no time limit |
+| `--rate N` | 10000 | target messages/second, aggregate; 0 for unlimited |
+| `--qos 0\|1\|2` | 0 | publish and subscribe QoS |
+| `--size N` | 128 | payload bytes, minimum 28 |
+| `--window N` | 100 | unacknowledged publishes allowed per publisher |
+| `--progress-ms N` | 5000 | how often to print a progress line |
+| `--drain-ms N` | 5000 | quiet period that counts as fully drained |
+| `--max-drain-ms N` | 300000 | cap on the whole drain |
+| `--source-ips N` | 0 | spread clients over N source addresses; 0 chooses |
+
+Most are obvious. The ones that are not:
+
+**`--publishers` and `--subscribers` are separate pools**, and the ratio
+between them and `--topics` is the fan-out — the single biggest determinant of
+what the broker has to do. 2,000 publishers and 20,000 subscribers over 1,000
+topics is twenty subscribers per topic, so one publish is twenty deliveries.
+That amplification is what turned 300k publishes into 45M deliveries and broke
+the back-pressure path in the first place, and it is worth being able to dial
+independently of the connection count.
+
+**`--rate` is the aggregate**, split evenly across publishers, and the schedule
+it produces is absolute: the nth message is due at `start + n*interval`, not
+`interval` after the last one. Sleeping between sends makes the interval a
+floor and every overshoot permanent, so the run drifts to a lower rate than it
+reports. Below a millisecond of interval the publisher parks once per
+millisecond and sends that millisecond's worth in a burst, because `parkNanos`
+has no finer pacing to give; the report says so when it is doing that.
+
+`--rate 0` means flat out, and the report is careful to call the resulting
+number a ceiling for the generator *and* the broker together rather than a
+measurement of the broker.
+
+**`--window`** is the in-flight limit per publisher, MQTT 5's Receive Maximum
+by another name. Time spent waiting for a slot is reported, and it is usually
+the first thing that moves when the broker is the limit.
+
+**`--size` has a floor of 28** because the payload carries a header: the
+intended send time, the actual send time, the publisher index and a sequence
+number. The two timestamps are the point — see below.
+
+**`--source-ips`** exists because of the port ceiling. One source address gives
+about 14,000 connections and not the 28,000 the ephemeral range suggests, since
+Linux hands `bind()` the odd ports and `connect()` the even ones; past roughly
+12,000 the allocator starts scanning and the connect rate drops twenty-fold.
+The generator spreads over `127.0.0.x` at 8,000 apiece when the broker is on
+loopback, and leaves well alone when it is not, because the addresses of a real
+interface are not ours to invent. `0` picks; a number overrides.
+
+**`--drain-ms` is a quiet period, not a duration.** After publishing stops the
+run waits until nothing has been delivered for that long, and the window
+restarts every time something arrives. `--max-drain-ms` caps the whole wait so
+a broker dribbling forever cannot hang the run — and if that cap is reached the
+report says the delivered count is a floor rather than a total.
+
+### Two latencies, and why there are two
+
+The payload carries when the publisher was *scheduled* to send and when it
+*actually* sent, so the subscriber can compute both:
+
+    service   now - actual    what the broker did with it
+    response  now - intended  what a client would have experienced
+
+Reporting only the first is the coordinated-omission mistake: a generator that
+falls behind stops sending during exactly the moments the broker is slowest,
+and then reports the fast messages it did manage. The gap between the two is
+how much of the delay the generator added, and it is printed on every run.
+
+The report also answers "was the generator the bottleneck?" whether or not it
+was, because a number that only appears when something is wrong is a number
+nobody learns to read. Achieved against target, mean lateness, time blocked on
+the window, send failures, publishes never acknowledged.
+
+### Four things I got wrong building it
+
+**The bottleneck verdict fired on a healthy run.** It compared lateness *summed
+over every message* against wall time, so 9.14 s looked alarming when it was
+457 us each — `parkNanos` granularity — on a run that held 5,001/s against a
+5,000/s target.
+
+**Parking per message was inside the measurement, not just the pacing.**
+Batching to one park per millisecond took the median service latency from
+0.96 ms to 0.54 ms. That was the instrument, not the broker.
+
+**The burst then broke my own test.** I asserted `response >= service`, which
+is the obvious invariant and is false: a burst can send a message ahead of its
+intended time, so it arrives before a perfectly paced generator would have sent
+it. Half the messages, at those settings. The same clamp fixed 484 of 4,000,000
+samples being dropped as negative, which had made the two histograms disagree
+on `n` and read like lost messages.
+
+**The drain could never wait longer than `--drain-ms`.** The deadline was
+absolute from the moment draining began rather than restarting on each arrival,
+so a two million message run reported deliveries that were still arriving at
+44,000/s as though they were never coming — and my docstring claimed the
+opposite, that a slow run "is not cut off in the middle of the tail it is
+trying to measure". Fixed, a 300k message run drains for 13.79 s against 18.53 s
+of publishing, and reports 0.9999 delivered where it had been reporting far
+less. The delivery *rate* was wrong for the same reason: it divided deliveries
+that arrived during the drain by the publishing window alone.
+
+### The console was counting packets and calling them messages
+
+Found by holding the two against each other, which is the entire point of
+having a generator whose numbers are independent of the broker's. The page
+showed 122,328/s in and 122,552/s out while the client reported 24,269/s
+published and 106,194/s delivered — and the `PUBLISH in`/`PUBLISH out` rows of
+the same table agreed with the client.
+
+`Connection` increments `receivedMessages` and `writtenMessages` once for every
+packet, right beside `countReceived(type)`. At QoS 1 with a wide fan-out that is
+about five times the message rate, because every delivery brings back a PUBACK:
+in = 24k PUBLISH + 98k PUBACK, out = 98k delivery + 24k PUBACK. Both numbers
+looked plausible, which is why it needed a test rather than an eye.
+
+The headline metric and both lines of the throughput chart are PUBLISH now.
+Packets have their own rows next to the PUBLISH ones, because the gap between
+them *is* the acknowledgement traffic, which at QoS 1 is most of what the broker
+is doing and is invisible in a message count. `$SYS/broker/messages/received` is
+unchanged and still counts every packet — that is Mosquitto's definition, and
+anything pointed at both brokers should keep reading the same thing.
+
+### Found on the way, not chased
+
+A 300k message QoS 1 run at 5,000 subscribers lost **540 of 6,000,000**
+deliveries and left **27 publishes unacknowledged**. 27 x 20 subscribers per
+topic is exactly 540, so it looks like 27 publishes were accepted and then
+neither acknowledged nor fanned out. The broker's own counters say
+`dropped 0, discarded 0, backlog 0`, and its written total reconciles to the
+5,999,460 the client received — so the client got everything the broker sent,
+and the broker never sent those. The drain ended quiet, so they were not merely
+late. The packet arithmetic assumes exact accounting and this is a lead rather
+than a conclusion, but at-least-once says it should not happen.
+
 ## 20260903
 
 ### How much of QoS 1 and 2 had ever run

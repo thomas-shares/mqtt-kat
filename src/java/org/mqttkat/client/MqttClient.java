@@ -59,10 +59,37 @@ public class MqttClient {
 	 */
 	public MqttClient(String host, int port, int threadPoolSize, IHandler handler, Object asyncChannel)
 			throws IOException {
+		this(host, port, threadPoolSize, handler, asyncChannel, null);
+	}
+
+	/**
+	 * As above, but binding the socket to {@code sourceAddress} first.
+	 *
+	 * For callers that need more connections to one listener than a single
+	 * source address can supply. Worth being precise about what that buys,
+	 * because it is not what it looks like: Linux splits
+	 * net.ipv4.ip_local_port_range between its two allocators, handing bind()
+	 * the odd ports and connect() the even ones. Measured on this project's
+	 * machine, 400 sockets each way, the split was total. So binding does not
+	 * widen what one address can give — roughly 14,000 either way on a
+	 * 32768-60999 range — and past about 12,000 the allocator starts scanning
+	 * and the connect rate falls by twenty times. Having several addresses is
+	 * what raises the ceiling; this parameter only makes that possible.
+	 *
+	 * @param sourceAddress address to bind to, or null to let the kernel pick.
+	 */
+	public MqttClient(String host, int port, int threadPoolSize, IHandler handler, Object asyncChannel,
+			String sourceAddress) throws IOException {
 		log.debug("Creating client...");
 		this.handler = handler;
 		this.asyncChannel = asyncChannel;
-		this.socketChannel = SocketChannel.open(new InetSocketAddress(host, port));
+		if (sourceAddress == null) {
+			this.socketChannel = SocketChannel.open(new InetSocketAddress(host, port));
+		} else {
+			this.socketChannel = SocketChannel.open();
+			this.socketChannel.bind(new InetSocketAddress(sourceAddress, 0));
+			this.socketChannel.connect(new InetSocketAddress(host, port));
+		}
 		// See the matching call in MqttServer.handleAccept: both ends have to
 		// disable Nagle, or the acknowledgement half of the exchange still
 		// waits on the delayed-ACK timer.

@@ -88,15 +88,24 @@
       (is (contains? first-sample :clients))
       (is (contains? first-sample :t)))
 
-    ;; Now make some traffic and sample again.
-    (let [c (tu/connect! "ws-rate")]
+    ;; Now make some traffic and sample again. It has to be a PUBLISH: :in and
+    ;; :out are the message rate, and a CONNECT and a SUBSCRIBE — which is all
+    ;; this used to send — are packets that carry no message. That distinction
+    ;; is the point of the counters, so the test that exercises them should
+    ;; produce one.
+    (let [c     (tu/connect! "ws-rate")
+          topic (tu/topic "rate")]
       (client/send-message (:client c) {:packet-type :SUBSCRIBE :packet-identifier 1
-                                        :topics [{:qos 0 :topic-filter (tu/topic "rate")}]})
+                                        :topics [{:qos 0 :topic-filter topic}]})
       (tu/expect! (:ch c) :SUBACK)
+      (client/send-message (:client c) {:packet-type :PUBLISH :topic topic :qos 0
+                                        :payload (.getBytes "x" "UTF-8")
+                                        :retain? false :duplicate? false})
+      (tu/expect! (:ch c) :PUBLISH)
       (Thread/sleep 150)
       (let [second-sample (state/sample-point (state/sample!))]
         (is (pos? (:in second-sample))
-            "packets arrived between the two samples, so the rate is above zero"))
+            "a message was published between the two samples, so the rate is above zero"))
       (tu/close! c))))
 
 (deftest a-sample-carries-one-field-per-plotted-line
