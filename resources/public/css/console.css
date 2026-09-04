@@ -13,15 +13,24 @@ body { font-size: 14px; }
 
 /* ── shell ─────────────────────────────────────────────────────────── */
 
+/* The shell is exactly the viewport and does not scroll; the two columns
+   scroll themselves. This was min-height, which let the whole document grow
+   with the content — so the sidebar grew with it and the broker details at
+   its foot ended up at the bottom of the page rather than the bottom of the
+   screen, out of sight until you scrolled past everything else. */
 .app {
   display: grid;
   grid-template-columns: 224px minmax(0, 1fr);
-  min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;   /* dvh where it is understood: mobile URL bars */
+  overflow: hidden;
 }
 
 .side {
   display: flex; flex-direction: column;
   border-right: 2px solid var(--color-divider);
+  /* Only if the window is too short for the nav itself. */
+  overflow-y: auto;
 }
 .side-brand { padding: 26px 20px 22px; border-bottom: 2px solid var(--color-divider); }
 .side-mark {
@@ -57,8 +66,16 @@ body { font-size: 14px; }
 .live-dot { width: 9px; height: 9px; background: var(--color-accent); }
 .live-text { font-size: 11px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; }
 
-.main { display: grid; grid-template-rows: auto auto minmax(0, 1fr); min-width: 0; }
-.main--settings { grid-template-rows: auto minmax(0, 1fr) auto; }
+/* min-content rather than 0 as the floor on the content row: with a fixed
+   shell, a 0 floor lets the row be shorter than what is in it, and the panels
+   and the topics table are then clipped instead of scrolling. The 1fr still
+   stretches them to fill a tall window. */
+.main {
+  display: grid; grid-template-rows: auto auto minmax(min-content, 1fr);
+  min-width: 0;
+  overflow-y: auto;
+}
+.main--settings { grid-template-rows: auto minmax(min-content, 1fr) auto; }
 
 /* ── page head ─────────────────────────────────────────────────────── */
 
@@ -163,14 +180,36 @@ body { font-size: 14px; }
 
 .table-wrap { padding: 0 var(--space-6) var(--space-6); overflow: hidden; }
 .table .num, .table .cell-right { font-variant-numeric: tabular-nums; }
-.cell-right { text-align: right; }
+/* Scoped to .table so it outweighs modernist's `.table th { text-align: left }`
+   — same specificity, and that rule loads first, so a bare .cell-right lost
+   and only the body cells moved: the VALUE and RATE headings sat left over
+   right-aligned figures. Only ever used on table cells, so scoping it costs
+   nothing. */
+.table .cell-right { text-align: right; }
 .cell-strong { font-weight: 600; }
 .cell-dim { color: var(--color-neutral-700); }
 
 .tree-branch { background: var(--color-neutral-200); }
 .tree-branch td { font-weight: 700; }
-.tree-name { display: inline-flex; align-items: center; gap: var(--space-2); }
 .tree-leaf { padding-left: 42px !important; }
+
+/* The twisty. A button rather than a clickable row, so it focuses and takes
+   Enter and Space without any of that being reimplemented here. */
+.tree-name {
+  display: inline-flex; align-items: center; gap: var(--space-2);
+  padding: 0; border: 0; background: none;
+  font: inherit; color: inherit; letter-spacing: inherit;
+  cursor: pointer;
+}
+.tree-name:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 3px; }
+.tree-name:hover .tree-chevron { color: var(--color-accent); }
+.tree-chevron { flex: none; transition: transform 120ms ease; }
+.tree-name[aria-expanded="true"] .tree-chevron { transform: rotate(90deg); }
+
+/* tr carries display:table-row from the UA stylesheet, which in some browsers
+   wins over the UA's own [hidden] rule; without this the collapsed rows stay
+   on screen and only the chevron moves. */
+.tree-row[hidden] { display: none; }
 
 /* ── settings ──────────────────────────────────────────────────────── */
 

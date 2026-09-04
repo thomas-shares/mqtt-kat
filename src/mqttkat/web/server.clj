@@ -30,16 +30,18 @@
   "Routing, such as it is. A function of a request map, so it can be called
    directly in a test without going near a socket.
 
-   /status is the raw $SYS table. It stays alongside the console because the
-   console's readings are still the design's sample data, and one page here
-   shows what the broker is actually doing."
+   /status is the raw $SYS table. It stays alongside the console now that the
+   console shows live figures too, because it shows every $SYS topic rather
+   than the ones the design had room for, and it needs no JavaScript."
   [{:keys [uri request-method]}]
   (if (not= :get request-method)
     {:status 405 :headers {"Allow" "GET"} :body "method not allowed"}
     (case uri
       "/"         (html (console/overview-page))
       "/topics"   (html (console/topics-page))
-      "/settings" (html (console/settings-page))
+      ;; No /settings. console/settings-page still exists, but every field on
+      ;; it is invented and the broker reads none of it, so it is deliberately
+      ;; not reachable rather than served as though it did something.
       "/status"   (html (page/status))
       {:status 404 :headers {"Content-Type" "text/plain"} :body "not found"})))
 

@@ -1,5 +1,5 @@
 (ns mqttkat.web.console
-  "MQTT Console — three server-rendered pages (overview, topics, settings).
+  "MQTT Console — the server-rendered pages: overview and topics.
 
    The design's markup, with its sample readings replaced by the broker's own.
    Every figure is rendered from mqttkat.web.state at request time and then
@@ -34,6 +34,7 @@
 (def icon-topics
   (icon [:path {:d "M4 4h6v6H4z"}] [:path {:d "M14 14h6v6h-6z"}] [:path {:d "M7 10v7h7"}]))
 
+;; Unused while settings is unrouted; kept with the page it belongs to.
 (def icon-settings
   (icon [:circle {:cx 12 :cy 12 :r 3}]
         [:path {:d "M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"}]))
@@ -42,10 +43,15 @@
   (icon [:circle {:cx 9 :cy 8 :r 3}] [:path {:d "M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"}]
         [:path {:d "M17 11h4M17 16h4"}]))
 
-(defn- chevron [open?]
-  [:svg {:width 12 :height 12 :viewBox "0 0 24 24" :fill "none"
-         :stroke "currentColor" :stroke-width 3 :stroke-linecap "square"}
-   [:path {:d (if open? "M6 9l6 6 6-6" "M9 6l6 6-6 6")}]])
+(defn- chevron
+  "Always drawn pointing right; CSS turns it when the branch is open. One
+   glyph rather than two, so the open and closed states cannot disagree about
+   which way it points — and so it can be animated."
+  []
+  [:svg.tree-chevron {:width 12 :height 12 :viewBox "0 0 24 24" :fill "none"
+                      :stroke "currentColor" :stroke-width 3 :stroke-linecap "square"
+                      :aria-hidden "true"}
+   [:path {:d "M9 6l6 6-6 6"}]])
 
 ;; ── chrome ────────────────────────────────────────────────────────────
 
@@ -65,7 +71,8 @@
    [:div.side-nav
     (nav-item {:href "/"         :label "Overview" :glyph icon-overview :active? (= active :overview)})
     (nav-item {:href "/topics"   :label "Topics"   :glyph icon-topics   :active? (= active :topics)})
-    (nav-item {:href "/settings" :label "Settings" :glyph icon-settings :active? (= active :settings)})
+    ;; Settings is not in the nav and is not routed. settings-page below still
+    ;; builds it — see the note there.
     (nav-item {:label "Clients"  :glyph icon-clients :disabled? true})]
    [:div.side-foot foot]])
 
@@ -271,9 +278,14 @@
   (let [retained @handlers/*retained*
         grouped  (group-by (fn [[topic _]] (first (str/split (str topic) #"/"))) retained)]
     (for [[branch entries] (sort-by (fn [[b _]] [(if (= "$SYS" b) 0 1) b]) grouped)
-          row (cons {:kind :branch :topic branch :value (str (count entries) " sub-topics")}
+          ;; :branch on the leaves as well as the branch row — that pairing is
+          ;; what lets the twisty find its own children without the browser
+          ;; having to reason about row order.
+          row (cons {:kind :branch :branch branch :topic branch
+                     :value (str (count entries) " sub-topics")}
                     (for [[topic {:keys [qos payload]}] (sort-by key entries)]
                       {:kind :leaf
+                       :branch branch
                        :topic (str/replace-first (str topic) (str branch "/") "")
                        :value (payload-str payload)
                        :qos qos}))]
@@ -306,28 +318,46 @@
         [:tbody
          (if (empty? rows)
            [:tr [:td {:colspan 3} [:div.event-empty "No retained messages."]]]
-           (for [{:keys [kind topic value qos]} rows]
+           (for [{:keys [kind branch topic value qos]} rows]
              (if (= kind :branch)
-               [:tr.tree-branch
-                [:td [:span.tree-name (chevron true) topic]]
+               [:tr.tree-branch {:data-branch branch}
+                ;; A real button, not a clickable row. It gets keyboard focus
+                ;; and Enter/Space for free, and aria-expanded is what tells a
+                ;; screen reader the state that the turning chevron tells
+                ;; everyone else.
+                [:td [:button.tree-name {:type "button"
+                                         :data-branch branch
+                                         :aria-expanded "true"}
+                      (chevron) topic]]
                 [:td.cell-dim value]
                 [:td.cell-right.cell-dim ""]]
                ;; No "retained" tag on the rows. Every topic on this page is
                ;; retained — that is what the page lists — so a tag on all of
                ;; them marks nothing and reads as noise on sixty-eight lines.
-               [:tr
+               [:tr.tree-row {:data-parent branch}
                 [:td.tree-leaf topic]
                 [:td.cell-strong value]
                 [:td.cell-right.cell-dim qos]])))]]]])))
 
-;; ── settings ──────────────────────────────────────────────────────────
+;; ── settings (not routed) ─────────────────────────────────────────────
+;;
+;; Kept, unreachable, on purpose. Every field on this page is invented — a
+;; hostname, a certificate, a password — and the broker neither reads nor
+;; saves any of it, so serving it would be a page that looks like
+;; configuration and configures nothing. Wiring it up needs somewhere to write
+;; to, which is a different piece of work from reporting; until then the
+;; markup is worth more than the empty file that would replace it, and the
+;; tests still render it so its stylesheet stays honest.
 
 (defn- field [label value & [type]]
   [:div.field
    [:label label]
    [:input.input {:type (or type "text") :value value}]])
 
-(defn settings-page []
+(defn settings-page
+  "The settings form. Not served — see the note above — and kept only so the
+   design is not lost before there is something behind it."
+  []
   (layout
    {:title "Settings — MQTT Console"
     :active :settings

@@ -385,6 +385,80 @@
     }
   }
 
+  // ── the topic tree ──────────────────────────────────────────────────
+  //
+  // The twisty. Branches are wired to their rows by name — a branch row
+  // carries data-branch, its leaves carry data-parent — rather than by
+  // position, so this does not depend on the rows staying adjacent or in the
+  // order the server happened to emit them.
+
+  var COLLAPSED_KEY = "mqttkat.collapsed";
+
+  function readCollapsed() {
+    // A page with a stylesheet and no storage is still a working page, and
+    // private windows throw on the first read rather than returning null.
+    try {
+      return JSON.parse(localStorage.getItem(COLLAPSED_KEY)) || [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  function writeCollapsed(list) {
+    try {
+      localStorage.setItem(COLLAPSED_KEY, JSON.stringify(list));
+    } catch (e) {
+      // Nothing to do about it, and nothing worth breaking the page over.
+    }
+  }
+
+  // Indexed once, rather than looked up with an attribute selector built from
+  // the branch name. A branch is the first segment of a topic, a topic is
+  // whatever a client published to, and a name with a quote in it would then
+  // be a selector a client got to write. Comparing dataset values never
+  // parses anything.
+  function indexBranches() {
+    var index = {};
+    var rows = document.querySelectorAll("tr[data-parent]");
+    for (var i = 0; i < rows.length; i++) {
+      var name = rows[i].dataset.parent;
+      (index[name] = index[name] || []).push(rows[i]);
+    }
+    return index;
+  }
+
+  function initTree() {
+    var buttons = document.querySelectorAll("button[data-branch]");
+    if (buttons.length === 0) return;
+    var index = indexBranches();
+
+    function setBranch(button, expanded) {
+      var rows = index[button.dataset.branch] || [];
+      for (var i = 0; i < rows.length; i++) rows[i].hidden = !expanded;
+      button.setAttribute("aria-expanded", expanded ? "true" : "false");
+    }
+
+    // $SYS alone is sixty-odd rows, so a branch someone collapsed should stay
+    // collapsed — this page is server-rendered and reloaded to refresh it,
+    // and reopening it on every reload would make the twisty useless.
+    var collapsed = readCollapsed();
+
+    for (var j = 0; j < buttons.length; j++) {
+      var button = buttons[j];
+      if (collapsed.indexOf(button.dataset.branch) !== -1) setBranch(button, false);
+      button.addEventListener("click", function () {
+        var expanded = this.getAttribute("aria-expanded") !== "true";
+        setBranch(this, expanded);
+        var name = this.dataset.branch;
+        var list = readCollapsed().filter(function (n) { return n !== name; });
+        if (!expanded) list.push(name);
+        writeCollapsed(list);
+      });
+    }
+  }
+
+  initTree();
+
   // ── the socket ──────────────────────────────────────────────────────
 
   function setStatus(text, live) {
