@@ -177,6 +177,44 @@
   [msg]
   (some-> ^bytes (:payload msg) (String. "UTF-8")))
 
+(defn send-v5!
+  "Send a packet on a connection that negotiated MQTT 5, stamped as version 5.
+
+   Not a convenience — a guard. Every packet after the CONNECT is decoded
+   against the version the connection negotiated, so a 3.1.1-shaped SUBSCRIBE
+   or UNSUBSCRIBE sent on a version 5 connection is a malformed packet: the
+   topic filter's length prefix is read as the property block that should have
+   been there, and the rest of the packet is nonsense.
+
+   The broker is right to refuse it, and that is exactly the problem — the
+   mistake is invisible in the test source and surfaces only as a reply that
+   never arrives. It was made twice, once in the SUBSCRIBE slice and once in
+   the UNSUBSCRIBE slice, and cost a debugging cycle each time. Going through
+   here means it cannot be made silently again."
+  [c msg]
+  (client/send-message (:client c) (assoc msg :protocol-version 5)))
+
+(defn connect-v5!
+  "Create a client, complete an MQTT 5 handshake, and return it ready for
+   send-v5!.
+
+   Returns {:client :ch :connack :protocol-version}. `ordered?` defaults to
+   true here, unlike connect!: the version 5 tests assert on sequences of
+   deliveries rather than waiting for a single packet."
+  [prefix & {:keys [clean-session? keep-alive properties will id ordered? buffer]
+             :or   {clean-session? true keep-alive 0 ordered? true buffer 32}}]
+  (let [{:keys [client ch] :as c} (client! buffer ordered?)
+        msg (cond-> {:packet-type      :CONNECT
+                     :protocol-name    "MQTT"
+                     :protocol-version 5
+                     :keep-alive       keep-alive
+                     :clean-session?   clean-session?
+                     :client-id        (or id (client-id prefix))}
+              properties (assoc :properties properties)
+              will       (assoc :will will))]
+    (client/send-message client msg)
+    (assoc c :protocol-version 5 :connack (expect! ch :CONNACK))))
+
 (defn connect!
   "Create a client and complete the CONNECT/CONNACK handshake.
    Returns {:client :ch :connack}."

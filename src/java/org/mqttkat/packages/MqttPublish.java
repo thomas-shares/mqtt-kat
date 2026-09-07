@@ -17,7 +17,22 @@ import clojure.lang.PersistentArrayMap;
 
 public class MqttPublish extends GenericMessage {
 
-	public static IPersistentMap decode(SelectionKey key, byte flags, byte[] remainAndPayload) throws IOException {
+	/**
+	 * A 3.1.1 PUBLISH, for callers that have no connection to ask.
+	 *
+	 * Kept because a v5 PUBLISH cannot be told from a 3.1.1 one by looking at
+	 * it — same topic, same optional packet identifier, then bytes — so the
+	 * only way to know is to remember what the connection negotiated in its
+	 * CONNECT. Connection does; this overload is for the tests and tools that
+	 * do not have one.
+	 */
+	public static IPersistentMap decode(SelectionKey key, byte flags, byte[] remainAndPayload)
+			throws IOException {
+		return decode(key, flags, remainAndPayload, 4);
+	}
+
+	public static IPersistentMap decode(SelectionKey key, byte flags, byte[] remainAndPayload,
+			int protocolVersion) throws IOException {
 		//System.out.println("PUBLISH message...");
 		int offset = 0;
 		Map<Keyword, Object> m = new TreeMap<Keyword, Object>();
@@ -40,6 +55,14 @@ public class MqttPublish extends GenericMessage {
 			m.put(DUPLICATE, (flags & 0x08) == 0x08);
 		}
 		//System.out.println("index: " + (topic.length() + 2) + " length: " + remainAndPayload.length + " topic: " + topic);
+		// §3.3.2.3: the property block sits after the packet identifier and
+		// before the payload, so on this path the payload does not begin where
+		// a 3.1.1 one would.
+		if (protocolVersion >= MqttConnect.PROTOCOL_VERSION_5) {
+			m.put(PROPERTIES, MqttProperties.decode(remainAndPayload, offset));
+			offset += MqttProperties.blockLength(remainAndPayload, offset);
+		}
+
 		m.put(PAYLOAD, Arrays.copyOfRange(remainAndPayload, offset, remainAndPayload.length));
 
 		return PersistentArrayMap.create(m);
@@ -78,6 +101,19 @@ public class MqttPublish extends GenericMessage {
 			bytes = fit(bytes, length, 2);
 			bytes[length++] = (byte) ((packetIdentifierL >>> 8) & 0xFF);
 			bytes[length++] = (byte) ((packetIdentifierL >>> 0) & 0xFF);
+		}
+
+		// The version travels in the message rather than as an argument because
+		// the broker builds one of these per subscriber, and which dialect it
+		// is written in is a property of that subscriber's connection.
+		if (message.containsKey(PROTOCOL_VERSION)
+				&& ((Number) message.get(PROTOCOL_VERSION)).intValue() >= MqttConnect.PROTOCOL_VERSION_5) {
+			@SuppressWarnings("unchecked")
+			byte[] properties = MqttProperties.encode((Map<Keyword, ?>) message.get(PROPERTIES));
+			bytes = fit(bytes, length, properties.length);
+			for (int i = 0; i < properties.length; i++) {
+				bytes[length++] = properties[i];
+			}
 		}
 
 		Object obj = message.get(PAYLOAD);

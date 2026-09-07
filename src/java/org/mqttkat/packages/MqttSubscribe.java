@@ -21,31 +21,87 @@ import clojure.lang.PersistentVector;
 import clojure.lang.IPersistentVector;
 import clojure.lang.Keyword;
 
+import org.mqttkat.MqttProtocolError;
+
 public class MqttSubscribe extends GenericMessage{
 
-	public static IPersistentMap decode(SelectionKey key, byte[] data) throws IOException {
-		//System.out.println("SUBSCRIBE message...");
+	/**
+	 * The subscription options byte (§3.8.3.1): QoS in bits 0-1, No Local in
+	 * bit 2, Retain As Published in bit 3, Retain Handling in bits 4-5, and
+	 * bits 6-7 reserved.
+	 *
+	 * A 3.1.1 subscription writes only the QoS, which is the same as a version
+	 * 5 one with every flag at its default — so the two encodings agree on the
+	 * bytes for a client that asks for nothing extra.
+	 */
+	private static byte subscriptionOptions(Map<Keyword, ?> topicMap, boolean v5) {
+		int options = ((Number) topicMap.get(QOS)).intValue() & 0x03;
+		if (v5) {
+			if (Boolean.TRUE.equals(topicMap.get(NO_LOCAL))) {
+				options |= 0x04;
+			}
+			if (Boolean.TRUE.equals(topicMap.get(RETAIN_AS_PUBLISHED))) {
+				options |= 0x08;
+			}
+			Object handling = topicMap.get(RETAIN_HANDLING);
+			if (handling != null) {
+				options |= (((Number) handling).intValue() & 0x03) << 4;
+			}
+		}
+		return (byte) options;
+	}
 
+	public static IPersistentMap decode(SelectionKey key, byte[] data) throws IOException {
+		return decode(key, data, 4);
+	}
+
+	public static IPersistentMap decode(SelectionKey key, byte[] data, int protocolVersion)
+			throws IOException {
 		int offset = 0;
 		Map<Keyword, Object> m = new TreeMap<Keyword, Object>();
 
 		m.put(PACKET_TYPE, intern("SUBSCRIBE"));
 		m.put(PACKET_IDENTIFIER, twoBytesToLong( data[offset++], data[offset++]));
 
+		boolean v5 = protocolVersion >= MqttConnect.PROTOCOL_VERSION_5;
+		if (v5) {
+			// §3.8.2.1, between the packet identifier and the first filter.
+			m.put(PROPERTIES, MqttProperties.decode(data, offset));
+			offset += MqttProperties.blockLength(data, offset);
+		}
+
 	    IPersistentVector vector = PersistentVector.create();
 
 		while(offset < data.length) {
 		    Map<Keyword, Object> topicMap = new TreeMap<Keyword, Object>();
 			String topic = decodeUTF8(data, offset);
-			//System.out.println("topic: " + topic);
 			topicMap.put(TOPIC_FILTER, topic);
 			offset += encodedUTF8Length(data, offset);
-			//System.out.println(offset);
-			topicMap.put(QOS, data[offset++]);
-			//System.out.println(offset + " " +  data.length + " " + topicMap.toString());
+
+			byte options = data[offset++];
+			topicMap.put(QOS, (byte) (options & 0x03));
+
+			if (v5) {
+				// §3.8.3.1. The same byte 3.1.1 used for QoS alone, with the
+				// bits above it given meanings — which is why the reserved
+				// ones have to be checked rather than masked away: a client
+				// setting them has asked for something, and silently doing
+				// something else is worse than refusing.
+				if ((options & 0xC0) != 0) {
+					throw MqttProtocolError.malformed(
+							"subscription options reserved bits are set");
+				}
+				int retainHandling = (options & 0x30) >> 4;
+				if (retainHandling == 3) {
+					throw MqttProtocolError.malformed(
+							"retain handling 3 is not a defined value");
+				}
+				topicMap.put(NO_LOCAL, (options & 0x04) != 0);
+				topicMap.put(RETAIN_AS_PUBLISHED, (options & 0x08) != 0);
+				topicMap.put(RETAIN_HANDLING, (long) retainHandling);
+			}
 
 			vector = vector.cons(PersistentArrayMap.create(topicMap));
-			//System.out.println(vector.toString());
 		}
 		//System.out.println("uit de loop: " +  offset + " " + data.length + " " + vector.toString());
 	    //IPersistentVector vector = PersistentVector.create(1, 2, 3);
@@ -75,6 +131,17 @@ public class MqttSubscribe extends GenericMessage{
 		Long packetIdentifier = (Long) message.get(PACKET_IDENTIFIER);
 		bytes[length++] = (byte) ((packetIdentifier >> 8) & 0xFF);
 		bytes[length++] = (byte) ((packetIdentifier >> 0) & 0xFF);
+
+		boolean v5 = message.containsKey(PROTOCOL_VERSION)
+				&& ((Number) message.get(PROTOCOL_VERSION)).intValue() >= MqttConnect.PROTOCOL_VERSION_5;
+		if (v5) {
+			@SuppressWarnings("unchecked")
+			byte[] properties = MqttProperties.encode((Map<Keyword, ?>) message.get(PROPERTIES));
+			bytes = fit(bytes, length, properties.length);
+			for (int i = 0; i < properties.length; i++) {
+				bytes[length++] = properties[i];
+			}
+		}
 	
 		//String s1 = String.format("%8s", Integer.toBinaryString(bytes[0])).replace(' ', '0');
 		//System.out.println("packet id 1: " + s1);
@@ -98,7 +165,7 @@ public class MqttSubscribe extends GenericMessage{
 				bytes[length++] = topic[i];
 			}
 			
-			bytes[length++] = Byte.parseByte(((Long) topicMap.get(QOS)).toString());
+			bytes[length++] = subscriptionOptions(topicMap, v5);
 		}
 
 		//for(int i =0; i < length ; i++) {

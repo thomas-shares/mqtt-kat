@@ -32,6 +32,21 @@ public abstract class GenericMessage {
 	public static final Keyword CLIENT_ID = intern("client-id");
 	public static final Keyword PROTOCOL_NAME = intern("protocol-name");
 	public static final Keyword PROTOCOL_VERSION = intern("protocol-version");
+
+	/** MQTT 5.0 §2.2.2 — the property block every v5 packet carries. */
+	public static final Keyword PROPERTIES = intern("properties");
+	/** MQTT 5.0 §2.4 — replaces 3.1.1's per-packet return codes. */
+	public static final Keyword REASON_CODE = intern("reason-code");
+	/**
+	 * Whether a DISCONNECT came from the client or was raised by the broker
+	 * because the connection died.
+	 *
+	 * The broker synthesises a DISCONNECT for a socket that has gone, so the
+	 * handler sees the same packet either way — and the will turns on exactly
+	 * this distinction (§3.1.2.5): a client that said goodbye keeps its will
+	 * unpublished, a connection that simply ended does not.
+	 */
+	public static final Keyword FROM_CLIENT = intern("from-client?");
 	public static final Keyword WILL = intern("will");
 	public static final byte WILL_FLAG = (byte) 0x04;
 	public static final Keyword WILL_RETAIN = intern("will-retain");
@@ -65,6 +80,10 @@ public abstract class GenericMessage {
 	public static final Keyword TOPICS = intern("topics");
 	public static final Keyword TOPIC_FILTER = intern("topic-filter");
 	public static final Keyword QOS = intern("qos");
+	/** MQTT 5.0 §3.8.3.1 — subscription options. */
+	public static final Keyword NO_LOCAL = intern("no-local?");
+	public static final Keyword RETAIN_AS_PUBLISHED = intern("retain-as-published?");
+	public static final Keyword RETAIN_HANDLING = intern("retain-handling");
 
 	//SUBACK
 	public static final Keyword SUBACK_RESPONSE = intern("response");

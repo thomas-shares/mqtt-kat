@@ -124,7 +124,11 @@
                  :CONNECT (MqttConnect/encode msg)
                  :PUBLISH (MqttPublish/encode msg)
                  :SUBSCRIBE (MqttSubscribe/encode msg)
-                 :DISCONNECT (MqttDisconnect/encode)
+                 ;; The map, not the no-arg encoder: an MQTT 5 DISCONNECT
+                 ;; carries a reason code and properties, and throwing the
+                 ;; message away here sent a bare normal disconnection however
+                 ;; the caller had spelled it.
+                 :DISCONNECT (MqttDisconnect/encode msg)
                  :PUBACK (MqttPubAck/encode msg)
                  :UNSUBSCRIBE (MqttUnsubscribe/encode msg))]
     (.sendMessage ^MqttClient client buffer)))

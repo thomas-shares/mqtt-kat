@@ -177,11 +177,15 @@
                                           :packet-identifier 2
                                           :payload (.getBytes "hello" "UTF-8")
                                           :retain? false :duplicate? false})
-        ;; PUBACK for the publish, then the delivery of it — this client is
-        ;; its own subscriber. Both, so the exchange is finished before the
-        ;; counters are read.
-        (tu/expect! (:ch c) :PUBACK)
-        (tu/expect! (:ch c) :PUBLISH)
+        ;; A PUBACK for the publish and a delivery of it — this client is its
+        ;; own subscriber. Both are waited for, so the exchange is finished
+        ;; before the counters are read, but not in a fixed order: they are
+        ;; independent packets, and this client's channel is the unordered one,
+        ;; so asserting a sequence made the test fail about one run in two.
+        (let [types (set [(:packet-type (tu/take! (:ch c) 2000))
+                          (:packet-type (tu/take! (:ch c) 2000))])]
+          (is (= #{:PUBACK :PUBLISH} types)
+              "both halves of the exchange arrive, in whichever order"))
         (Thread/sleep 300)
         (let [after (state/reading)]
           (is (> (- (:packets-in after) (:packets-in before))

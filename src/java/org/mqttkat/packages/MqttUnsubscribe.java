@@ -24,14 +24,23 @@ import clojure.lang.PersistentVector;
 public class MqttUnsubscribe extends GenericMessage{
 
 	public static IPersistentMap decode(SelectionKey key, byte[] data) throws IOException {
-		//System.out.println("UNSUBSCRIBE message...");
+		return decode(key, data, 4);
+	}
 
+	public static IPersistentMap decode(SelectionKey key, byte[] data, int protocolVersion)
+			throws IOException {
 		int offset = 0;
 		Map<Keyword, Object> m = new TreeMap<Keyword, Object>();
 
 		m.put(PACKET_TYPE, intern("UNSUBSCRIBE"));
 
 		m.put(PACKET_IDENTIFIER, twoBytesToLong( data[offset++], data[offset++]));
+
+		if (protocolVersion >= MqttConnect.PROTOCOL_VERSION_5) {
+			// §3.10.2.1 — User Property only, but the block is mandatory.
+			m.put(PROPERTIES, MqttProperties.decode(data, offset));
+			offset += MqttProperties.blockLength(data, offset);
+		}
 		
 	    IPersistentVector vector = PersistentVector.create();
 
@@ -58,6 +67,16 @@ public class MqttUnsubscribe extends GenericMessage{
 		Long packetIdentifierL = (Long) message.get(PACKET_IDENTIFIER);
 		bytes[length++] = (byte) ((packetIdentifierL >>> 8) & 0xFF);
 		bytes[length++] = (byte) (packetIdentifierL & 0xFF);
+
+		if (message.containsKey(PROTOCOL_VERSION)
+				&& ((Number) message.get(PROTOCOL_VERSION)).intValue() >= MqttConnect.PROTOCOL_VERSION_5) {
+			@SuppressWarnings("unchecked")
+			byte[] properties = MqttProperties.encode((Map<Keyword, ?>) message.get(PROPERTIES));
+			bytes = fit(bytes, length, properties.length);
+			for (int i = 0; i < properties.length; i++) {
+				bytes[length++] = properties[i];
+			}
+		}
 
 		PersistentVector vector = (PersistentVector) message.get(TOPICS);
 

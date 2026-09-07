@@ -13,8 +13,18 @@ public abstract class MqttUtil {
 	protected static final String STRING_ENCODING = "UTF-8";
 
 	public static String decodeUTF8(byte[] input, int offset) throws IOException 	{
-		//short encodedLength = (short)((input[offset]<<8) | input[1+offset]);
+		if (offset + 2 > input.length) {
+			throw MqttProtocolError.malformed("string length runs past the packet");
+		}
 		int encodedLength = twoBytesToInt(input[offset], input[1+offset]);
+		if (offset + 2 + encodedLength > input.length) {
+			// Arrays.copyOfRange pads with zeros past the end rather than
+			// failing, so without this a truncated packet yields a string of
+			// NULs — a client id, a topic or a will that looks plausible and is
+			// not what was sent. Refusing it is what §4.13 asks for anyway.
+			throw MqttProtocolError.malformed(
+					"string of " + encodedLength + " bytes runs past the packet");
+		}
 		String ret =  new String(Arrays.copyOfRange(input,(offset + 2),(offset + 2 + encodedLength)), STRING_ENCODING);
 		//System.out.println("ret: " +  ret + " length: " + encodedLength + " string length: " + ret.length());
 		return ret;

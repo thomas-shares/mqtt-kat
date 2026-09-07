@@ -11,6 +11,7 @@ import java.util.Arrays;
 import clojure.lang.IPersistentMap;
 
 import org.mqttkat.IHandler;
+import org.mqttkat.packages.GenericMessage;
 import org.mqttkat.server.MqttDecode;
 
 import static org.mqttkat.MqttStat.*;
@@ -50,6 +51,13 @@ public class MqttClient {
 	private final Object writeLock = new Object();
 
 	private volatile boolean running = true;
+
+	/** 4 until a version 5 CONNACK says otherwise. See the read loop. */
+	private volatile int protocolVersion = 4;
+
+	public int getProtocolVersion() {
+		return protocolVersion;
+	}
 	private byte[] pending = new byte[0];      // touched only by the reader thread
 
 	/**
@@ -231,7 +239,15 @@ public class MqttClient {
 		try {
 			// No SelectionKey on this side: the client has one connection, and
 			// :client-key is only meaningful to the broker.
-			IPersistentMap incoming = MqttDecode.decode(null, type, flags, body);
+			IPersistentMap incoming = MqttDecode.decode(null, type, flags, body, protocolVersion);
+			if (incoming != null && type == GenericMessage.MESSAGE_CONNACK
+					&& incoming.containsKey(GenericMessage.PROPERTIES)) {
+				// Inferred rather than configured. A 3.1.1 CONNACK is exactly
+				// two bytes, so a property block means the server answered in
+				// MQTT 5 — which it only does when this client asked in MQTT 5.
+				// Everything decoded after this point is decoded as version 5.
+				protocolVersion = 5;
+			}
 			if (incoming == null) {
 				log.error("invalid packet type received: {}", type);
 				return;

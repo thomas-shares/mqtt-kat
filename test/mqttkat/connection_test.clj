@@ -75,9 +75,15 @@
   (testing "the rejection CONNACK is written even though the broker is closing"
     ;; handle-not-valid-protocol-version replies 0x01 and then disconnects, so
     ;; the reply is queued on a connection that is about to be torn down.
+    ;;
+    ;; Version 3, not 5. This asked for 5 when 5 was unsupported; now it is
+    ;; MQTT 5.0 and answers 0x00. What the test is actually about — the reply
+    ;; reaching the client on a connection already being closed — needs only
+    ;; *an* unsupported version, and 3 is one that is still refused the 3.1.1
+    ;; way, so the assertion below is unchanged.
     (let [{:keys [client ch] :as c} (tu/client!)]
       (client/send-message client {:packet-type :CONNECT :protocol-name "MQTT"
-                                   :protocol-version 5 :keep-alive 60
+                                   :protocol-version 3 :keep-alive 60
                                    :clean-session? true :client-id "wrong-version"})
       (let [msg (tu/expect! ch :CONNACK 2000)]
         (is (= 0x01 (:connect-return-code msg))

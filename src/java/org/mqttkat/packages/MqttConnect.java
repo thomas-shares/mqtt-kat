@@ -18,6 +18,9 @@ import java.nio.channels.SelectionKey;
 
 public class MqttConnect extends GenericMessage {
 
+	/** MQTT 5.0. Version 4 is 3.1.1 and version 3 is 3.1. */
+	public static final byte PROTOCOL_VERSION_5 = 5;
+
 	public static IPersistentMap decode(SelectionKey key, byte flags, byte[] remainAndPayload) throws IOException {
 		//System.out.println("decode connect from...");
 
@@ -45,9 +48,17 @@ public class MqttConnect extends GenericMessage {
 		//System.out.println("4 " + offset + " keepAlive: " + keepAlive);
 		
 		Long keepAlive = twoBytesToLong( remainAndPayload[offset++], remainAndPayload[offset++]);
-		//System.out.println("4 " + offset + "  keep alive:" + keepAlive);
 
-		
+		// MQTT 5.0 §3.1.2.11: the property block sits between the keep alive
+		// and the client id. Its position is the only difference in the
+		// variable header, and everything after it reads at the wrong offset
+		// if it is skipped.
+		IPersistentMap properties = null;
+		if (clientVersion == PROTOCOL_VERSION_5) {
+			properties = MqttProperties.decode(remainAndPayload, offset);
+			offset += MqttProperties.blockLength(remainAndPayload, offset);
+		}
+
 		String clientID = decodeUTF8(remainAndPayload, offset);
 		offset += encodedUTF8Length(remainAndPayload, offset);
 		//System.out.println("5 " + offset + " ClientId:" + clientID);
@@ -61,7 +72,12 @@ public class MqttConnect extends GenericMessage {
 		Map<Keyword, Object> will = new TreeMap<Keyword, Object>();
 
 		if( willFlag ) {
-			//log("will set...");
+			// §3.1.3.2: the will has a property block of its own, and it comes
+			// before the will topic rather than with the CONNECT's properties.
+			if (clientVersion == PROTOCOL_VERSION_5) {
+				will.put(PROPERTIES, MqttProperties.decode(remainAndPayload, offset));
+				offset += MqttProperties.blockLength(remainAndPayload, offset);
+			}
 			willTopic = decodeUTF8(remainAndPayload, offset);
 			will.put(WILL_TOPIC, willTopic);
 			offset += encodedUTF8Length(remainAndPayload, offset);
@@ -112,6 +128,9 @@ public class MqttConnect extends GenericMessage {
 		m.put(PROTOCOL_VERSION, clientVersion);
 		m.put(CLEAN_SESSION, (connectFlags & CLEANSESSION_FLAG) == 0x02);
 		m.put(KEEP_ALIVE, keepAlive);
+		if(properties != null) {
+			m.put(PROPERTIES, properties);
+		}
 
 		if(!will.isEmpty()) {
 			m.put(WILL, will);
@@ -155,7 +174,16 @@ public class MqttConnect extends GenericMessage {
 		Long keepAlive = (Long) message.get(KEEP_ALIVE);
 		bytes[length++] = (byte) ((keepAlive >>> 8) & 0xFF);
 		bytes[length++] = (byte) (keepAlive & 0xFF);
-	
+
+		long version = ((Number) message.get(PROTOCOL_VERSION)).longValue();
+		if (version == PROTOCOL_VERSION_5) {
+			byte[] props = MqttProperties.encode((Map<Keyword, ?>) message.get(PROPERTIES));
+			bytes = fit(bytes, length, props.length);
+			for (int i = 0; i < props.length; i++) {
+				bytes[length++] = props[i];
+			}
+		}
+
 		byte[] clientId = ((String) message.get(CLIENT_ID)).getBytes(StandardCharsets.UTF_8);
 		bytes = fit(bytes, length, 2 + clientId.length);
 		bytes[length++] = (byte) ((clientId.length >>> 8) & 0xFF);
@@ -172,7 +200,13 @@ public class MqttConnect extends GenericMessage {
 			bytes[connectFlagOffset] = (byte) ((willQos << 3) | bytes[connectFlagOffset]);
 			Boolean willRetain = (Boolean) will.get(WILL_RETAIN);
 			bytes[connectFlagOffset] = willRetain ? (byte) (WILLRETAIN_FLAG |bytes[connectFlagOffset]) : bytes[connectFlagOffset];
-			//log("will topic: " + ((String) will.get(WILL_TOPIC)) );
+			if (version == PROTOCOL_VERSION_5) {
+				byte[] willProps = MqttProperties.encode((Map<Keyword, ?>) will.get(PROPERTIES));
+				bytes = fit(bytes, length, willProps.length);
+				for (int i = 0; i < willProps.length; i++) {
+					bytes[length++] = willProps[i];
+				}
+			}
 			byte[] willTopic = ((String) will.get(WILL_TOPIC)).getBytes(StandardCharsets.UTF_8);
 			bytes = fit(bytes, length, 2 + willTopic.length);
 			bytes[length++] = (byte) ((willTopic.length >>> 8) & 0xFF);

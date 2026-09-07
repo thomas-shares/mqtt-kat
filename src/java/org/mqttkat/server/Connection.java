@@ -8,6 +8,8 @@ import java.nio.channels.SocketChannel;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
 import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
@@ -16,9 +18,13 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.LockSupport;
 
 import clojure.lang.IPersistentMap;
+import clojure.lang.Keyword;
 
 import org.mqttkat.IHandler;
 import org.mqttkat.MqttStat;
+import org.mqttkat.MqttProtocolError;
+import org.mqttkat.packages.GenericMessage;
+import org.mqttkat.packages.MqttConnect;
 import org.mqttkat.packages.MqttDisconnect;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -119,6 +125,9 @@ public class Connection {
 	 * -Dmqttkat.gatherWrites=1 restores the old behaviour, which is how the two
 	 * are compared without swapping binaries.
 	 */
+	private static final int maxGather =
+			Math.max(1, Integer.getInteger("mqttkat.gatherWrites", 64).intValue());
+
 	/**
 	 * How long a full socket buffer is waited on before trying the write again.
 	 *
@@ -133,9 +142,6 @@ public class Connection {
 	 */
 	private static final long WRITE_BACKOFF_MIN_NS = 50_000L;
 	private static final long WRITE_BACKOFF_MAX_NS = 1_000_000L;
-
-	private static final int maxGather =
-			Math.max(1, Integer.getInteger("mqttkat.gatherWrites", 64).intValue());
 
 	/**
 	 * Marker for a disconnect the broker raised itself. Deliberately a marker
@@ -199,6 +205,17 @@ public class Connection {
 
 	/** Bytes read but not yet forming a whole packet. Touched only by the reader thread. */
 	private byte[] pending = new byte[0];
+
+	/**
+	 * What this client asked for in its CONNECT: 4 for MQTT 3.1.1, 5 for MQTT
+	 * 5.0. Volatile because the reader thread writes it and the writer thread
+	 * reads it when deciding which dialect to answer in.
+	 */
+	private volatile int protocolVersion = 4;
+
+	public int getProtocolVersion() {
+		return protocolVersion;
+	}
 
 	public Connection(SelectionKey key, SocketChannel channel, IHandler handler) {
 		this.key = key;
@@ -507,7 +524,7 @@ public class Connection {
 
 	private void dispatchDisconnect() {
 		try {
-			handler.handleInOrder(MqttDisconnect.decode(key));
+			handler.handleInOrder(MqttDisconnect.broadcastEnded(key));
 		} catch (Throwable t) {
 			log.error("connection {}: handling the disconnect failed", id, t);
 		}
@@ -515,7 +532,16 @@ public class Connection {
 
 	private void dispatch(byte type, byte flags, byte[] body) {
 		try {
-			IPersistentMap incoming = MqttDecode.decode(key, type, flags, body);
+			IPersistentMap incoming = MqttDecode.decode(key, type, flags, body, protocolVersion);
+			if (type == GenericMessage.MESSAGE_CONNECT && incoming != null) {
+				// Remembered here rather than asked of the handler later: every
+				// packet after this one is decoded against it, including the
+				// ones that arrive while the CONNECT is still being handled.
+				Object version = incoming.valAt(GenericMessage.PROTOCOL_VERSION);
+				if (version instanceof Number) {
+					protocolVersion = ((Number) version).intValue();
+				}
+			}
 			if (incoming == null) {
 				log.error("connection {}: invalid packet type {}, closing", id, type);
 				close();
@@ -528,6 +554,21 @@ public class Connection {
 			// belongs to one connection, so running it inline is what keeps a
 			// client's packets in order.
 			handler.handleInOrder(incoming);
+		} catch (MqttProtocolError e) {
+			// §4.13: MQTT 5 answers a bad packet with a reason code rather than
+			// vanishing. The decoder decided which one — Malformed Packet for a
+			// body it could not read, Protocol Error for one it could read and
+			// that was not allowed — so it travels with the exception.
+			log.warn("connection {}: {} — disconnecting", id, e.getMessage());
+			if (protocolVersion >= MqttConnect.PROTOCOL_VERSION_5) {
+				Map<Keyword, Object> disconnect = new TreeMap<Keyword, Object>();
+				disconnect.put(GenericMessage.PROTOCOL_VERSION, Long.valueOf(5));
+				disconnect.put(GenericMessage.REASON_CODE, Long.valueOf(e.reasonCode));
+				// Queued, and close() lands STOP_WRITING behind it, so the
+				// writer sends this before it stops.
+				write(MqttDisconnect.encode(disconnect));
+			}
+			close();
 		} catch (Throwable t) {
 			log.error("connection {}: handling a packet of type {} failed", id, type, t);
 		}
