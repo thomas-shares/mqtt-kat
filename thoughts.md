@@ -2,6 +2,51 @@
 
 In this file will go my thoughts and ramblings about this project and what I have done and what I might do next.
 
+## 20260906
+
+────────────────────────────────────────────────────────────────
+  RESULTS   (duration-reached)
+  ────────────────────────────────────────────────────────────────
+
+  run
+    broker      localhost:1883
+    clients     2000 publishers, 20000 subscribers over 1000 topics
+    messages    QoS 1, 128 byte payloads, window 100
+    target      10000/s
+    asked for   100800 seconds
+    setup       20731 ms to connect and subscribe
+    ran for     100800.21 s publishing, 5.00 s draining
+
+  throughput
+    published  1008000566 in 100800.21 s  (    10000/s)
+    delivered  20160011320 in 100805.21 s  (   199990/s)
+    expected   20160011320               (1.0000 delivered)
+    payload    123046.94 MB out, 2460938.88 MB in  (1.22 MB/s, 24.41 MB/s)
+
+  latency, milliseconds
+    service    n 20160011320  min     0.14  med   131.07  mean   135.21  sd    64.01  p95   237.57  p99   278.53  p99.9   360.45  max   777.61
+    response   n 20160011320  min     0.44  med   147.46  mean   151.11  sd    65.59  p95   253.95  p99   294.91  p99.9   376.83  max   797.01
+    ack        n 1008000566  min     0.12  med   131.07  mean   135.31  sd    64.30  p95   237.57  p99   278.53  p99.9   360.45  max   683.61
+
+  was the generator the bottleneck?
+    achieved          10000/s against 10000/s asked for  (the target was met, so this is the broker's number)
+    mean lateness    15.903 ms per message   (added 15.905 ms to the average delivery)
+    window-blocked   100.68 s total  (waiting for acknowledgements)
+    send failures         0
+    unacknowledged        0 publishes still outstanding at the end
+    attempted 1008000566, published 1008000566
+
+  counters
+    attempted                1008000566
+    published                1008000566
+    failed                            0
+    acked                    1008000566
+    received                20160011320
+    received-dup                      0
+    received-unparseable              0
+
+
+
 ## 20260904
 
 ### A load generator of our own
