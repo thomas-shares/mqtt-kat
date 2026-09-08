@@ -130,6 +130,12 @@
                  ;; the caller had spelled it.
                  :DISCONNECT (MqttDisconnect/encode msg)
                  :PUBACK (MqttPubAck/encode msg)
+                 ;; The rest of the QoS 2 handshake, which a client driving one
+                 ;; by hand needs and which was simply missing.
+                 :PUBREC (MqttPubRec/encode msg)
+                 :PUBREL (MqttPubRel/encode msg)
+                 :PUBCOMP (MqttPubComp/encode msg)
+                 :PINGREQ (MqttPingReq/encode msg)
                  :UNSUBSCRIBE (MqttUnsubscribe/encode msg))]
     (.sendMessage ^MqttClient client buffer)))
 

@@ -33,9 +33,15 @@
 ;; ── options ───────────────────────────────────────────────────────────
 
 (def defaults
-  {:host "localhost" :port 1883
-   :publishers 10 :subscribers 10 :topics 5
-   :messages 100000 :rate 10000 :qos 0 :size 128
+  {:host "localhost" 
+   :port 1883
+   :publishers 10 
+   :subscribers 10 
+   :topics 5
+   :messages 100000 
+   :rate 10000 
+   :qos 0 
+   :size 128
    :window 100
    :duration 0
    :progress-ms 5000

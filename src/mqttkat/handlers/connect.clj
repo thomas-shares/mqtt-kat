@@ -1,10 +1,11 @@
 (ns mqttkat.handlers.connect
   (:require [clojure.tools.logging :as log]
+            [mqttkat.handlers :as handlers]
             [mqttkat.handlers :refer [*clients* *retained* *outbound* send-buffer add-client!
                                       add-timer! flush-pending!]]
             [mqttkat.handlers.disconnect :refer :all])
   (:import [org.mqttkat MqttReasonCode]
-           [org.mqttkat.packages MqttConnAck MqttPublish]))
+           [org.mqttkat.packages MqttConnAck MqttDisconnect MqttPublish]))
 
 #_(defn add-client [msg]
     (let [client-id (:client-id msg)
@@ -42,9 +43,11 @@
    ;; §3.2.2.3.3. A client that is not told assumes 65,535 and may flood; this
    ;; is the window the broker has always held per client, now stated.
    :receive-maximum                   mqttkat.handlers/inflight-window
-   ;; The highest alias a client may use, so it may use 1..10. Bounded because
-   ;; each one is remembered against the connection for as long as it lasts.
-   :topic-alias-maximum               10})
+   ;; §3.2.2.3.8. The highest alias a client may use, so it may use 1..N.
+   ;; Named rather than repeated: this number is what makes the limit binding,
+   ;; and the code that rejects an alias above it has to be quoting the same
+   ;; one the client was promised.
+   :topic-alias-maximum               mqttkat.handlers/broker-topic-alias-maximum})
 
 (defn protocol-version-not-valid? [version]
   (not (contains? supported-protocol-versions (long version))))
@@ -130,8 +133,58 @@
   (Thread/sleep 25)
   (disconnect-client client-key))
 
+(defn take-over-existing!
+  "Disconnect whatever connection is already holding `client-id` (§3.1.4).
+
+   \"If the ClientId represents a Client already connected to the Server then
+   the Server MUST disconnect the existing Client.\" This broker let both live,
+   and since the outbound window and the in-flight map are keyed by client id,
+   the newcomer inherited a window the incumbent had already filled — which is
+   what stops the Paho conformance suite part-way through, every test in it
+   reconnecting as the same id.
+
+   The connection goes; the *session* does not. disconnect-client parks a
+   persistent session under its client-id exactly as an ordinary disconnect
+   does, so the CONNECT that displaced it can then resume it. Discarding here
+   would turn every takeover into a silent clean start."
+  [client-id new-key]
+  (when-let [old-key (handlers/live-connection client-id)]
+    (when-not (= old-key new-key)
+      (log/info "session taken over for client-id" client-id)
+      ;; §4.13.1: tell it why, or it sees an unexplained close, reconnects, and
+      ;; takes the connection straight back off whoever displaced it.
+      (when (>= (handlers/protocol-version-of old-key) 5)
+        (send-buffer [old-key]
+                     (MqttDisconnect/encode
+                      {:packet-type      :DISCONNECT
+                       :protocol-version 5
+                       :reason-code      MqttReasonCode/SESSION_TAKEN_OVER}))
+        ;; The same pause the other server-sent DISCONNECTs take: close queues
+        ;; STOP_WRITING behind this, and closeConnection must not beat the
+        ;; writer to the socket.
+        (Thread/sleep 25))
+      (disconnect-client old-key))))
+
 (defn connect [{:keys [protocol-name protocol-version client-key client-id clean-session?] :as msg}]
   (log/debug "CONNECT:" (dissoc msg :client-key))
+  ;; Before anything else that touches this client-id's state.
+  (when (and (not (protocol-name-not-valid? protocol-name))
+             (not (protocol-version-not-valid? protocol-version)))
+    ;; Takeover first, then the cancel — not the other way round. Closing the
+    ;; displaced connection runs its will through handle-will-if-present, which
+    ;; *schedules* a delayed one; cancelling before that happens leaves the
+    ;; newly scheduled will to fire a few seconds later, announcing the death
+    ;; of a client that is sitting right there on the new connection.
+    ;;
+    ;; §3.1.2.5: a will still waiting out its delay is deleted when a new
+    ;; connection for the client id is opened. That covers both cases — the one
+    ;; just scheduled by the takeover, and one left by a connection that had
+    ;; already closed on its own.
+    (take-over-existing! client-id client-key)
+    (handlers/cancel-delayed-will! client-id)
+    ;; The session is being resumed or replaced either way, so the timer that
+    ;; would have discarded it must not fire behind the new connection.
+    (handlers/cancel-session-expiry! client-id))
   (cond
     (protocol-name-not-valid? protocol-name) (disconnect-client client-key)
     (protocol-version-not-valid? protocol-version) (handle-not-valid-protocol-version msg)

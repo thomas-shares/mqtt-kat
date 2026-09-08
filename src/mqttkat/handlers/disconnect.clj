@@ -1,7 +1,8 @@
 (ns mqttkat.handlers.disconnect
   (:require [clojure.tools.logging :as log]
             [mqttkat.s :refer [*server*]]
-            [mqttkat.handlers :refer [handle-will-if-present remove-client! remove-timer!]])
+            [mqttkat.handlers :refer [handle-will-if-present remove-client! remove-timer!
+                                      set-session-expiry!]])
   (:import [org.mqttkat MqttReasonCode]
            [org.mqttkat.server MqttServer]))
 
@@ -36,9 +37,13 @@
    MQTT 5's reason code 0x04 is the exception, and the only way to ask for it:
    a 3.1.1 client that wanted its will published had to drop the connection and
    hope it looked like a crash."
-  [{:keys [client-key reason-code from-client?]}]
+  [{:keys [client-key reason-code from-client? properties]}]
   (log/trace "Disconnecting client:" client-key "reason:" reason-code
              "from client:" from-client?)
+  ;; §3.14.2.2.2: applied before the session is parked, because it is what
+  ;; decides how long it is parked for.
+  (when-let [expiry (:session-expiry-interval properties)]
+    (set-session-expiry! client-key expiry))
   ;; from-client? false is the broker's own DISCONNECT, raised because the
   ;; socket has gone — see MqttDisconnect/broadcastEnded. That is precisely the
   ;; case the will exists for, and treating it as a polite goodbye stopped

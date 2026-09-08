@@ -157,3 +157,49 @@
                       @(resolve 'mqttkat.handlers.connect/broker-properties))]
       (is (pos? advertised))
       (is (<= advertised 65535) "an alias is a two byte integer"))))
+
+(deftest properties-survive-every-qos
+  (testing "a delivery carries the publisher's properties at QoS 0, 1 and 2"
+    ;; QoS 2 used to lose them. Its delivery is built in qos-2-send, on the
+    ;; PUBREL rather than on the PUBLISH, and that map was written out by hand
+    ;; as topic, payload and QoS — so content type, response topic,
+    ;; correlation data and the user properties all went missing, and so did
+    ;; the subscription identifier. The two Paho conformance tests that read
+    ;; UserProperty back both failed on the QoS 2 message and passed on the
+    ;; other two.
+    (let [topic (tu/topic "props-all-qos")
+          sub   (tu/connect-v5! "props-sub")
+          pub   (tu/connect-v5! "props-pub")
+          props {:user-properties [["a" "2"] ["c" "3"]]
+                 :content-type    "text/plain"}]
+      (try
+        (tu/send-v5! sub {:packet-type :SUBSCRIBE :packet-identifier 1
+                          :topics [{:qos 2 :topic-filter topic}]})
+        (tu/expect! (:ch sub) :SUBACK)
+        (doseq [[qos id] [[0 nil] [1 10] [2 11]]]
+          (tu/send-v5! pub (cond-> {:packet-type :PUBLISH :topic topic :qos qos
+                                    :payload (.getBytes (str "q" qos) "UTF-8")
+                                    :retain? false :duplicate? false
+                                    :properties props}
+                             id (assoc :packet-identifier id)))
+          ;; QoS 2 is not published until its PUBREL (§4.3.3), so the
+          ;; handshake has to be finished or nothing is delivered at all.
+          (when (= 2 qos)
+            (tu/expect-eventually! (:ch pub) :PUBREC 2000)
+            (tu/send-v5! pub {:packet-type :PUBREL :packet-identifier id})))
+        (doseq [qos [0 1 2]]
+          (let [m (tu/expect-eventually! (:ch sub) :PUBLISH 3000)
+                p (:properties m)]
+            (is (= [["a" "2"] ["c" "3"]] (mapv vec (:user-properties p)))
+                (str "user properties at qos " qos))
+            (is (= "text/plain" (:content-type p))
+                (str "content type at qos " qos))
+            ;; The acks the subscriber owes, so the next delivery is not
+            ;; blocked behind an unacknowledged one.
+            (case (long (:qos m))
+              1 (tu/send-v5! sub {:packet-type :PUBACK :packet-identifier (:packet-identifier m)})
+              2 (do (tu/send-v5! sub {:packet-type :PUBREC :packet-identifier (:packet-identifier m)})
+                    (tu/expect-eventually! (:ch sub) :PUBREL 2000)
+                    (tu/send-v5! sub {:packet-type :PUBCOMP :packet-identifier (:packet-identifier m)}))
+              nil)))
+        (finally (tu/close! sub pub))))))

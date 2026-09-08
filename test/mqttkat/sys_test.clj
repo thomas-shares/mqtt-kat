@@ -65,8 +65,20 @@
                                         :retain? false :duplicate false
                                         :payload "counted" :packet-identifier 9})
       (tu/expect-eventually! (:ch c) :PUBACK 2000)
-      (let [after (sys/stats)
-            grew? (fn [k] (> (get after k) (get before k)))]
+      ;; Polled rather than read once. The sent counters are incremented by the
+      ;; writer thread *after* the bytes have gone, so a client can be holding
+      ;; the PUBACK before the broker has counted it — reading in that window
+      ;; failed about one run in ten. The claim being tested is that the
+      ;; counter follows what happened, not that it does so within the same
+      ;; microsecond.
+      (let [grew? (fn [k]
+                    (let [deadline (+ (System/currentTimeMillis) 2000)]
+                      (loop []
+                        (if (> (get (sys/stats) k) (get before k))
+                          true
+                          (when (< (System/currentTimeMillis) deadline)
+                            (Thread/sleep 25)
+                            (recur))))))]
         (is (grew? "$SYS/broker/mqtt/connect/received") "a CONNECT was received")
         (is (grew? "$SYS/broker/mqtt/connack/sent") "a CONNACK was sent")
         (is (grew? "$SYS/broker/mqtt/subscribe/received") "a SUBSCRIBE was received")

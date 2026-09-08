@@ -71,6 +71,57 @@
    the fan-out writes to a SelectionKey, and an offline session has none: what
    matches here is queued against the client-id instead of written to a socket."
   (atom (tr/make-trie)))
+
+;; ── the subscription tries ───────────────────────────────────────────────
+;;
+;; Both tries go through these two rather than through triennium's insert and
+;; delete, because triennium's insert corrupts a node it did not create.
+;;
+;;   (-> (tr/make-trie) (tr/insert "a/b" x) (tr/insert "a" y))
+;;
+;; The second insert finds a node already at ["a"] — created as a parent of
+;; ["a" "b"] — and its :values is nil, so `(conj (:values node) val)` conjes
+;; onto nil and stores a *list*. Delete then calls disj on it and throws
+;; ClassCastException: PersistentList cannot be cast to IPersistentSet.
+;;
+;; A subscription filter that is a prefix of another is entirely ordinary —
+;; `sport/#` alongside `sport/tennis/#` — so this fired in the wild rather
+;; than in theory. It threw out of the CONNECT handler while restoring a
+;; resumed session's subscriptions, which left that client never added, and
+;; the broker then wedged for anything that waited on it.
+
+(defn trie-insert
+  "Add `value` under `topic-filter`, keeping :values a set whether or not the
+   node was already there as somebody else's parent."
+  [trie topic-filter value]
+  (update-in trie (conj (vec (tr/split-topic topic-filter)) :values)
+             (fnil conj #{}) value))
+
+(defn trie-delete
+  "Remove `value` from under `topic-filter`, matching on the whole stored
+   value — an MQTT 5 subscription carries No Local, Retain As Published,
+   Retain Handling and a subscription identifier as well as its QoS, and an
+   entry rebuilt from the filter alone matches none of them.
+
+   delete-matching rather than delete: it rebuilds the collection with `set`
+   instead of calling disj on it, so it also copes with any list an earlier
+   insert left behind, and it prunes empty nodes the same way."
+  [trie topic-filter value]
+  (tr/delete-matching trie topic-filter #(= % value)))
+
+(def ^:dynamic *live-clients*
+  "client-id -> the SelectionKey of its current connection.
+
+   MQTT 3.1.1 §3.1.4 requires a second CONNECT under an existing client id to
+   disconnect the first, so every CONNECT has to ask \"is this id already
+   connected?\". An index rather than a scan of *clients* because the answer is
+   needed on the connect path: connection-scale-remote-test opens fifty
+   thousand clients, and a walk per connect would make that quadratic.
+
+   Live connections only. A parked session has no connection to take over and
+   is found in *clients* under its client-id as before."
+  (atom {}))
+
 (def ^:dynamic *outbound* (atom {}))
 (def ^:dynamic *retained* (atom {}))  ;; {:topic {:qos qos :payload payload}})
 
@@ -113,23 +164,94 @@
 (declare qos-1-send)
 (declare qos-2-send)
 (declare remove-client!)
+(declare disconnect-with-reason!)
 
-(defn publish-will [{:keys [topic qos retain payload]}]
+(def forwarded-publish-properties
+  "The PUBLISH properties that travel from publisher to subscriber (§3.3.2.3).
+
+   Topic Alias is deliberately not among them. An alias is per connection and
+   per direction, so the publisher's number means nothing on the subscriber's
+   connection — forwarding it would bind the subscriber to a mapping it never
+   agreed, and every later publish under that alias would go to the wrong
+   topic.
+
+   Subscription Identifier is absent for the opposite reason: the server adds
+   it on the way out rather than passing one on."
+  [:payload-format-indicator :message-expiry-interval :content-type
+   :response-topic :correlation-data :user-properties])
+
+(defn forwardable-properties [properties]
+  (select-keys properties forwarded-publish-properties))
+
+(defn publish-will [{:keys [topic qos retain payload properties]}]
   (log/trace "Sending will message on topic:" payload)
   (when-let [keys (matching-subscribers topic)]
     (log/trace "Will keys:" keys)
-    (case (long qos)
-      0 (qos-0 keys topic {:payload payload} retain)
-      1 (qos-1-send  keys topic {:payload payload})
-      2 (qos-2-send keys topic {:payload payload}))))
+    ;; §3.1.3.2: the Will Properties are the message's, and go out with it.
+    ;; Through the same whitelist as a forwarded publish, which is what keeps
+    ;; the Will Delay Interval out of it — that one is an instruction to the
+    ;; broker about when to send this, and means nothing to a subscriber.
+    (let [msg {:payload payload :properties (forwardable-properties properties)}]
+      (case (long qos)
+        0 (qos-0 keys topic msg retain)
+        1 (qos-1-send keys topic msg)
+        2 (qos-2-send keys topic msg)))))
+
+(defonce ^:private delayed-wills
+  ;; client-id -> the scheduled job that will publish its will. Held so a
+  ;; reconnection can cancel it, which is the whole reason the delay exists.
+  ;; A comment rather than a docstring: defonce takes none.
+  (atom {}))
+
+(defn will-delay-ms
+  "How long to hold this client's will before publishing it (§3.1.3.2.2).
+
+   The smaller of the Will Delay Interval and the Session Expiry Interval: the
+   will goes out when the delay elapses *or the session ends, whichever
+   happens first*. A session expiry of 0 — the default, and what a 3.1.1 client
+   effectively has — therefore means immediately, however long a delay was
+   asked for. There would be nothing left to come back to."
+  [client]
+  (let [delay  (or (get-in client [:will :properties :will-delay-interval]) 0)
+        expiry (or (get-in client [:properties :session-expiry-interval]) 0)]
+    (* 1000 (min (long delay) (long expiry)))))
+
+(defn cancel-delayed-will!
+  "Delete a will that has not been published yet (§3.1.2.5).
+
+   Called when a client reconnects under the same id: it has not really gone
+   away, and telling its subscribers it had would be wrong."
+  [client-id]
+  (when-let [job (get @delayed-wills client-id)]
+    (log/trace "client" client-id "came back — deleting its pending will")
+    (swap! delayed-wills dissoc client-id)
+    (try (at/kill job) (catch Exception _ nil))))
 
 (defn handle-will-if-present [key]
   (when (contains? (get @*clients* key) :will)
-    (let [will-topic (get-in @*clients* [key :will :will-topic])
-          will-qos   (get-in @*clients* [key :will :will-qos])
-          will-message   (get-in @*clients* [key :will :will-message])
-          will-retain (get-in @*clients* [key :will :will-retain])]
-      (publish-will {:topic will-topic :qos will-qos :payload will-message :retain will-retain}))))
+    (let [client (get @*clients* key)
+          ;; Captured now, not read when the job fires: by then this client's
+          ;; entry has been removed and there would be no will left to send.
+          will   {:topic      (get-in client [:will :will-topic])
+                  :qos        (get-in client [:will :will-qos])
+                  :payload    (get-in client [:will :will-message])
+                  :retain     (get-in client [:will :will-retain])
+                  :properties (get-in client [:will :properties])}
+          ms        (will-delay-ms client)
+          client-id (:client-id client)]
+      (if (and (pos? ms) client-id)
+        (do
+          (cancel-delayed-will! client-id)
+          (swap! delayed-wills assoc client-id
+                 (at/after ms
+                           (fn []
+                             (swap! delayed-wills dissoc client-id)
+                             (try
+                               (publish-will will)
+                               (catch Throwable t
+                                 (log/error t "publishing a delayed will failed"))))
+                           my-pool)))
+        (publish-will will)))))
 
 (defn check-timer
   "Drop `key` if nothing has been received from it for `time-out` ms.
@@ -183,11 +305,95 @@
    subscriptions held for it while offline, and anything queued or in flight."
   [client-id]
   (doseq [topic (:subscribed-topics (get @*clients* client-id))]
-    (swap! *offline-trie* tr/delete (:topic-filter topic)
+    (swap! *offline-trie* trie-delete (:topic-filter topic)
            {:client-id client-id :qos (:qos topic) :topic-filter (:topic-filter topic)}))
   (swap! *clients* dissoc client-id)
   (swap! *outbound* dissoc client-id)
   (swap! *inflight* #(into {} (remove (fn [[[id _] _]] (= id client-id))) %)))
+
+(defn live-connection
+  "The key of the connection currently holding `client-id`, if any."
+  [client-id]
+  (get @*live-clients* client-id))
+
+(defn- register-live! [client-id client-key]
+  (when client-id
+    (swap! *live-clients* assoc client-id client-key)))
+
+(defn forget-live!
+  "Drop this connection from the index, but only if it is still the one
+   registered.
+
+   The check matters on takeover: the displaced connection's own teardown runs
+   after the replacement has registered, and an unconditional dissoc would
+   remove the new connection from the index and leave it un-takeoverable."
+  [client-id client-key]
+  (when client-id
+    (swap! *live-clients*
+           (fn [m] (if (= client-key (get m client-id)) (dissoc m client-id) m)))))
+
+(defonce ^:private session-expiries
+  ;; client-id -> the job that will discard its parked session. Cancelled when
+  ;; the client comes back, or the session would be torn out from under the
+  ;; live connection that resumed it.
+  (atom {}))
+
+(defn session-expiry-seconds
+  "How long this client's session outlives its connection (§3.1.2.11.2).
+
+   Absent means 0, which is why a 3.1.1 client — which cannot send the property
+   at all — behaves exactly as it always did."
+  [client]
+  (long (or (get-in client [:properties :session-expiry-interval]) 0)))
+
+(defn keep-session?
+  "Whether to park this session rather than discard it.
+
+   Version 5 decides on the Session Expiry Interval, not on Clean Start:
+   §3.1.2.11.2 splits the two questions 3.1.1 answered with one flag. Clean
+   Start says whether to *resume* an existing session; the expiry says how long
+   this one *survives*. A client may therefore start fresh and still keep its
+   session, which is what the broker used to get wrong — it read clean-session?
+   and threw away sessions their owners had asked to keep."
+  [client]
+  (if (>= (long (or (:protocol-version client) 4)) 5)
+    (pos? (session-expiry-seconds client))
+    (false? (:clean-session? client))))
+
+(defn set-session-expiry!
+  "Override the interval this connection will expire on (§3.14.2.2.2).
+
+   A DISCONNECT may carry one, letting a client decide on the way out that it
+   will be back — without having planned for it when it connected."
+  [client-key seconds]
+  (when (contains? @*clients* client-key)
+    (swap! *clients* assoc-in [client-key :properties :session-expiry-interval]
+           (long seconds))))
+
+(defn cancel-session-expiry! [client-id]
+  (when-let [job (get @session-expiries client-id)]
+    (swap! session-expiries dissoc client-id)
+    (try (at/kill job) (catch Exception _ nil))))
+
+(def ^:private never-expires
+  "0xFFFFFFFF — §3.1.2.11.2's \"do not expire\", not a very long timer."
+  4294967295)
+
+(defn schedule-session-expiry!
+  "Discard the parked session once `seconds` have passed."
+  [client-id seconds]
+  (when (and client-id (pos? (long seconds)) (not= (long seconds) never-expires))
+    (cancel-session-expiry! client-id)
+    (swap! session-expiries assoc client-id
+           (at/after (* 1000 (long seconds))
+                     (fn []
+                       (swap! session-expiries dissoc client-id)
+                       (try
+                         (log/debug "session expired for" client-id)
+                         (discard-session! client-id)
+                         (catch Throwable t
+                           (log/error t "expiring a session failed"))))
+                     my-pool))))
 
 (defn add-client! [{:keys [client-key client-id clean-session?] :as msg}]
   (if (and (false? clean-session?)
@@ -198,9 +404,9 @@
         (log/trace "subscriptions:" subscriptions)
         (doseq [topic subscriptions]
           (log/trace "Adding to sub-trie for topic:" (:topic-filter topic)  "   qos: " (:qos topic))
-          (swap! *offline-trie* tr/delete (:topic-filter topic)
+          (swap! *offline-trie* trie-delete (:topic-filter topic)
                  {:client-id client-id :qos (:qos topic) :topic-filter (:topic-filter topic)})
-          (swap! *subscriber-trie* tr/insert (:topic-filter topic)
+          (swap! *subscriber-trie* trie-insert (:topic-filter topic)
                  {:client-key client-key :qos (:qos topic) :topic-filter (:topic-filter topic)})))
       (log/trace "client-id:" client-id)
       (swap! *clients* assoc client-key client)
@@ -215,6 +421,7 @@
       (when (contains? @*clients* client-id)
         (discard-session! client-id))
       (swap! *clients* assoc client-key client-added)))
+ (register-live! client-id client-key)
  (MqttStat/clientConnected)
  ;; The id goes with the event so a watcher can say *which* client, which is
  ;; the difference between a console that reports a number and one that
@@ -226,8 +433,111 @@
  (log/trace "ADD: Clients:" @*clients*))
 
 
+;; ── topic aliases (§3.3.2.3.4) ───────────────────────────────────────────
+;;
+;; An alias replaces a topic name with a two-byte integer for the rest of a
+;; connection. It is worth having because brokers carry the same long topic
+;; over and over: `sensors/building-4/floor-2/room-17/temperature` costs 49
+;; bytes every time, and 2 after the first.
+;;
+;; Two independent mappings, one per direction, each bounded by what the
+;; *receiver* said it would accept — the broker's Topic Alias Maximum in the
+;; CONNACK bounds what a client may send, the client's in the CONNECT bounds
+;; what the broker may send back. A client's alias 1 and the broker's alias 1
+;; on the same connection are different things pointing at different topics.
+;;
+;; Kept here, keyed by the connection, rather than in *clients* where the
+;; inbound half used to live. *clients* is what a persistent session is parked
+;; under when the socket drops: aliases stored there survived into the resumed
+;; session, and the new connection would then resolve a number it had never
+;; declared to whatever the old one had bound it to. The lifetime is the
+;; connection's, so the storage should be too — remove-client! empties it.
+
+(def broker-topic-alias-maximum
+  "The highest alias number the broker will accept from a client (§3.1.2.11.5).
+
+   Sent in the CONNACK, which is the only thing that makes it binding — a
+   client may use aliases 1..this and nothing else. Ten is enough for the
+   handful of topics a publisher repeats; the table is per connection, so a
+   large number here is a per-connection cost paid across every client."
+  10)
+
+(defonce ^:private topic-aliases
+  ;; {client-key {:inbound {alias topic} :outbound {topic alias} :assigned n}}
+  (atom {}))
+
+(defn forget-topic-aliases! [client-key]
+  (swap! topic-aliases dissoc client-key))
+
+(defn- client-topic-alias-maximum
+  "How many aliases this client agreed to be sent (§3.1.2.11.5).
+
+   Absent means zero: a client that says nothing has not agreed to any, and
+   sending it one would be a number it cannot resolve. That default is also
+   what keeps the common fan-out cheap — every 3.1.1 subscriber and every
+   version 5 one that did not ask lands in the same group with the topic
+   spelled out, exactly as before aliases existed."
+  ^long [client-key]
+  (long (or (get-in @*clients* [client-key :properties :topic-alias-maximum]) 0)))
+
+(defn alias-outbound
+  "Decide how to address a delivery of `topic` to `client-key`.
+
+   Returns {:topic ... :topic-alias ...}, where :topic-alias may be nil.
+   Three outcomes, in the order they happen over a connection's life:
+
+     * no alias yet and room for one — assign it, and send the topic *and*
+       the alias. Both, because an alias the receiver has never seen means
+       nothing to it; the saving starts with the next message.
+     * an alias already bound — send it with an empty topic name.
+     * the client's allowance spent — send the topic in full, no alias. The
+       alternative is refusing to deliver, and a topic name is never wrong.
+
+   The whole decision is one swap!, so two threads publishing different topics
+   to the same subscriber cannot read the same free slot and both take it."
+  [client-key topic]
+  (let [maximum (client-topic-alias-maximum client-key)]
+    (if (zero? maximum)
+      {:topic topic}
+      (let [[before after]
+            (swap-vals! topic-aliases update client-key
+                        (fn [{:keys [outbound assigned] :or {assigned 0} :as entry}]
+                          (if (or (get outbound topic) (>= (long assigned) maximum))
+                            entry
+                            (-> entry
+                                (assoc-in [:outbound topic] (inc (long assigned)))
+                                (assoc :assigned (inc (long assigned)))))))
+            bound (get-in after [client-key :outbound topic])]
+        (cond
+          ;; The allowance was already spent on other topics.
+          (nil? bound) {:topic topic}
+          ;; Fresh exactly when this swap! is what created it — which is what
+          ;; the before/after pair answers and a bare "is it the highest
+          ;; number" test does not: with two aliases in play, re-publishing
+          ;; the most recently assigned topic would spell its name out again
+          ;; on every message, and the alias would never save anything.
+          (nil? (get-in before [client-key :outbound topic]))
+          {:topic topic :topic-alias bound}
+          :else {:topic "" :topic-alias bound})))))
+
+(defn with-topic-alias
+  "Apply an alias decision to an encoded-shaped PUBLISH.
+
+   Only touches a packet that already has a property block, which is exactly
+   the version 5 ones — publish-for adds it for those and must not for 3.1.1,
+   where a property length byte would be read as the first byte of the
+   payload. A version 4 subscriber never gets an alias anyway, its advertised
+   maximum being zero, so this is belt and braces around that."
+  [packet {:keys [topic topic-alias]}]
+  (cond-> (assoc packet :topic topic)
+    (and topic-alias (contains? packet :properties))
+    (assoc-in [:properties :topic-alias] topic-alias)))
+
 (defn remove-client! [key]
   (remove-timer! key)
+  ;; Both alias tables go with the connection, not with the session (§3.3.2.3.4).
+  (forget-topic-aliases! key)
+  (forget-live! (get-in @*clients* [key :client-id]) key)
   ;; Only for a client that was actually there: remove-client! can be reached
   ;; twice for one connection, and a count that drifts is worse than no count.
   (when (contains? @*clients* key)
@@ -248,19 +558,17 @@
     ;; every publish.
     (doseq [topic subscribed-topics]
       (log/trace "Removing from sub-trie for topic:" (:topic-filter topic) "  qos:" (:qos topic))
-      ;; tr/delete matches on the whole value, so this deletes the entry that
-      ;; was stored rather than one rebuilt from the filter and QoS. Rebuilding
-      ;; was right while a subscription was only those two things; an MQTT 5
-      ;; one also carries No Local, Retain As Published, Retain Handling and a
-      ;; subscription identifier, and a rebuilt key matches none of them — the
-      ;; subscription would have stayed in the trie for the life of the broker.
-      (swap! *subscriber-trie* tr/delete (:topic-filter topic)
+      ;; The entry as it was stored, not one rebuilt from the filter and QoS
+      ;; — trie-delete matches on the whole value, and an MQTT 5 subscription
+      ;; carries more than those two.
+      (swap! *subscriber-trie* trie-delete (:topic-filter topic)
              (assoc topic :client-key key)))
-    (if clean-session?
+    (if-not (keep-session? client)
       (do
-        ;; A clean session keeps nothing. Its in-flight records would otherwise
-        ;; sit in *outbound* and *inflight* for the life of the process, since
-        ;; only a reconnect under the same client-id ever reads them again.
+        ;; A session that is not kept keeps nothing. Its in-flight records would
+        ;; otherwise sit in *outbound* and *inflight* for the life of the
+        ;; process, since only a reconnect under the same client-id ever reads
+        ;; them again.
         (when client-id
           (swap! *outbound* dissoc client-id)
           (swap! *inflight* #(into {} (remove (fn [[[id _] _]] (= id client-id))) %)))
@@ -269,14 +577,17 @@
         ;; Parked rather than forgotten: a publish arriving while this session
         ;; is away still has to match it, or there is nothing to queue.
         (doseq [topic subscribed-topics]
-          (swap! *offline-trie* tr/insert (:topic-filter topic)
+          (swap! *offline-trie* trie-insert (:topic-filter topic)
                  {:client-id client-id :qos (:qos topic) :topic-filter (:topic-filter topic)}))
         ;; Parking the session under its client-id happens once, not once per
         ;; subscribed topic: these two were inside the doseq above, so a
         ;; persistent session with no subscriptions was dropped instead of
         ;; kept, and CONNACK then reported session-present? false on reconnect.
         (swap! *clients* dissoc key)
-        (swap! *clients* assoc client-id client))))
+        (swap! *clients* assoc client-id client)
+        ;; And a timer to forget it again. Without one a version 5 session with
+        ;; an expiry of five seconds lived as long as the broker did.
+        (schedule-session-expiry! client-id (session-expiry-seconds client)))))
   (log/trace "REMOVE: Subscriber trie POST:" @*subscriber-trie*)
   (log/trace "REMOVE: Clients:" @*clients*))
 
@@ -429,23 +740,6 @@
 
 (declare send-buffer)
 
-(def forwarded-publish-properties
-  "The PUBLISH properties that travel from publisher to subscriber (§3.3.2.3).
-
-   Topic Alias is deliberately not among them. An alias is per connection and
-   per direction, so the publisher's number means nothing on the subscriber's
-   connection — forwarding it would bind the subscriber to a mapping it never
-   agreed, and every later publish under that alias would go to the wrong
-   topic.
-
-   Subscription Identifier is absent for the opposite reason: the server adds
-   it on the way out rather than passing one on."
-  [:payload-format-indicator :message-expiry-interval :content-type
-   :response-topic :correlation-data :user-properties])
-
-(defn forwardable-properties [properties]
-  (select-keys properties forwarded-publish-properties))
-
 (defn receive-maximum-of
   "How many QoS 1 or 2 messages this client will take at once (§3.1.2.11.3).
 
@@ -467,6 +761,7 @@
    further down either way."
   [client-key]
   (long (get-in @*clients* [client-key :protocol-version] 4)))
+
 
 (def share-prefix "$share/")
 
@@ -581,18 +876,25 @@
 
 (defn- send-publish!
   [key {:keys [topic payload qos properties subscription-identifier]} packet-identifier]
+  ;; The alias is decided here rather than where the message was queued. A QoS
+  ;; 1 or 2 message can wait in an offline session and go out on a later
+  ;; connection, and an alias belongs to the connection it is sent on — one
+  ;; stamped at queueing time would be a number the new connection never
+  ;; agreed to.
   (send-buffer [key]
                (MqttPublish/encode
-                (publish-for (protocol-version-of key)
-                             {:packet-type       :PUBLISH
-                              :payload           payload
-                              :topic             topic
-                              :qos               qos
-                              :retain?           false
-                              :duplicate?        false
-                              :packet-identifier packet-identifier}
-                             properties
-                             (when subscription-identifier [subscription-identifier])))))
+                (with-topic-alias
+                  (publish-for (protocol-version-of key)
+                               {:packet-type       :PUBLISH
+                                :payload           payload
+                                :topic             topic
+                                :qos               qos
+                                :retain?           false
+                                :duplicate?        false
+                                :packet-identifier packet-identifier}
+                               properties
+                               (when subscription-identifier [subscription-identifier]))
+                  (alias-outbound key topic)))))
 
 (defn- connection-of ^Connection [key]
   (when key
@@ -719,21 +1021,31 @@
     ;; protocol version, the RETAIN flag Retain As Published decides, and the
     ;; subscription identifier the delivery carries. In the ordinary case, a
     ;; crowd of plain 3.1.1 subscribers, that is still one group and one encode.
-    (doseq [[[version retain-flag identifier] group]
+    (doseq [[[version retain-flag identifier addressing] group]
             (group-by (juxt (comp protocol-version-of :client-key)
                             #(delivery-retain? % retain (:retain? msg))
-                            :subscription-identifier)
+                            :subscription-identifier
+                            ;; How this delivery is addressed — a topic name, or
+                            ;; an alias, or both — is part of what changes the
+                            ;; bytes, so it belongs in the key with the rest.
+                            ;; Subscribers that agreed to no aliases, which is
+                            ;; every 3.1.1 one and every version 5 one that did
+                            ;; not ask, all answer {:topic topic} and stay in
+                            ;; the single group they were in before.
+                            #(alias-outbound (:client-key %) topic))
                       keys)]
       (send-buffer-droppable (mapv :client-key group)
                              (MqttPublish/encode
-                              (publish-for version
-                                           {:packet-type :PUBLISH
-                                            :payload     payload
-                                            :topic       topic
-                                            :qos         0
-                                            :retain?     retain-flag}
-                                           properties
-                                           (when identifier [identifier])))
+                              (with-topic-alias
+                                (publish-for version
+                                             {:packet-type :PUBLISH
+                                              :payload     payload
+                                              :topic       topic
+                                              :qos         0
+                                              :retain?     retain-flag}
+                                             properties
+                                             (when identifier [identifier]))
+                                addressing))
                              ;; nil for a will or a replayed retained message:
                              ;; the broker is the publisher there and there is
                              ;; nothing to slow down.
@@ -802,12 +1114,8 @@
 ;    (log/trace "K" k)
 ;    (swap! outbound assoc (:client-key k) (:packet-identifier msg))))))
 
-(defn qos-2
-  ;; `keys`, not `_keys`: the subscriber list is used now, to tell the
-  ;; publisher whether anything matched. Left underscored it resolved to
-  ;; clojure.core/keys — which compiles, and fails at run time.
+(defn- qos-2-accept
   [keys topic {:keys [client-key packet-identifier] :as recv-msg}]
-  (log/trace "QOS 2")
   ;; Keyed by client-id, not by the SelectionKey. A client that disconnects
   ;; between PUBREC and PUBREL comes back on a different key, and the broker
   ;; could then never find the message it had already taken responsibility for:
@@ -819,6 +1127,10 @@
   ;; whoever is subscribed then — and any key captured at PUBLISH time may
   ;; belong to a connection that has since gone.
   (let [client-id (:client-id (get @*clients* client-key))]
+    ;; Counted only when the identifier is new, so a DUP redelivery of a
+    ;; message already in flight does not consume a second slot.
+    (when-not (contains? @*inflight* [client-id packet-identifier])
+      (swap! *clients* update-in [client-key :inbound-inflight] (fnil inc 0)))
     (swap! *inflight* assoc [client-id packet-identifier] {:msg recv-msg :topic topic}))
   ;; Reported on the PUBREC, the first answer of the handshake, rather than on
   ;; the PUBCOMP at the end (§3.5.2.1). The subscribers counted here are the
@@ -828,6 +1140,47 @@
   (send-buffer [client-key]
                (MqttPubRec/encode
                 (ack-for :PUBREC client-key packet-identifier (seq keys)))))
+
+(defn inbound-inflight
+  "QoS 2 messages this client has sent that are still in flight — a PUBREC has
+   gone back but no PUBREL has arrived.
+
+   Counted rather than derived from *inflight*, which is keyed by [client-id
+   identifier] across every client: scanning it on each publish would be O(all
+   in-flight messages on the broker) on the hot path."
+  [client-key]
+  (get-in @*clients* [client-key :inbound-inflight] 0))
+
+(defn over-receive-maximum?
+  "Whether this client has broken the quota the broker advertised (§4.9).
+
+   Only for version 5 clients: 3.1.1 has no Receive Maximum, so there is no
+   promise to break, and no DISCONNECT it could read if there were.
+
+   QoS 1 is not counted because it is never outstanding here — the broker sends
+   the PUBACK as it handles the publish, so the window is microseconds wide.
+   QoS 2 is the one a client can fill, by publishing and never releasing."
+  [client-key]
+  (and (>= (protocol-version-of client-key) 5)
+       (>= (inbound-inflight client-key) inflight-window)))
+
+(defn qos-2
+  ;; `keys`, not `_keys`: the subscriber list is used now, to tell the
+  ;; publisher whether anything matched. Left underscored it resolved to
+  ;; clojure.core/keys — which compiles, and fails at run time.
+  [keys topic {:keys [client-key packet-identifier] :as recv-msg}]
+  (log/trace "QOS 2")
+  (if (over-receive-maximum? client-key)
+    ;; §4.9. Without this the broker accepts everything and answers nothing —
+    ;; which is not merely impolite: the Paho conformance suite publishes one
+    ;; too many and then blocks for ever waiting for the DISCONNECT that says
+    ;; so, so the whole suite hangs here.
+    (do
+      (log/warn "client" client-key "exceeded the receive maximum of" inflight-window)
+      (disconnect-with-reason! client-key
+                               MqttReasonCode/RECEIVE_MAXIMUM_EXCEEDED
+                               (str "more than " inflight-window " QoS 2 messages in flight")))
+    (qos-2-accept keys topic recv-msg)))
 
 (defn- publish-resolved [{:keys [topic qos retain? payload] :as msg}]
   (log/debug "PUBLISH:" (dissoc msg :client-key))
@@ -864,20 +1217,30 @@
    declaring the mapping — remember it and carry on. A publish carrying an
    alias and an empty topic name is using it, and the name has to be looked up.
 
-   The mapping is per connection and per direction, so it lives against the
-   publisher's own key: two clients may both use alias 1 for different topics,
-   and an alias a client sent us says nothing about what it will accept back.
+   Returns the message with its topic filled in, or ::invalid-alias when the
+   client broke the rules: alias 0, which is not a small alias but no alias at
+   all; an alias above the maximum the CONNACK offered, which the client agreed
+   to by connecting; or one it never declared. All three are Topic Alias
+   Invalid, and the caller disconnects.
 
-   An alias nobody declared leaves the message with no topic, which `publish`
-   drops. §3.3.2.3.4 asks for a DISCONNECT carrying 0x94 Topic Alias Invalid,
-   which needs the version 5 DISCONNECT that is not built yet; dropping is the
-   safe half of that and does not pretend the message was delivered."
+   The mapping is per connection and per direction, so an alias a client sent
+   us says nothing about what it will accept back — see alias-outbound for the
+   other half."
   [{:keys [client-key topic properties] :as msg}]
   (if-let [alias (:topic-alias properties)]
-    (if (empty? topic)
-      (assoc msg :topic (get-in @*clients* [client-key :topic-aliases alias]))
-      (do (swap! *clients* assoc-in [client-key :topic-aliases alias] topic)
-          msg))
+    (let [alias (long alias)]
+      (cond
+        ;; §2.2.2.2: zero is not a usable alias, and storing it would hand the
+        ;; client a mapping it could never legally quote back.
+        (zero? alias) ::invalid-alias
+        (> alias (long broker-topic-alias-maximum)) ::invalid-alias
+        (empty? topic)
+        (if-let [known (get-in @topic-aliases [client-key :inbound alias])]
+          (assoc msg :topic known)
+          ::invalid-alias)
+        :else
+        (do (swap! topic-aliases assoc-in [client-key :inbound alias] topic)
+            msg)))
     msg))
 
 (defn disconnect-with-reason!
@@ -919,16 +1282,17 @@
   "A PUBLISH from a client, with any topic alias resolved first."
   [msg]
   (let [resolved (resolve-topic-alias msg)]
-    (if (nil? (:topic resolved))
-      ;; §3.3.2.3.4: an alias nobody declared is a protocol error, and the
-      ;; publisher deserves to hear about it. This used to log and drop, so a
-      ;; client could publish into a void indefinitely without ever learning
-      ;; its alias had never been bound.
+    (if (or (= ::invalid-alias resolved) (nil? (:topic resolved)))
+      ;; §3.3.2.3.4: a bad alias is a protocol error, and the publisher
+      ;; deserves to hear about it. This used to log and drop, so a client
+      ;; could publish into a void indefinitely without ever learning its
+      ;; alias had never been bound.
       (do
-        (log/warn "undeclared topic alias:" (:topic-alias (:properties msg)))
+        (log/warn "invalid topic alias:" (:topic-alias (:properties msg))
+                  "from" (:client-key msg))
         (disconnect-with-reason! (:client-key msg)
                                  MqttReasonCode/TOPIC_ALIAS_INVALID
-                                 "topic alias was never declared"))
+                                 "topic alias is zero, out of range, or was never declared"))
       (publish-resolved resolved))))
 
 
@@ -949,19 +1313,28 @@
                (MqttPubRel/encode
                 {:packet-type :PUBREL :packet-identifier packet-identifier})))
 
-(defn qos-2-send [keys topic {:keys [payload] publisher-key :client-key :as msg}]
+(defn qos-2-send [keys topic {:keys [payload properties] publisher-key :client-key :as msg}]
   (some-> (filter qos-0? keys)
           (seq)
           (qos-0 topic msg false))
   (some-> (filter qos-1? keys)
           (seq)
           (qos-1-send topic msg))
-  (doseq [key (some->> (filter qos-2? keys)
-                       (seq)
-                       (mapv :client-key))]
-    (when-let [client-id (:client-id (get @*clients* key))]
-      (deliver-or-queue! key client-id {:topic topic :payload payload :qos 2}
-                         publisher-key))))
+  ;; Over the subscriptions rather than over their keys, and passing the
+  ;; publisher's properties on: this delivery map was written out by hand as
+  ;; topic, payload and QoS, so a QoS 2 message arrived stripped of its content
+  ;; type, response topic, correlation data and user properties, and of the
+  ;; subscription identifier the server owes it (§3.3.4). QoS 0 and 1 were
+  ;; right, which is what made it hard to see — the same publish delivered
+  ;; correctly at two QoS levels out of three.
+  (doseq [subscription (some->> (filter qos-2? keys) (seq))]
+    (let [key (:client-key subscription)]
+      (when-let [client-id (:client-id (get @*clients* key))]
+        (deliver-or-queue! key client-id
+                           {:topic topic :payload payload :qos 2
+                            :properties properties
+                            :subscription-identifier (:subscription-identifier subscription)}
+                           publisher-key)))))
 
 ;;there is no need to do
 (defn pubrel
@@ -975,6 +1348,11 @@
     (when topic
       (qos-2-send (matching-subscribers topic) topic msg)
       (queue-for-offline-sessions! topic msg))
+    (when (contains? @*inflight* [client-id packet-identifier])
+      ;; The slot is given back on PUBREL, which is what makes the quota a
+      ;; limit on messages in flight rather than on messages ever sent.
+      (swap! *clients* update-in [client-key :inbound-inflight]
+             (fn [n] (max 0 (dec (or n 0))))))
     (swap! *inflight* dissoc [client-id packet-identifier])))
 
 (defn pubcomp [{:keys [packet-identifier client-key] :as msg}]
@@ -1093,10 +1471,10 @@
             ;; (§3.8.4), rather than leaving two with different options.
             (when-let [old (existing-subscription client-key (:filter (:parsed topic)))]
               (swap! *clients* update-in [client-key :subscribed-topics] disj old)
-              (swap! *subscriber-trie* tr/delete (:topic-filter old)
+              (swap! *subscriber-trie* trie-delete (:topic-filter old)
                      (assoc old :client-key client-key)))
             (swap! *clients* update-in [client-key :subscribed-topics] conj entry)
-            (swap! *subscriber-trie* tr/insert (:topic-filter entry)
+            (swap! *subscriber-trie* trie-insert (:topic-filter entry)
                    (assoc entry :client-key client-key))))
         (log/trace "subscribers POST ADD:" @*subscriber-trie*)
         (send-buffer [client-key]
@@ -1128,7 +1506,7 @@
                (for [topic topics]
                  ;; The stored subscription, not one rebuilt from the filter
                  ;; and QoS: see the matching comment in remove-client!. An
-                 ;; MQTT 5 subscription carries options too, and tr/delete
+                 ;; MQTT 5 subscription carries options too, and trie-delete
                  ;; matches on the whole value.
                  (if-let [entry (existing-subscription client-key topic)]
                    (do
@@ -1140,7 +1518,7 @@
                      ;; $share/g/x and the trie holds x — and deleting under
                      ;; the name the client used misses the entry entirely,
                      ;; leaving the client in the group after it had left.
-                     (swap! *subscriber-trie* tr/delete (:topic-filter entry)
+                     (swap! *subscriber-trie* trie-delete (:topic-filter entry)
                             (assoc entry :client-key client-key))
                      (long MqttReasonCode/SUCCESS))
                    (do

@@ -2,6 +2,287 @@
 
 In this file will go my thoughts and ramblings about this project and what I have done and what I might do next.
 
+## 20260908
+
+### MQTT 5, from the bottom up
+
+The broker spoke 3.1.1 and nothing else. Adding 5.0 is not a feature so much as
+a second dialect running through every packet the broker already handles, so it
+went in as slices — tests first for each, then the implementation.
+
+Three new files carry the whole of it:
+
+* **`MqttProperties.java`** — the property block (§2.2.2). All 27 identifiers
+  in one table of `record Prop(int id, Keyword key, Type type, boolean
+  repeatable)`, across seven wire encodings, with encode and decode driven off
+  that table rather than off 27 switch arms. Variable Byte Integers (§1.5.5)
+  live here too, since the block is length-prefixed with one.
+* **`MqttReasonCode.java`** — every reason code as a byte constant, with
+  `isError` reading the 0x80 top bit, which is the whole of §2.4's convention.
+  `name(byte)` is built by reflecting over the class's own fields, so a code
+  cannot be added without becoming printable.
+* **`MqttProtocolError.java`** — an `IOException` that carries the reason code
+  to send back. That is the point of it: in 3.1.1 a malformed packet can only
+  be met with a closed socket, and in 5.0 the client is owed an explanation.
+
+One design note worth keeping. `Type.BOOLEAN` exists separately from
+`Type.BYTE` even though both are one byte on the wire, because in Clojure `0`
+is truthy. A broker answering `retain-available 0` would decode to a `0` that
+every `when`/`if` in the codebase reads as "retain is available" — the exact
+inversion of what was sent. Decoding it to a real boolean at the boundary is
+the only place that can be fixed once.
+
+### A bug the properties work found on the way
+
+`MqttUtil.decodeUTF8` read a two-byte length and then
+`Arrays.copyOfRange(input, offset+2, offset+2+length)`. `copyOfRange` is
+documented to pad with zeros past the end of the source rather than throwing —
+so a truncated packet did not fail, it produced a String of NUL characters and
+carried on. A client id, a topic name, a will topic: all silently
+well-formed-looking garbage.
+
+It surfaced only because the property decoder needed bounds checks of its own
+and I went looking for what else read lengths off the wire. Now it throws
+`MqttProtocolError.malformed`, which the connection turns into a DISCONNECT
+with 0x81 rather than a mystery.
+
+### Sixteen test files that all agreed with me
+
+The slices went in one at a time — CONNECT/CONNACK, PUBLISH, SUBSCRIBE,
+UNSUBSCRIBE/UNSUBACK, DISCONNECT, then the acknowledgements, flow control and
+shared subscriptions together. Each landed with its own test file, and by the
+end there were sixteen `v5_*_test.clj` and a comfortable green bar.
+
+One helper is worth calling out, because it exists to stop a mistake I made
+twice. `tu/send-v5!` stamps `:protocol-version 5` on every packet after the
+CONNECT. Without it a test sends a 3.1.1-shaped SUBSCRIBE on a version 5
+connection, the decoder reads the topic filter's length prefix as the property
+block that should have been there, and the rest of the packet is nonsense. The
+broker is right to refuse it — and that is exactly the problem, because the
+mistake is invisible in the test source and shows up only as a reply that never
+arrives. I called it an "unexplained intermittent failure" the first time. It
+was not intermittent; it became deterministic the moment the decoder learned
+the next packet type, which is a different thing entirely.
+
+### "Does v5 now work, or do we just support the packets?"
+
+The best question anyone has asked about this project, and I did not have an
+answer. Sixteen test files, all written by me, all exercised through a client
+written by me, against a decoder written by me. Every one of them could agree
+perfectly while the broker was unusable by anything else on earth. Green tests
+of that shape are self-confirmation, not evidence.
+
+So: `client_test5.py`, the MQTT 5 half of the Paho interoperability suite.
+**8 passed, 18 failed, 1 hung.**
+
+That is the honest starting number for "does v5 work", against sixteen green
+files claiming it did.
+
+### Why the suite would not run
+
+Worth recording, because it had defeated an earlier attempt. The suite must be
+invoked with **no arguments at all**. Its `-h` is `--hostname`, but it never
+removes it from `sys.argv`, and `unittest.main()` then reads `-h` as `--help`,
+prints usage and exits. `python3 client_test5.py -h localhost` therefore looks
+like it does nothing. The defaults are already localhost:1883, so bare
+`python3 client_test5.py` is the way in — and `-v` does pass through usefully,
+which is how you find which test is hanging.
+
+### Four things the suite found
+
+**The hang, first.** `test_flow_control2` publishes one QoS 2 message more than
+the broker's advertised Receive Maximum and then blocks for ever waiting for
+the DISCONNECT that says so. §4.9 is a promise in both directions and the
+broker was only keeping the outbound half: it accepted everything and answered
+nothing. Now inbound in-flight QoS 2 messages are counted per client and one
+too many is met with 0x93.
+
+Fixing the hang mattered out of proportion to the fix, because the suite runs
+alphabetically and a hang means every test after it never runs. Five of 27 were
+reachable before; 27 after.
+
+**Session takeover (§3.1.4).** A second CONNECT under a live client id must
+disconnect the first, with 0x8E. Needed an index of client-id to SelectionKey
+to be O(1) on the connect path rather than a scan.
+
+**Will Delay (§3.1.3.2.2).** The will fires at `min(delay, session expiry)`, not
+at the delay — a session expiry of 0, which is what a 3.1.1 client effectively
+has, means immediately however long a delay was asked for. There would be
+nothing left to come back to. And §3.1.2.5: a reconnection *deletes* the
+pending will.
+
+That last one had an ordering bug in my first attempt. I cancelled the pending
+will and then did the takeover — but the takeover disconnects the old
+connection, which schedules a *new* will, and that one had nothing left to
+cancel it. The order has to be takeover first, then cancel.
+
+**Session Expiry (§3.1.2.11.2).** Version 5 splits into two things what 3.1.1
+did with one flag: Clean Start says whether to resume, Session Expiry says how
+long the session outlives the connection. Without a timer a session with a
+five-second expiry lived as long as the broker did.
+
+Also fixed while in there: a polite DISCONNECT was publishing the will. §3.14.4
+says the server discards it *without publishing*, so every clean goodbye was
+telling that client's subscribers it had crashed. No test caught it because
+both will tests drop the socket instead — which is the one case where the will
+genuinely should fire. Fixing it then broke `last-will-test`, because the
+broker synthesises a DISCONNECT for a dead socket and the fix could not tell
+the two apart; hence a `FROM_CLIENT` marker.
+
+**8 → 12 passing, 1 hang → 0.**
+
+### Topic aliases
+
+§3.3.2.3.4. An alias replaces a topic name with a two-byte integer for the rest
+of a connection, which is worth having because brokers carry the same long
+topic over and over: `sensors/building-4/floor-2/room-17/temperature` costs 49
+bytes every time and 2 after the first.
+
+Two independent mappings, one per direction, each bounded by what the
+*receiver* agreed to. The broker's Topic Alias Maximum in the CONNACK bounds
+what a client may send it; the client's, in its CONNECT, bounds what the broker
+may send back. A client's alias 1 and the broker's alias 1 on the same
+connection are different things pointing at different topics.
+
+**Inbound** was half-built: it remembered any alias offered and rejected only
+undeclared ones. It now refuses alias 0 — which is not a small alias but no
+alias at all — and anything above the maximum the CONNACK advertised, both with
+0x94. The advertised number is now `broker-topic-alias-maximum` rather than a
+literal `10` repeated in two files, since the code enforcing a limit has to be
+quoting the same number the client was promised.
+
+**Outbound** did not exist. `alias-outbound` decides, per subscriber, one of
+three things: no alias yet and room for one, so send the topic *and* the alias;
+already bound, so send the alias with an empty topic name; allowance spent, so
+send the topic in full. The first case has to send both, because an alias the
+receiver has never seen means nothing to it — the saving starts with the second
+message.
+
+Two details I got wrong first.
+
+The whole decision is one `swap-vals!`, and it has to be: my first version
+tested "is this alias the highest number assigned?" to decide whether the name
+had to go out with it. That is right with one alias in play and wrong with two
+— re-publishing the most recently assigned topic would spell its name out on
+every message, and the alias would never save anything. `swap-vals!` gives the
+before and after, and "was it me who created it" is the question actually being
+asked.
+
+The other is the fan-out. `qos-0` groups subscribers so that one encoded buffer
+is written to many sockets, which is what makes a wide fan-out cheap, and the
+grouping key is everything that changes the bytes. How a delivery is addressed
+is now part of that key. It sounds like it would shatter the groups; it does
+not, because a client that advertised no maximum — every 3.1.1 subscriber and
+every version 5 one that did not ask — answers `{:topic topic}` and lands in
+exactly the group it was in before.
+
+The alias tables live in an atom of their own keyed by connection, not in
+`*clients*` where the inbound half used to sit. `*clients*` is what a persistent
+session gets *parked* under when the socket drops, so aliases stored there
+survived into a resumed session and the new connection would resolve numbers it
+had never declared. The lifetime is the connection's, so the storage should be
+too.
+
+Both Paho alias tests pass.
+
+### Three bugs the alias work uncovered
+
+The suite hung after the alias work, so I chased the hang rather than shipping
+on my own tests. None of the three was mine.
+
+**1. The trie corrupted itself.** triennium's `insert` does
+`(conj (:values node) val)`, and when the node already exists as some other
+filter's parent its `:values` is nil — so `conj` onto nil stores a **list**.
+`delete` then calls `disj` on it and throws `ClassCastException: PersistentList
+cannot be cast to IPersistentSet`. Three lines reproduce it:
+
+```clojure
+(-> (tr/make-trie) (tr/insert "a/b" x) (tr/insert "a" y))
+```
+
+A subscription filter that is a prefix of another is entirely ordinary —
+`sport/#` alongside `sport/tennis/#` — so this fired in the wild rather than in
+theory. It threw out of the CONNECT handler while restoring a resumed session's
+subscriptions, which left that client never added to `*clients*`, and the
+broker then wedged for anything that waited on it. Twenty-five of them in one
+run.
+
+Both tries now go through `trie-insert`/`trie-delete` in `handlers.clj`, which
+keep `:values` a set and match deletes on the whole stored value.
+
+**2. QoS 2 deliveries lost every property.** `qos-2-send` built its delivery map
+by hand as topic, payload and QoS. No content type, no response topic, no
+correlation data, no user properties, and no subscription identifier — which
+§3.3.4 says the server adds on the way out. QoS 0 and 1 were correct, which is
+what made it hard to see: the same publish arrived properly at two QoS levels
+out of three.
+
+**3. Wills lost their Will Properties**, in the same way and for the same
+reason: the will was rebuilt as topic, QoS, payload and retain, and everything
+§3.1.3.2 attached to it was dropped. It goes through the same whitelist as a
+forwarded publish now, which is also what keeps the Will Delay Interval out of
+it — that one is an instruction to the broker about *when* to send this, and
+means nothing to a subscriber.
+
+Two and three were the same symptom in the Paho output (`'Properties' object
+has no attribute 'UserProperty'`) from two unrelated causes, which is a good
+argument for chasing the second one instead of assuming the first fix covered
+it.
+
+### Where it stands
+
+**16 of 27 passing as a suite, up from 12; 17 of 27 run individually; no
+hangs.** Unit suite: 226 tests, 2546 assertions, `lein check` clean.
+
+The gap between 16 and 17 is cross-test contamination rather than broker bugs —
+a retained message from `test_subscribe_options` leaks into
+`test_user_properties`, which then counts four deliveries where it expects
+three. Several of these tests are also openly timing-sensitive
+(`assertAlmostEqual(duration, 4, delta=1)`), so a number measured while
+anything else is running on the machine is not a number. I nearly reported a
+regression from a run I had taken while `lein test` was going in another
+terminal: 1 pass, 21 fail. Re-measured on a quiet machine it was 12.
+
+Still failing: `maximum_packet_size`, `publication_expiry` (Message Expiry),
+`redelivery_on_reconnect`, `server_keep_alive`, `subscribe_failure`,
+`subscribe_identifiers`, `subscribe_options`, `assigned_clientid`,
+`retained_message`, `request_response`.
+
+One thing found and deliberately not fixed, since it is a behavioural change
+well beyond aliases: `pubrel` calls `qos-2-send` with raw
+`matching-subscribers`, skipping both `deliverable-subscribers` and
+`select-shared`. So No Local and shared-subscription round-robin do not apply to
+QoS 2 messages at all. That probably bears on `subscribe_options`.
+
+Enhanced authentication (the AUTH packet) is also still absent, and I am
+inclined to leave it: the broker has no authentication mechanism of any kind
+for it to enhance.
+
+### The console, while I was in there
+
+Smaller, and mostly presentation. The chart was rebuilt; more of the data the
+broker already had made it onto the page; the dummy Settings tab was taken out
+of the navigation but left in the source; the middle column scrolls on its own
+so the broker panel sits at the bottom of the *screen* rather than the bottom of
+the page; the `$SYS` twisty in the topic tree does something now. Two of these
+were real bugs rather than polish — the readings were not aligned with their
+headings, and values jumped as data arrived and left, which came down to the
+page having no single place that decided what a reading should say. There is
+one now: `mqttkat.web.state` maps element id to display string, and both the
+snapshot and the tick go through it.
+
+### What I got wrong, collected
+
+* Called a deterministic decoder failure "intermittent", twice, before working
+  out it was the same 3.1.1-shaped-packet mistake both times.
+* Took a conformance measurement with the unit suite running concurrently and
+  nearly reported 1 pass as a regression.
+* Cancelled a pending will before a takeover that then scheduled another one.
+* Wrote an alias assignment that re-sent the topic name for ever, and would
+  have shipped it if the test had used one alias instead of two.
+* Assumed the QoS 2 property loss explained the will's missing properties too.
+  It did not; they were two bugs.
+
 ## 20260906
 
 ────────────────────────────────────────────────────────────────
