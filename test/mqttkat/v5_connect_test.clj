@@ -10,7 +10,7 @@
            [org.mqttkat MqttProtocolError MqttReasonCode]
            [org.mqttkat.packages MqttConnAck MqttConnect]))
 
-(defn- body
+(defn- ^"[B" body
   "The variable header and payload of an encoded packet.
 
    decode is handed what follows the fixed header, so a round-trip test has to
@@ -21,7 +21,9 @@
     (.get (.duplicate buf) arr)
     (let [start (loop [i 1]
                   (if (zero? (bit-and (aget arr i) 0x80)) (inc i) (recur (inc i))))]
-      (java.util.Arrays/copyOfRange arr start (alength arr)))))
+      ;; (int start) because a loop that recurs returns Object, so the compiler
+      ;; cannot see the primitive and falls back to reflection on copyOfRange.
+      (java.util.Arrays/copyOfRange arr (int start) (alength arr)))))
 
 (defn- round-trip [message]
   (MqttConnect/decode nil (byte 0) (body (MqttConnect/encode message))))
@@ -110,7 +112,7 @@
     ;; Rather than reading whatever follows in the buffer as a client id.
     (let [good (body (MqttConnect/encode (assoc base :protocol-version 5
                                                 :properties {:reason-string "xxxxxxxxxx"})))
-          cut  (java.util.Arrays/copyOfRange good 0 (- (alength good) 8))]
+          cut  (java.util.Arrays/copyOfRange good 0 (int (- (alength good) 8)))]
       (is (thrown? MqttProtocolError (MqttConnect/decode nil (byte 0) cut))))))
 
 ;; ── CONNACK ───────────────────────────────────────────────────────────

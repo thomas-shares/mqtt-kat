@@ -99,3 +99,38 @@
                 (h/trie-insert "a/#" {:id 1})
                 (h/trie-insert "a/#" {:id 2}))]
       (is (= #{{:id 1} {:id 2}} (set (h/trie-matching-vals t "a")))))))
+
+(deftest a-deep-topic-does-not-explode
+  (testing "matching is bounded by the trie, not by the topic's depth"
+    ;; The first version of this matcher recursed into branches that were not
+    ;; there. A missing branch has no children, so it finds nothing and looks
+    ;; harmless — but each one recursed twice more, once per branch, and the
+    ;; cost was 2^levels-remaining. A 22-level topic took 1.8 seconds against a
+    ;; trie holding one short filter; 27 levels, which the packet generator
+    ;; produces routinely, took long enough that the broker never answered the
+    ;; publish at all.
+    ;;
+    ;; This matters more than the flaky test that found it: matching runs on
+    ;; every publish, so any client could have hung a broker thread by
+    ;; publishing to a deep enough topic.
+    (let [trie  (-> (tr/make-trie)
+                    (h/trie-insert "a/b" :exact)
+                    (h/trie-insert "a/#" :hash))
+          deep  (clojure.string/join "/" (repeat 60 "zz"))
+          start (System/nanoTime)
+          found (h/trie-matching-vals trie deep)
+          ms    (/ (- (System/nanoTime) start) 1e6)]
+      (is (= #{} found) "nothing matches it")
+      ;; Generous by three orders of magnitude against anything reasonable, and
+      ;; unreachable by the old behaviour: 2^59 recursions do not finish.
+      (is (< ms 1000)
+          (str "matching 60 levels took " ms "ms — the recursion is exploring "
+               "branches that do not exist"))))
+
+  (testing "and a deep topic that does match still does"
+    (let [trie (-> (tr/make-trie)
+                   (h/trie-insert "a/#" :hash)
+                   (h/trie-insert (clojure.string/join "/" (repeat 60 "+")) :plusses))
+          deep (clojure.string/join "/" (repeat 60 "zz"))]
+      (is (= #{:plusses} (h/trie-matching-vals trie deep)))
+      (is (= #{:hash} (h/trie-matching-vals trie (str "a/" deep)))))))

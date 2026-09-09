@@ -233,6 +233,157 @@ suite's own flakiness — the `subscribe_options` race described above, and
 behind — and all four pass in isolation except `subscribe_failure`, which needs
 an authorisation policy the broker does not have.
 
+### What MQTT 5 cost, and getting it back
+
+Nobody had measured any of this. Two days of work went onto the hottest path in
+the broker — a hand-written trie matcher replacing the library's, a coalescing
+pass per publish, an alias decision per subscriber, size and expiry checks per
+delivery — and the only numbers anyone had were correctness ones.
+
+**Method.** The last pre-v5 commit built into its own jar from a `git worktree`,
+and the two brokers run alternately rather than one after the other: this
+machine runs 24 niced `dnetc` processes, one per core, so absolute numbers mean
+nothing and only paired differences do. One client build drives both arms, so
+the load generator is a constant. 50 publishers, 1,000 subscribers, 50 topics,
+QoS 0, unpaced — the same shape as the gathering-writes measurement, and a
+20-way fan-out per publish, which is where per-subscriber costs show up.
+
+**The first answer, three pairs, every pair the same sign:**
+
+| | deliveries/s | median | p99 |
+|---|---|---|---|
+| pre-v5 | 539,879 | 950 ms | 1617 ms |
+| with v5 | 486,434 | 1507 ms | 2490 ms |
+| | **-9.9%** | **+59%** | **+54%** |
+
+Delivery ratio 1.0000 in every run of both arms, so this was cost, not loss.
+
+**Where it went.** Per subscriber, per publish, the QoS 0 fan-out was doing
+*three* derefs of `*clients*` and about seven map lookups — the protocol
+version, the topic alias maximum, the maximum packet size — where before there
+had been one. At twenty subscribers a publish that is sixty lookups where there
+were twenty. It was also allocating a fresh `{:topic topic}` map per subscriber
+purely to be part of a grouping key, and `coalesce-subscriptions` was rebuilding
+every subscription map through `group-by` and a second pass.
+
+Three changes, none of them clever:
+
+* One deref of `*clients*` for the whole fan-out and one lookup per subscriber,
+  with version, alias maximum and packet-size limit all read from the same
+  entry.
+* One shared object for the "no alias" grouping key instead of an identical map
+  per subscriber. Identity also makes hashing it trivial.
+* Coalescing in a single pass, and — the real win — a fast path that returns the
+  matches **untouched** when no client matched more than once, which is the
+  overwhelmingly common case. That needs the consumers to read either the
+  singular `:subscription-identifier` a stored subscription carries or the
+  plural a merged one gets, which is what `identifiers-of` is for.
+
+**Where it ended up**, pooling every paired run of the final build:
+
+| | deliveries/s | median | p99 |
+|---|---|---|---|
+| pre-v5 | 543,961 | 841 ms | 1529 ms |
+| v5, optimised | 538,847 | 1049 ms | 1769 ms |
+
+Throughput is back to parity — about -3% pooled across seven pairs, which is
+inside the ~6% run-to-run spread this machine gives, and one pair came out
+positive. Median latency is still up around 20%, and I have not chased that
+further: the remaining work is real work, and a message now carries properties
+that did not exist before.
+
+Worth saying plainly: with 24 CPU burners running, this is a comparison, not a
+benchmark. The paired design is what makes it mean anything, and a single arm's
+number is worthless.
+
+### Two different waits
+
+Restoring the writer drain broke `test_flow_control2`, from passing to **one run
+in five**, and I nearly blamed the optimisations. Building the suspects out and
+measuring said otherwise: the neutralised jar failed at exactly the same rate,
+1 in 5.
+
+The drain fix had replaced a `Thread/sleep 25` with a wait on the writer. That
+is right as far as it goes — it guarantees the DISCONNECT is *written* — but
+written is not read. The broker has stopped reading that socket, so a client
+still sending into it has data sitting unread in the receive buffer, and closing
+a socket in that state sends RST rather than FIN. The RST can discard the very
+DISCONNECT just written, and the client's next `send` gets EPIPE. That is
+exactly what the Paho client reported: `BrokenPipeError` from inside its
+receive loop.
+
+So both waits are needed, and they are answering different questions. The drain
+answers "has the packet left". The pause that follows answers "has the peer had
+a chance to take it". Restoring the second, now *after* the first rather than
+instead of it, took the test back to 5 runs out of 5. It is only on the paths
+where the broker hangs up on a client and has told it why — not on every close,
+because an ordinary disconnect has nothing in flight to miss and paying it on
+fifty thousand teardowns would be its own problem.
+
+### The matcher was exponential, and a flaky test found it
+
+`lein test :performance` failed intermittently with "no packet arrived within
+2s". The stack trace pointed at `client-generator`, which turned out to be a red
+herring — that one logs through at-at and does not fail a test. The actual error
+was in `client-generator-2`, and it was mine.
+
+Three hypotheses, all wrong, all cheap to check and worth checking:
+
+* The generator builds a topic from a filter by substituting for `+` and `#`,
+  and I thought the substituted string might contain a `/` and break the match.
+  It cannot: spec's generator for `string?` is alphanumeric. 0 of 200.
+* Then that my new topic-filter validation was refusing generated filters, which
+  the test records as subscribed regardless of the SUBACK. Also no: 0 of 200
+  generated filters are invalid.
+* Then that coalescing had removed duplicate deliveries the test was quietly
+  relying on. Plausible, and still wrong.
+
+What settled it was bisecting instead of theorising. The pre-v5 commit passed
+three runs out of three; HEAD failed. Then a debug-logged capture of a failing
+run showed the whole exchange: CONNACK, SUBACK, one publish, silence. It failed
+on the *first* publish, and at QoS 1 or 2 — where a PUBACK or PUBREC is owed
+whatever the subscriptions are. The broker had not answered at all.
+
+The topic was 27 levels deep, because the filter it came from was
+`/+/+/+/3Z2/58r3z/+/X/+/+/epGZ/+/N/...` and each `+` became a word.
+
+**`matching-values` recursed into branches that were not there.** A missing
+branch has no children, so it finds nothing and looks harmless — but each nil
+node recursed twice more, once per branch, and the cost is
+2^levels-remaining. Against a trie holding one short filter:
+
+| topic depth | mine | triennium |
+|---|---|---|
+| 10 levels | 7.5 ms | 0.055 ms |
+| 15 levels | 37.8 ms | 0.118 ms |
+| 20 levels | 493 ms | 0.086 ms |
+| 22 levels | **1807 ms** | 0.086 ms |
+
+Doubling per level. At 27 levels that is about a minute, which is why the
+broker never answered, and why the whole test sometimes ran past 400 seconds
+rather than failing.
+
+triennium's original had `(when exact-match ...)` and `(when any-match ...)`
+guards. I dropped them when I rewrote it to fix the `sport/#`-matches-`sport`
+bug, and the rewrite's own tests all used shallow topics, so nothing noticed.
+
+The fix is the guards back. Matching is bounded by the trie again — flat at
+0.03-0.04 ms at every depth, same results as triennium's.
+
+**This mattered far more than the test that found it.** Matching runs on every
+publish, so for two days any client could have hung a broker thread by
+publishing to a deep enough topic — no malformed packet, no special
+permissions, just a long topic name. There is a test now that matches a
+60-level topic and asserts it finishes, which the old behaviour could not do:
+2^59 recursions do not complete.
+
+Two things worth keeping from how this went. The performance suite is not run
+by `lein test`, so a bug introduced on day one sat there until something
+happened to run it — the tests that would have caught it existed and were
+skipped by default. And the first three explanations were all plausible enough
+to act on; the one that was right came from bisecting and reading a log, not
+from thinking harder.
+
 ### Notes to self
 
 * **mosquitto had quietly taken port 1883**, as a systemd service, and served

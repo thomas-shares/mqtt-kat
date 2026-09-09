@@ -161,7 +161,9 @@
       (try
         (events/listen! ::boom (fn [_] (throw (RuntimeException. "no"))))
         (events/listen! ::ok (fn [e] (swap! seen conj e)))
-        (events/emit! {:event :test :clients 1})
+        ;; The throw is the point, so its log is silenced rather than left to
+        ;; print a stack trace on a passing run.
+        (tu/quietly "mqttkat.events" #(events/emit! {:event :test :clients 1}))
         ;; Contains rather than equals: the broker is shared with the rest of
         ;; the suite, so a real connect or disconnect can land here too.
         (is (some #{{:event :test :clients 1}} @seen)

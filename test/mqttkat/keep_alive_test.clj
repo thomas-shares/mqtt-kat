@@ -28,7 +28,8 @@
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [mqttkat.client :as client]
             [mqttkat.handlers :as h]
-            [mqttkat.test-util :as tu]))
+            [mqttkat.test-util :as tu])
+  (:import [java.nio.channels Selector SocketChannel]))
 
 ;; lein auto test :only mqttkat.keep-alive-test
 
@@ -36,6 +37,25 @@
 
 (def ^:private keep-alive-secs 1)
 (def ^:private past-the-limit-ms 4000)   ;; deadline, not a sleep: 1.5s + slack
+
+(defn- with-selection-key
+  "Call `f` with a real, unregistered-but-valid SelectionKey.
+
+   check-timer ends by closing the client's connection, and the interop call
+   that does it casts the key to a SelectionKey — so a String standing in for
+   one throws before the call is even made. That throw is caught and logged,
+   which left every run of these tests printing a ClassCastException stack
+   trace that looks exactly like a failure and is not one.
+
+   A key from a real channel costs two objects and removes the whole problem:
+   with no attachment, closeConnection finds no Connection, closes the channel
+   and returns. The close path is then genuinely exercised rather than being
+   thrown out of."
+  [f]
+  (with-open [selector (Selector/open)
+              channel  (SocketChannel/open)]
+    (.configureBlocking channel false)
+    (f (.register channel selector 0))))
 
 (defn- broker-entry
   "The broker's own record for the client with `id`. The test broker runs in
@@ -60,31 +80,37 @@
 
 (deftest check-timer-leaves-an-active-client-alone
   (testing "the reaper does not touch a client that was active a moment ago"
-    (let [k       "fake-selection-key"
-          time-out (* 1500 60)                       ;; a 60 second keep alive
-          entry   {:client-id "ka-active" :clean-session? true
-                   :last-active (volatile! (System/currentTimeMillis))}]
-      (binding [h/*clients* (atom {k entry})]
-        (let [outcome (try (h/check-timer k time-out) :returned (catch Throwable t t))]
-          (is (= :returned outcome)
-              (str "check-timer threw: " (when (instance? Throwable outcome)
-                                           (.getMessage ^Throwable outcome))))
-          (is (contains? @h/*clients* k)
-              "a client active 0ms ago must not be reaped by a 90s timeout"))))))
+    (with-selection-key
+      (fn [k]
+        (let [time-out (* 1500 60)                   ;; a 60 second keep alive
+              entry   {:client-id "ka-active" :clean-session? true
+                       :last-active (volatile! (System/currentTimeMillis))}]
+          (binding [h/*clients* (atom {k entry})]
+            (let [outcome (try (h/check-timer k time-out) :returned (catch Throwable t t))]
+              (is (= :returned outcome)
+                  (str "check-timer threw: " (when (instance? Throwable outcome)
+                                               (.getMessage ^Throwable outcome))))
+              (is (contains? @h/*clients* k)
+                  "a client active 0ms ago must not be reaped by a 90s timeout"))))))))
 
 (deftest check-timer-reaps-a-silent-client
   (testing "the reaper does drop a client that has gone quiet past the limit"
-    (let [k        "fake-selection-key"
-          time-out (* 1500 keep-alive-secs)
-          entry    {:client-id "ka-silent" :clean-session? true
-                    :last-active (volatile! (- (System/currentTimeMillis) 60000))}]
-      (binding [h/*clients* (atom {k entry})]
-        (let [outcome (try (h/check-timer k time-out) :returned (catch Throwable t t))]
-          (is (= :returned outcome)
-              (str "check-timer threw: " (when (instance? Throwable outcome)
-                                           (.getMessage ^Throwable outcome))))
-          (is (not (contains? @h/*clients* k))
-              "a client silent for 60s must be reaped by a 1.5s timeout"))))))
+    ;; A real SelectionKey, so this reaches the close rather than throwing on
+    ;; the way to it. check-timer removes the client *before* closing, so the
+    ;; reaping is what the assertion below checks either way — but going
+    ;; through the real path is the point of having the test.
+    (with-selection-key
+      (fn [k]
+        (let [time-out (* 1500 keep-alive-secs)
+              entry    {:client-id "ka-silent" :clean-session? true
+                        :last-active (volatile! (- (System/currentTimeMillis) 60000))}]
+          (binding [h/*clients* (atom {k entry})]
+            (let [outcome (try (h/check-timer k time-out) :returned (catch Throwable t t))]
+              (is (= :returned outcome)
+                  (str "check-timer threw: " (when (instance? Throwable outcome)
+                                               (.getMessage ^Throwable outcome))))
+              (is (not (contains? @h/*clients* k))
+                  "a client silent for 60s must be reaped by a 1.5s timeout"))))))))
 
 (deftest update-timestamps-tolerates-a-vanishing-client
   (testing "marking liveness never throws when the client is already gone"

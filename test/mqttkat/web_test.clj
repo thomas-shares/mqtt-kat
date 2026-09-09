@@ -245,9 +245,12 @@
     (try
       (let [taken (web/start! 0)]
         (web/stop!)
-        ;; Hold the port with something else, then ask for it.
+        ;; Hold the port with something else, then ask for it. The BindException
+        ;; that follows is the point of the test, so its log is silenced rather
+        ;; than left to print a stack trace on a passing run.
         (with-open [socket (java.net.ServerSocket. taken)]
-          (is (nil? (web/start! (.getLocalPort socket)))
+          (is (nil? (tu/quietly "mqttkat.web.server"
+                             #(web/start! (.getLocalPort socket))))
               "a port that cannot be bound should give nil, not an exception")))
       (finally
         (web/stop!)))))

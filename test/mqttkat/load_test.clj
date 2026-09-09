@@ -274,6 +274,6 @@
       ;; generator would have sent it. Half the messages do at these settings.
       ;; What is true is that both are measured over the same deliveries and
       ;; that they are close.
-      (is (< (Math/abs (- (:p50 (:response r)) (:p50 (:service r))))
+      (is (< (Math/abs (double (- (:p50 (:response r)) (:p50 (:service r)))))
              (* 5 1000))
           "the two medians should be within a few milliseconds of each other"))))

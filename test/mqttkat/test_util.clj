@@ -12,8 +12,30 @@
             [mqttkat.client :as client]
             [mqttkat.handlers :as handlers]
             [mqttkat.server :as server])
-  (:import [org.mqttkat MqttHandler]
+  (:import [org.apache.logging.log4j Level LogManager]
+           [org.apache.logging.log4j.core.config Configurator]
+           [org.mqttkat MqttHandler]
            [org.mqttkat.client MqttClient]))
+
+(defn quietly
+  "Run `f` with `logger` silenced, then put its level back.
+
+   For the handful of tests whose subject *is* an error being logged — a status
+   page that reports a port it cannot bind instead of throwing, an event
+   listener that throws without taking the others down. Those cannot be made
+   realistic and quiet the way a bad argument can; the log is the behaviour
+   under test. Silencing it keeps a passing run from printing a stack trace
+   that reads like a failure.
+
+   Not for ordinary noise. A warning that appears because a test fed the broker
+   something it would never see in production is a sign to fix the test."
+  [^String logger f]
+  (let [previous (.getLevel (LogManager/getLogger logger))]
+    (try
+      (Configurator/setLevel logger Level/OFF)
+      (f)
+      (finally
+        (Configurator/setLevel logger previous)))))
 
 (def host "localhost")
 

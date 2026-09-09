@@ -16,12 +16,14 @@
 (def ^:private v4 4)
 (def ^:private v5 5)
 
-(defn- body [^ByteBuffer buf]
+(defn- ^"[B" body [^ByteBuffer buf]
   (let [arr (byte-array (.remaining buf))]
     (.get (.duplicate buf) arr)
     (let [start (loop [i 1]
                   (if (zero? (bit-and (aget arr i) 0x80)) (inc i) (recur (inc i))))]
-      (java.util.Arrays/copyOfRange arr start (alength arr)))))
+      ;; (int start) because a loop that recurs returns Object, so the compiler
+      ;; cannot see the primitive and falls back to reflection on copyOfRange.
+      (java.util.Arrays/copyOfRange arr (int start) (alength arr)))))
 
 ;; ── codec ─────────────────────────────────────────────────────────────
 

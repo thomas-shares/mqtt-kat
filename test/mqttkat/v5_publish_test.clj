@@ -14,14 +14,16 @@
 (def ^:private v4 4)
 (def ^:private v5 5)
 
-(defn- body
+(defn- ^"[B" body
   "What follows the fixed header, which is what decode is handed."
   [^ByteBuffer buf]
   (let [arr (byte-array (.remaining buf))]
     (.get (.duplicate buf) arr)
     (let [start (loop [i 1]
                   (if (zero? (bit-and (aget arr i) 0x80)) (inc i) (recur (inc i))))]
-      (java.util.Arrays/copyOfRange arr start (alength arr)))))
+      ;; (int start) because a loop that recurs returns Object, so the compiler
+      ;; cannot see the primitive and falls back to reflection on copyOfRange.
+      (java.util.Arrays/copyOfRange arr (int start) (alength arr)))))
 
 (defn- flags-of [^ByteBuffer buf]
   (let [arr (byte-array (.remaining buf))]
@@ -151,6 +153,6 @@
     (let [buf (MqttPublish/encode (assoc base :qos 0 :protocol-version v5
                                          :properties {:content-type "text/plain"}))
           good (body buf)
-          cut  (java.util.Arrays/copyOfRange good 0 (- (alength good) 6))]
+          cut  (java.util.Arrays/copyOfRange good 0 (int (- (alength good) 6)))]
       (is (thrown? MqttProtocolError
                    (MqttPublish/decode nil (flags-of buf) cut v5))))))

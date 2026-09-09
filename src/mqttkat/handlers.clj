@@ -117,12 +117,19 @@
   [node segments]
   (if (empty? segments)
     (into (set (:values node)) (:values (get node matches-none-or-many)))
-    (let [s    (first segments)
-          more (rest segments)]
-      (-> #{}
-          (into (:values (get node matches-none-or-many)))
-          (into (matching-values (get node s) more))
-          (into (matching-values (get node matches-one) more))))))
+    (let [s     (first segments)
+          more  (rest segments)
+          exact (get node s)
+          any   (get node matches-one)]
+      ;; Only into branches that exist. Recursing into a missing one looks
+      ;; harmless — nil has no children, so it finds nothing — but each nil
+      ;; node spawns two more nil recursions, one per branch, and the cost is
+      ;; 2^levels-remaining. It measured 1.8 seconds for a 22-level topic
+      ;; against a trie holding one short filter, and a publish is what triggers
+      ;; it: any client could hang a broker thread with a deep enough topic.
+      (cond-> (set (:values (get node matches-none-or-many)))
+        exact (into (matching-values exact more))
+        any   (into (matching-values any more))))))
 
 (defn trie-matching-vals
   "The subscriptions matching `topic`."
@@ -529,11 +536,11 @@
 
    The whole decision is one swap!, so two threads publishing different topics
    to the same subscriber cannot read the same free slot and both take it."
-  [client-key topic]
-  (let [maximum (client-topic-alias-maximum client-key)]
-    (if (zero? maximum)
-      {:topic topic}
-      (let [[before after]
+  ([client-key topic] (alias-outbound client-key topic (client-topic-alias-maximum client-key)))
+  ([client-key topic ^long maximum]
+   (if (zero? maximum)
+     {:topic topic}
+     (let [[before after]
             (swap-vals! topic-aliases update client-key
                         (fn [{:keys [outbound assigned] :or {assigned 0} :as entry}]
                           (if (or (get outbound topic) (>= (long assigned) maximum))
@@ -930,6 +937,60 @@
     matches
     (remove #(and (:no-local? %) (= publisher-key (:client-key %))) matches)))
 
+(defn identifiers-of
+  "The Subscription Identifiers to send with a delivery, as a seq or nil.
+
+   Reads either shape, which is what lets coalesce-subscriptions hand back the
+   matches untouched when there is nothing to merge: an unmerged subscription
+   still carries the singular :subscription-identifier it was stored with, and
+   only a merged one has the plural. Allocates only when there is an identifier
+   at all, which most subscriptions have not got."
+  [subscription]
+  (or (:subscription-identifiers subscription)
+      (when-let [id (:subscription-identifier subscription)] [id])))
+
+(defn- delivery-of
+  "Fold one matching subscription into the delivery a client will receive.
+
+   `so-far` is what its earlier matching subscriptions have already built, or
+   nil for the first — which is the overwhelmingly common case, and costs one
+   assoc."
+  [subscription so-far]
+  (if (nil? so-far)
+    (assoc subscription
+           :subscription-identifiers
+           (if-let [id (:subscription-identifier subscription)] [id] [])
+           :retain-as-published? (boolean (:retain-as-published? subscription)))
+    (let [id      (:subscription-identifier subscription)
+          ids     (:subscription-identifiers so-far)
+          ;; Only subscriptions that carry one contribute, so a client mixing
+          ;; identified and unidentified filters does not see a phantom.
+          ids     (if (and id (not (some #(= id %) ids))) (conj ids id) ids)
+          ;; §3.3.5-1: the highest QoS of the matching subscriptions. Taking
+          ;; the lowest would quietly downgrade one the client asked for.
+          winner  (if (> (long (:qos subscription)) (long (:qos so-far)))
+                    subscription so-far)]
+      (assoc winner
+             :subscription-identifiers ids
+             :retain-as-published? (boolean (or (:retain-as-published? so-far)
+                                                (:retain-as-published? subscription)))))))
+
+(defn- needs-merging?
+  "Whether any client appears twice, or any subscription is a shared one.
+
+   One pass and one transient set, against the alternative of rebuilding every
+   subscription map on every publish. A shared subscription forces the slow
+   path only because it is keyed differently there, not because it merges."
+  [matches]
+  (loop [seen (transient #{}) xs (seq matches)]
+    (if-not xs
+      false
+      (let [subscription (first xs)
+            k            (:client-key subscription)]
+        (if (or (:share-group subscription) (contains? seen k))
+          true
+          (recur (conj! seen k) (next xs)))))))
+
 (defn coalesce-subscriptions
   "One delivery per client, not one per matching subscription (§3.3.4).
 
@@ -948,18 +1009,33 @@
    ordinarily and as a member of a group has asked for the message twice, in
    two capacities, and §4.8.2 keeps those independent — see select-shared."
   [matches]
-  (let [{shared true ordinary false} (group-by #(some? (:share-group %)) matches)
-        one     (fn [subs]
-                  (assoc (apply max-key #(long (:qos %)) subs)
-                         ;; Only subscriptions that carry one contribute, so a
-                         ;; client mixing identified and unidentified filters
-                         ;; does not see a phantom.
-                         :subscription-identifiers
-                         (vec (distinct (keep :subscription-identifier subs)))
-                         :retain-as-published?
-                         (boolean (some :retain-as-published? subs))))]
-    (-> (mapv (comp one vector) shared)
-        (into (map one) (vals (group-by :client-key ordinary))))))
+  ;; One pass, merging as it goes, rather than group-by followed by a second
+  ;; pass over the groups. This runs once per publish for every matching
+  ;; subscription, so the intermediate vector-per-client that group-by builds
+  ;; is pure garbage on the hottest path in the broker — and in the ordinary
+  ;; case, where each client matches exactly once, there is nothing to merge at
+  ;; all and the work is a single assoc.
+  (if-not (needs-merging? matches)
+    ;; The overwhelmingly common case: every client matched exactly once, so
+    ;; the merged result would be each subscription with two keys renamed. The
+    ;; consumers read either shape (see identifiers-of), so nothing has to be
+    ;; rebuilt at all — which on a wide fan-out is one allocation per publish
+    ;; instead of one per subscriber.
+    matches
+    (let [merged
+        (reduce
+         (fn [acc subscription]
+           (if (:share-group subscription)
+             ;; Shared subscriptions are never merged: a client subscribed both
+             ;; ordinarily and as a group member has asked for the message
+             ;; twice, in two capacities (§4.8.2). Keyed by the subscription
+             ;; itself so each stands alone.
+             (assoc! acc subscription (delivery-of subscription nil))
+             (let [k (:client-key subscription)]
+               (assoc! acc k (delivery-of subscription (get acc k))))))
+         (transient {})
+         matches)]
+      (vec (vals (persistent! merged))))))
 
 (defn delivery-retain?
   "The RETAIN flag to put on a delivery to one subscriber.
@@ -1278,10 +1354,15 @@
    the limit differs. Clients over the limit are dropped from the write and
    counted; the specification requires the server to discard the packet and
    behave as if delivery had completed."
-  [group ^java.nio.ByteBuffer buf publisher-key]
+  [group ^java.nio.ByteBuffer buf publisher-key clients]
   (let [size    (.remaining buf)
         allowed (into [] (comp (map :client-key)
-                               (remove #(too-large-for? % size)))
+                               ;; `clients` is passed in rather than deref'd
+                               ;; per member: one fan-out is one snapshot, and
+                               ;; this runs once per subscriber per publish.
+                               (remove (fn [k]
+                                         (when-let [limit (get-in clients [k :properties :maximum-packet-size])]
+                                           (> size (long limit))))))
                       group)
         refused (- (count group) (count allowed))]
     (when (pos? refused)
@@ -1302,18 +1383,32 @@
     ;; protocol version, the RETAIN flag Retain As Published decides, and the
     ;; subscription identifier the delivery carries. In the ordinary case, a
     ;; crowd of plain 3.1.1 subscribers, that is still one group and one encode.
-    (doseq [[[version retain-flag identifiers addressing] group]
-            (group-by (juxt (comp protocol-version-of :client-key)
-                            #(delivery-retain? % retain (:retain? msg))
-                            :subscription-identifiers
-                            ;; How this delivery is addressed — a topic name, or
-                            ;; an alias, or both — is part of what changes the
-                            ;; bytes, so it belongs in the key with the rest.
-                            ;; Subscribers that agreed to no aliases, which is
-                            ;; every 3.1.1 one and every version 5 one that did
-                            ;; not ask, all answer {:topic topic} and stay in
-                            ;; the single group they were in before.
-                            #(alias-outbound (:client-key %) topic))
+    ;; One deref of *clients* for the whole fan-out, and one lookup per
+    ;; subscriber. This was three derefs and about seven lookups each — version,
+    ;; topic alias maximum, maximum packet size — which at twenty subscribers a
+    ;; publish measured as a 10% throughput regression against the version
+    ;; before any of it existed.
+    (let [clients   @*clients*
+          published (:retain? msg)
+          ;; One object shared by every subscriber that agreed to no aliases,
+          ;; rather than an identical map built per subscriber purely to be a
+          ;; grouping key. Identity makes the hashing trivial as well.
+          plain     {:topic topic}]
+     (doseq [[[version retain-flag identifiers addressing] group]
+            (group-by (fn [subscription]
+                        (let [k      (:client-key subscription)
+                              client (get clients k)
+                              alias-max (long (or (get-in client [:properties :topic-alias-maximum]) 0))]
+                          [(long (get client :protocol-version 4))
+                           (delivery-retain? subscription retain published)
+                           (identifiers-of subscription)
+                           ;; Subscribers that agreed to no aliases — every
+                           ;; 3.1.1 one and every version 5 one that did not
+                           ;; ask — all answer `plain` and stay in the single
+                           ;; group they were in before aliases existed.
+                           (if (zero? alias-max)
+                             plain
+                             (alias-outbound k topic alias-max))]))
                       keys)]
       (send-encoded-to group
                              (MqttPublish/encode
@@ -1330,7 +1425,8 @@
                              ;; nil for a will or a replayed retained message:
                              ;; the broker is the publisher there and there is
                              ;; nothing to slow down.
-                             publisher-key))))
+                             publisher-key
+                             clients)))))
 
 (defn qos-1-send
   ;; `retain` says this is a replay to a new subscriber rather than live
@@ -1350,7 +1446,7 @@
                             {:topic topic :payload payload :qos 1
                              :properties properties
                              :retain? (delivery-retain? subscription retain retain?)
-                             :subscription-identifiers (:subscription-identifiers subscription)}
+                             :subscription-identifiers (identifiers-of subscription)}
                             publisher-key))))))
 
 (defn qos-n? [num {:keys [qos] :as m}]
@@ -1556,6 +1652,15 @@
             msg)))
     msg))
 
+(def grace-before-close-ms
+  "How long to leave a socket open after writing a final packet to it.
+
+   Only on the paths where the broker hangs up on a client and has told it why.
+   Not on every close: an ordinary disconnect has nothing in flight to miss,
+   and paying this on each of fifty thousand teardowns would be its own
+   problem."
+  25)
+
 (defn disconnect-with-reason!
   "Tell a version 5 client why it is about to be hung up on, then hang up.
 
@@ -1579,12 +1684,15 @@
   ;; Closed either way. The reason code is a courtesy; the connection is over
   ;; because the client broke the protocol on it.
   ;;
-  ;; No pause before the close any more. This used to sleep 25ms and hope,
-  ;; because Connection.close queues STOP_WRITING behind whatever is waiting
-  ;; but closeConnection then shut the channel without waiting for the writer
-  ;; to reach it. MqttServer.closeConnection now waits on the writer, so the
-  ;; DISCONNECT above is sent rather than raced — which under load it was
-  ;; losing.
+  ;; Two different waits, and both are needed. closeConnection waits for the
+  ;; writer, which is what guarantees the DISCONNECT above is actually written
+  ;; — that used to be a 25ms guess and lost the packet under load. This pause
+  ;; is the other half: written is not read. The broker has stopped reading
+  ;; this socket, so a client still sending into it has data sitting unread,
+  ;; and closing then sends RST rather than FIN — which can discard the very
+  ;; DISCONNECT just written before the client gets to it. A moment's grace
+  ;; lets the peer drain what it has been sent first.
+  (Thread/sleep grace-before-close-ms)
   (try
     (.closeConnection ^MqttServer (:server (meta @*server*)) client-key)
     (catch Exception e
@@ -1648,7 +1756,7 @@
                            {:topic topic :payload payload :qos 2
                             :properties properties
                             :retain? (delivery-retain? subscription retain retain?)
-                            :subscription-identifiers (:subscription-identifiers subscription)}
+                            :subscription-identifiers (identifiers-of subscription)}
                            publisher-key))))))
 
 ;;there is no need to do
