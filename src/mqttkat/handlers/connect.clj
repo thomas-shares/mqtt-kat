@@ -82,20 +82,49 @@
   (Thread/sleep 25)
   (disconnect-client client-key))
 
+(def server-keep-alive
+  "The longest Keep Alive the broker will agree to, in seconds (§3.2.2.3.5).
+
+   A client asking for more is told this number instead and must use it. The
+   point is the broker's own housekeeping: Keep Alive is what lets it notice a
+   connection whose peer has gone without a FIN, and a client naming two hours
+   would keep a dead entry — its session, its subscriptions, its queued
+   messages — for two hours.
+
+   A client asking for less keeps its own, and is told nothing: §3.2.2.3.5 has
+   it use what it sent when the property is absent, so repeating the number
+   back would only be noise."
+  60)
+
+(defn effective-keep-alive
+  "What both ends will actually use."
+  [asked]
+  (let [asked (long (or asked 0))]
+    (if (and (pos? asked) (> asked (long server-keep-alive)))
+      (long server-keep-alive)
+      asked)))
+
 (defn connack-for
   "The CONNACK that answers a successful CONNECT, in the client's own dialect.
 
    §3.2.2.2: Session Present is 0 whenever CleanSession is 1, whatever the
    server happens to have stored — the session is about to be discarded, so
    saying it is present would be a lie the client acts on."
-  [{:keys [protocol-version client-id clean-session?]}]
+  [{:keys [protocol-version client-id clean-session? assigned-client-id? keep-alive]}]
   (let [present? (and (false? clean-session?) (contains? @*clients* client-id))]
     (if (version-5? protocol-version)
       {:packet-type      :CONNACK
        :protocol-version 5
        :session-present? present?
        :reason-code      MqttReasonCode/SUCCESS
-       :properties       broker-properties}
+       ;; §3.2.2.3.7: sent only when the server chose the name, which is the
+       ;; only case where the client does not already know it.
+       :properties       (cond-> broker-properties
+                           assigned-client-id?
+                           (assoc :assigned-client-identifier client-id)
+                           (not= (long (or keep-alive 0))
+                                 (effective-keep-alive keep-alive))
+                           (assoc :server-keep-alive (effective-keep-alive keep-alive)))}
       {:packet-type         :CONNACK
        :session-present?    present?
        :connect-return-code 0x00})))
@@ -104,14 +133,19 @@
   [{:keys [client-key keep-alive client-id clean-session?] :as msg}]
   (log/trace "SUCCESS here now...." (contains? @*clients* client-id))
   (when (and (contains? msg :will) (true? (get-in msg [:will :will-retain])))
-    (let [topic (get-in msg [:will :will-topic])
+    (let [topic   (get-in msg [:will :will-topic])
           payload (get-in msg [:will :will-message])
-          qos (get-in msg [:will :will-qos])]
+          qos     (get-in msg [:will :will-qos])
+          ;; Same whitelist as a forwarded publish, so a retained will keeps
+          ;; its content type and user properties and loses the Will Delay
+          ;; Interval, which is an instruction to the broker rather than part
+          ;; of the message.
+          props   (handlers/forwardable-properties (get-in msg [:will :properties]))]
       (log/trace "there is a RETAINED will!" (str (:will msg)))
       (log/trace "storing retain:" topic qos (empty? payload))
       (if (empty? payload)
         (swap! *retained* dissoc topic)
-        (swap! *retained* assoc topic {:qos qos :payload payload}))))
+        (swap! *retained* assoc topic {:qos qos :payload payload :properties props}))))
   
   ;; Session Present used to report whatever was parked under the client-id
   ;; regardless of clean-session, so a client asking for a fresh session was
@@ -120,8 +154,13 @@
   (add-client! msg)
   ;; After add-client!, never before: it replaces this key's whole entry, which
   ;; would throw away the :timer and :last-active that add-timer! writes.
-  (when (pos? keep-alive)
-    (add-timer! client-key keep-alive)))
+  ;; The negotiated number, not the one asked for: having told the client to
+  ;; use 60 the broker cannot go on timing it out against its own 120.
+  (let [agreed (if (version-5? (:protocol-version msg))
+                 (effective-keep-alive keep-alive)
+                 keep-alive)]
+    (when (pos? (long agreed))
+      (add-timer! client-key agreed))))
 
 (defn no-client-id-and-no-clean-session [client-id clean-session?]
   (and (empty? client-id) (not clean-session?)))
@@ -165,8 +204,33 @@
         (Thread/sleep 25))
       (disconnect-client old-key))))
 
-(defn connect [{:keys [protocol-name protocol-version client-key client-id clean-session?] :as msg}]
-  (log/debug "CONNECT:" (dissoc msg :client-key))
+(defonce ^:private assigned-counter (atom 0))
+
+(defn assign-client-id
+  "A name for a client that did not give one (§3.1.3.1).
+
+   It has to be unique, and visibly so: §3.1.4 disconnects whatever connection
+   already holds an id, so two anonymous clients sharing a name would take each
+   other's sessions over in turn. They did — both were stored under \"\", and
+   the second to connect knocked the first off with 0x8E.
+
+   The counter is enough on its own within a process; the start time keeps two
+   runs of the broker from handing out the same names to sessions that outlive
+   a restart."
+  []
+  (str "mqttkat-" (Long/toString (System/currentTimeMillis) 36)
+       "-" (swap! assigned-counter inc)))
+
+(defn connect [{:keys [protocol-name protocol-version client-key clean-session?] :as connect-msg}]
+  (log/debug "CONNECT:" (dissoc connect-msg :client-key))
+  ;; §3.1.3.1: a zero-length id means "you name me". Done here, before anything
+  ;; keys off it — the session, the takeover check, the will and the CONNACK
+  ;; all have to be talking about the same client.
+  (let [anonymous? (empty? (:client-id connect-msg))
+        msg        (cond-> connect-msg
+                     anonymous? (assoc :client-id (assign-client-id)
+                                       :assigned-client-id? true))
+        client-id  (:client-id msg)]
   ;; Before anything else that touches this client-id's state.
   (when (and (not (protocol-name-not-valid? protocol-name))
              (not (protocol-version-not-valid? protocol-version)))
@@ -189,23 +253,15 @@
     (protocol-name-not-valid? protocol-name) (disconnect-client client-key)
     (protocol-version-not-valid? protocol-version) (handle-not-valid-protocol-version msg)
     (client-contains? client-key) (disconnect-client client-key)
-    (no-client-id-and-no-clean-session client-id clean-session?) (handle-incorrect-clean-session msg)
+    ;; The original emptiness, not the assigned name: §3.1.3.1 refuses a
+    ;; zero-length id asking to resume a session, since there is nothing it
+    ;; could name to resume.
+    (and anonymous? (not clean-session?)) (handle-incorrect-clean-session msg)
     :else (handle-success msg))
-  ;; Anything this client left unacknowledged is still recorded against its
-  ;; client-id, under the same identifiers it was sent with, so redelivery
-  ;; reuses them rather than reserving new ones.
-  (let [stalled (get-in @*outbound* [client-id :inflight])]
-    (log/trace "Checking for messages that are being processed:" (count stalled))
-    (doseq [[stalled-id {:keys [topic payload qos]}] stalled]
-      (log/trace "Redelivering to client:" client-id "identifier:" stalled-id)
-      (send-buffer [client-key]
-                   (MqttPublish/encode {:packet-type       :PUBLISH
-                                        :payload           payload
-                                        :topic             topic
-                                        :qos               qos
-                                        :retain?           false
-                                        :duplicate?        true
-                                        :packet-identifier stalled-id}))))
-  ;; Then whatever arrived while this session was away — after the
-  ;; redeliveries above, which were already on their way before it left.
-  (flush-pending! client-key client-id))
+    ;; Anything this client left unacknowledged is still recorded against its
+    ;; client-id, under the same identifiers it was sent with, so redelivery
+    ;; reuses them rather than reserving new ones.
+    (handlers/redeliver-inflight! client-key client-id)
+    ;; Then whatever arrived while this session was away — after the
+    ;; redeliveries above, which were already on their way before it left.
+    (flush-pending! client-key client-id)))

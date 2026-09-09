@@ -53,3 +53,49 @@
     (let [t (h/trie-insert (tr/make-trie) "a/b" {:id 1})]
       (is (= t (h/trie-delete t "x/y" {:id 1})))
       (is (= #{{:id 1}} (tr/find (h/trie-delete t "a/b" {:id 99}) "a/b"))))))
+
+;; ── matching (§4.7.1.2) ──────────────────────────────────────────────────
+
+(defn- matches [filters topic]
+  (set (h/trie-matching-vals
+        (reduce (fn [t f] (h/trie-insert t f f)) (tr/make-trie) filters)
+        topic)))
+
+(deftest the-multi-level-wildcard-includes-its-parent
+  (testing "§4.7.1.2: `sport/#` matches `sport` as well as `sport/tennis`"
+    ;; \"the multi-level wildcard represents the parent and any number of child
+    ;; levels\". triennium's matcher never looked at the `#` child of the node
+    ;; the topic ended on, so a subscription to `sport/#` silently missed every
+    ;; message published to `sport` itself.
+    (is (= #{"sport/#"} (matches ["sport/#"] "sport")))
+    (is (= #{"sport/#"} (matches ["sport/#"] "sport/tennis")))
+    (is (= #{"sport/#"} (matches ["sport/#"] "sport/tennis/player1"))))
+
+  (testing "alongside the exact filter, both match"
+    (is (= #{"sport" "sport/#"} (matches ["sport" "sport/#"] "sport"))))
+
+  (testing "and through a single-level wildcard"
+    ;; `sport/+/#` is `sport`, one level, then zero or more — so it matches a
+    ;; two-segment topic. Nothing but the recursion gets this right.
+    (is (= #{"sport/+/#"} (matches ["sport/+/#"] "sport/tennis")))
+    (is (= #{"sport/+/#"} (matches ["sport/+/#"] "sport/tennis/player1")))
+    (is (= #{} (matches ["sport/+/#"] "sport")))))
+
+(deftest the-ordinary-matches-still-hold
+  (testing "exact, single-level and multi-level, as before"
+    (let [fs ["a/b" "a/+" "a/#" "#" "+/b" "a/b/c"]]
+      (is (= #{"a/b" "a/+" "a/#" "#" "+/b"} (matches fs "a/b")))
+      (is (= #{"a/#" "#" "a/b/c"} (matches fs "a/b/c")))
+      (is (= #{"a/#" "#"} (matches fs "a")))
+      (is (= #{"#"} (matches fs "z")))))
+
+  (testing "a filter that matches nothing published"
+    (is (= #{} (matches ["a/b"] "a")))
+    (is (= #{} (matches ["a/b"] "a/c")))
+    (is (= #{} (matches ["a/+"] "a/b/c"))))
+
+  (testing "several subscribers on one filter all come back"
+    (let [t (-> (tr/make-trie)
+                (h/trie-insert "a/#" {:id 1})
+                (h/trie-insert "a/#" {:id 2}))]
+      (is (= #{{:id 1} {:id 2}} (set (h/trie-matching-vals t "a")))))))

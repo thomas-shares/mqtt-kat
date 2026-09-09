@@ -2,6 +2,166 @@
 
 In this file will go my thoughts and ramblings about this project and what I have done and what I might do next.
 
+## 20260909
+
+Carried on with version 5, working down the conformance failures. **26 of 27
+now pass, from 16 yesterday**, and the 3.1.1 suite is 9 of 10 — it was three
+failures when I first ran it. 260 unit tests, 2757 assertions.
+
+Almost none of what follows was a missing version 5 feature. Most of it was
+already-broken behaviour that only became visible once something looked.
+
+### The matcher never matched `sport/#` against `sport`
+
+§4.7.1.2: "the multi-level wildcard represents the parent and any number of
+child levels", so `sport/#` matches `sport` as well as `sport/tennis`.
+triennium's matcher walks a level at a time and consults the `#` child of each
+node it *passes through* — but never of the node the topic ends on. So the
+parent level, the one the paragraph is specifically about, was the single case
+it got wrong:
+
+```
+a/b   -> #{:exact :plus :hash-above}      ; a/b/# missing
+a     -> #{}                              ; a/# missing
+```
+
+A subscription to `sport/#` silently missed every message published to `sport`
+itself. Nothing in the broker's own tests had ever subscribed to a filter that
+was a prefix of the topic, and nothing had noticed.
+
+Replaced with a recursive matcher of our own, four lines of actual logic, where
+the empty-segments case returns this node's values *and* any `#` beneath it.
+That is the whole fix, and it is the whole of §4.7.1.2.
+
+### Overlapping subscriptions delivered twice
+
+§3.3.4 permits either: one copy per matching subscription, each with its own
+Subscription Identifier, or a single copy carrying all of them. The broker sent
+one per subscription. The Paho suite demands the coalesced form — stricter than
+the specification, but it is also the better answer, since the identifiers exist
+so a client can tell *why* a message reached it, and being told the same thing
+twice with half the answer each time is not that.
+
+`coalesce-subscriptions` collapses each client's matching subscriptions into one
+delivery, at the highest matching QoS (§3.3.5-1) and carrying every identifier.
+Shared subscriptions are deliberately left out of it: a client subscribed both
+ordinarily and as a group member has asked for the message twice, in two
+capacities, and §4.8.2 keeps those independent.
+
+### One pipeline, and what was skipping it
+
+Three steps have to happen between "who matches this topic" and "who gets it":
+drop what No Local excludes, collapse each shared group to one member, coalesce
+each client's subscriptions. They were applied at each call site separately, or
+not at all — `pubrel` called `qos-2-send` with the raw trie result, so **No Local
+and shared subscriptions simply did not apply to QoS 2 messages**, and a will
+skipped them too. All four paths go through `subscribers-for` now.
+
+I had flagged this yesterday and left it as "a behavioural change beyond
+aliases". It was, and it was also the bug behind `test_subscribe_options`.
+
+### The retain flag was only ever right at QoS 0
+
+`send-publish!` — which is every QoS 1 and 2 delivery — hard-coded
+`:retain? false`. So Retain As Published (§3.8.3.1) did nothing above QoS 0, and
+neither did §3.3.1.3's requirement that a replayed retained message arrive with
+RETAIN set. A bridge subscribing at QoS 1, which is the case Retain As Published
+exists for, saw every retained message arrive as an ordinary one and mirrored it
+onward as ordinary.
+
+### Four more places properties were dropped
+
+Yesterday it was QoS 2 deliveries and wills. The same defect, in four more
+places, all found by the same symptom in the Paho output:
+
+* **retained messages** stored only `{:qos :payload}`, so a subscriber arriving
+  later got a message stripped of everything the publisher attached — which is
+  precisely the difference a retained message exists to remove.
+* **the offline queue** stored `{:topic :payload :qos}`, so a message that
+  waited for its session arrived stripped while an identical one delivered live
+  did not. It also meant there was no Message Expiry Interval left to expire it
+  by.
+* **redelivery on reconnect** built the PUBLISH by hand and never set the
+  protocol version, so no property block was written at all — and a version 5
+  client reads the byte where that block should be as the first byte of the
+  payload. The packet is malformed; the redelivery arrives as nonsense or not at
+  all. This was the source of the `IndexError` tracebacks the Paho client had
+  been printing all along, which I had been treating as harness noise.
+* **retained wills**, stored at CONNECT, the same way.
+
+The pattern is always the same: a delivery map written out by hand as topic,
+payload and QoS, next to another path that passes the whole message through.
+Every one of them was correct when it was written and wrong the moment version 5
+gave a PUBLISH properties.
+
+### The features that genuinely were missing
+
+**Assigned Client Identifier (§3.2.2.3.7).** A zero-length client id means "you
+name me", and version 5 requires the name back in the CONNACK. The broker
+stored every anonymous client under `""` — so §3.1.4's takeover rule fired
+between them, and **each anonymous client knocked the previous one off with
+0x8E**. That is the kind of bug a conformance test finds and a unit suite does
+not, because you have to think to connect two clients with no name.
+
+**Server Keep Alive (§3.2.2.3.5).** A cap of 60, sent only when the broker is
+actually overriding — §3.2.2.3.5 has the client use its own number when the
+property is absent, so echoing it back would be noise. The broker's own timer
+uses the negotiated value: having told a client to use 60 it cannot go on
+timing it out against the 120 the client asked for.
+
+**Maximum Packet Size (§3.1.2.11.4).** "Where a Packet is too large to send, the
+Server MUST discard it and behave as if it had completed delivery." Two paths,
+because QoS 0 shares one encoded buffer across a whole group of subscribers —
+there the group is filtered by each client's limit rather than the buffer being
+rebuilt per client, since the buffer is identical and only the limit differs.
+
+**Message Expiry Interval (§3.3.2.3.3).** Both halves: discard a queued message
+whose interval has run out, and send on the interval *reduced by the time it
+spent waiting*. The subtraction is the half that is easy to leave out, and
+without it a message queued for an hour arrives claiming its full lifetime still
+ahead of it, with every hop resetting the clock.
+
+**Topic filter validation (§4.7.1).** `sport/#/tennis`, `sport#`, `sp+ort` were
+all accepted with a Success reason code. That is worse than refusing them: the
+subscription goes into the trie, matches by accident or not at all, and the
+client has been told it worked. Now refused per-filter in the SUBACK — 0x8F for
+version 5, 0x80 for 3.1.1, which is the only failure code it knows.
+
+### One discard path, three reasons
+
+Maximum Packet Size, Message Expiry and the ordinary send all end at
+`send-publish!`, which now returns whether it sent. That matters because the
+packet identifier is reserved *before* the packet is built, so a discard has to
+give it back — otherwise every oversized or expired message leaks one, and after
+enough of them the subscriber's window is full of things that were never sent
+and delivery stops for good. Three callers release on false.
+
+### What is left
+
+`test_subscribe_failure`, in both suites. It requires the broker to refuse a
+named topic filter with 0x80, which is an authorisation policy — the suite has a
+`-n` option to tell it which filter the broker is configured to deny. This
+broker has no authentication of any kind, so a deny-list would be half a feature
+answering half a question, and version 5's honest code for it would be 0x87 Not
+authorized rather than the 0x80 the test hard-codes. Leaving it, deliberately.
+
+### Notes to self
+
+* **mosquitto had quietly taken port 1883**, as a systemd service, and served
+  an entire conformance run before I noticed — the giveaway was `backlog 100 on
+  127.0.0.1` where the broker listens `1024 on *`. Everything since runs on
+  1884. Check what is listening before believing a run.
+* `client_test.py` cannot be given `-p` at all: it reads the option but never
+  removes it from `sys.argv`, so unittest sees it and dies. Same defect as the
+  `-h` one in `client_test5.py`. Running the 3.1.1 suite anywhere but 1883 means
+  running a copy with the default changed.
+* `session_takeover_test` flaked once under full-suite load and passed on a
+  re-run and in isolation. It settles for a fixed 400 ms.
+* Two of the remaining suite failures — `request_response`, `unsubscribe` —
+  pass in isolation and fail in the run. The suite clears retained messages
+  once, at startup, so anything a later test leaves behind is somebody else's
+  problem. Worth remembering before treating a suite failure as a broker bug.
+
 ## 20260908
 
 ### MQTT 5, from the bottom up
