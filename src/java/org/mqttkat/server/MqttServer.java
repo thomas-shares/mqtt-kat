@@ -80,9 +80,24 @@ public class MqttServer implements Runnable {
 
 	// this one is needed for just closing the connection. The CLJ layer has done
 	// everything needed already
+	/**
+	 * How long a close waits for the writer to send what was already queued.
+	 *
+	 * Long enough for a DISCONNECT sitting behind an ordinary backlog, short
+	 * enough that a peer that has stopped reading cannot hold the close open.
+	 */
+	private static final long WRITER_DRAIN_MILLIS = 500;
+
 	public void closeConnection(final SelectionKey key) {
 		try {
+			Connection connection = (Connection) key.attachment();
 			stopConnection(key);
+			// The channel is shut only once the writer has drained, so a
+			// packet queued just before the close — a DISCONNECT carrying the
+			// reason for it, usually — is actually sent rather than racing it.
+			if (connection != null && !connection.awaitWriterStopped(WRITER_DRAIN_MILLIS)) {
+				log.debug("writer did not drain before close; closing anyway");
+			}
 			if (key.channel().isOpen()) {
 				key.channel().close();
 			}

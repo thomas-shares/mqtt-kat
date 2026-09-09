@@ -56,7 +56,11 @@
   ([ip port]
    (start! ip port (MqttHandler. ^clojure.lang.IFn default-handler-fn 4)))
   ([ip port handler]
-   (reset! *server* (run-server ip port handler))))
+   (reset! *server* (run-server ip port handler))
+   ;; Here rather than at namespace load: stop! resets the pool these run on,
+   ;; so the schedule belongs with the thing being started.
+   (h/start-retained-sweep!)
+   @*server*))
 
 (defn stop! []
   (when (@*server*)

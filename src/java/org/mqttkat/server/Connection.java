@@ -112,6 +112,10 @@ public class Connection {
 	private static final Object STOP_READING = new Object();
 	private static final ByteBuffer STOP_WRITING = ByteBuffer.allocate(0);
 
+	/** Opened once the writer has drained and stopped. See awaitWriterStopped. */
+	private final java.util.concurrent.CountDownLatch writerStopped =
+			new java.util.concurrent.CountDownLatch(1);
+
 	/**
 	 * How many queued packets one write() may carry.
 	 *
@@ -325,6 +329,32 @@ public class Connection {
 			return false;
 		}
 		return inbound.offer(DISCONNECT);
+	}
+
+	/**
+	 * Wait for the writer to finish what was queued before the connection was
+	 * closed.
+	 *
+	 * close() lands STOP_WRITING behind whatever is already queued, so the
+	 * writer does send it all — but the caller then shuts the channel, and used
+	 * to do so without waiting. Whether a client saw a final DISCONNECT was
+	 * therefore a race between the writer and the close, "made unlikely rather
+	 * than removed" by a 25ms sleep on the Clojure side. Under load 25ms is not
+	 * enough, and a displaced client that gets an unexplained close instead of
+	 * its 0x8E reconnects and takes the connection back from whoever displaced
+	 * it (§4.13.1).
+	 *
+	 * Bounded, because the writer may be blocked on a socket whose peer has
+	 * gone: a close that could not complete would be worse than a lost
+	 * DISCONNECT. Returns whether the writer actually finished.
+	 */
+	public boolean awaitWriterStopped(long timeoutMillis) {
+		try {
+			return writerStopped.await(timeoutMillis, java.util.concurrent.TimeUnit.MILLISECONDS);
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+			return false;
+		}
 	}
 
 	public void close() {
@@ -650,6 +680,9 @@ public class Connection {
 			close();
 		} finally {
 			discardQueued();
+			// Last, so anyone waiting on it knows the queue is both drained and
+			// accounted for.
+			writerStopped.countDown();
 		}
 	}
 

@@ -4,9 +4,12 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20260909
 
-Carried on with version 5, working down the conformance failures. **26 of 27
+Carried on with version 5, working down the conformance failures. **23-26 of 27
 now pass, from 16 yesterday**, and the 3.1.1 suite is 9 of 10 — it was three
-failures when I first ran it. 260 unit tests, 2757 assertions.
+failures when I first ran it. A range rather than a number because two of these
+tests race against themselves and a third inherits state from the one before
+it; all of them pass in isolation. See the notes at the end. 266 unit tests,
+2794 assertions.
 
 Almost none of what follows was a missing version 5 feature. Most of it was
 already-broken behaviour that only became visible once something looked.
@@ -145,6 +148,91 @@ broker has no authentication of any kind, so a deny-list would be half a feature
 answering half a question, and version 5's honest code for it would be 0x87 Not
 authorized rather than the 0x80 the test hard-codes. Leaving it, deliberately.
 
+### Retained messages that expire
+
+§3.3.2.3.3's Message Expiry Interval was implemented for the offline queue —
+the case the conformance suite exercises — and not for the retained store,
+which is the other place a message sits and waits. §3.3.1.3: "If the current
+retained message for a Topic expires, it is discarded and there will be no
+retained message for that topic."
+
+It matters more here than in the queue, because a retained message is the one
+thing in the broker *meant* to sit indefinitely. An interval on one is a
+publisher saying how long its answer stays true, and a broker handing out a
+stale answer for ever is worse than one with no answer at all.
+
+Entries are stamped when stored, and everything now reads them through
+`retained-for-delivery`, which returns nil for both "nothing retained here" and
+"what was retained has expired" — the same thing from a subscriber's point of
+view, since §3.3.1.3 makes an expired retained message no retained message
+rather than one the broker is withholding. What does come back has the interval
+counted down, the same rule as a queued message: a retained message published
+with a ten minute life must not still be claiming ten minutes an hour later, or
+every hop that passes it on resets the clock.
+
+The store is also swept every ten seconds. Delivery is already safe without
+that — the accessor refuses an expired message whatever the map still holds —
+but `$SYS` and the console both *count* what is in the map, and an entry nobody
+ever subscribes to again would be held, and reported, for the life of the
+broker.
+
+A retained will is stamped the same way. It was not, so a Will Message
+published with an expiry interval would have been the one retained message that
+never expired.
+
+### A flaky test that was a real race
+
+`session_takeover_test` failed twice under full-suite load and passed every time
+in isolation, which is the shape of a test problem. It was not one.
+
+Sending a client a DISCONNECT before closing its socket meant queueing the
+packet and then closing. `Connection.close` lands STOP_WRITING *behind*
+whatever is already queued, so the writer does send it — but
+`MqttServer.closeConnection` then shut the channel without waiting for the
+writer to get there. Whether the client saw its DISCONNECT was a race, and the
+code said so: a `Thread/sleep 25` on the Clojure side with a comment admitting
+it was "a race made unlikely rather than a race removed", because "draining
+properly means waiting on the writer, which is a change to every close in the
+broker".
+
+Under load, 25 milliseconds is not enough. And the consequence is not cosmetic:
+§4.13.1 exists because a displaced client that gets an unexplained close
+reconnects, and takes the connection straight back off whoever displaced it.
+
+So: a `CountDownLatch` opened when the writer loop exits, and `closeConnection`
+waits on it — bounded at 500ms, because a writer blocked on a peer that has
+stopped reading must not be able to hold a close open. Three `Thread/sleep 25`s
+and their apologetic comments are gone with it. Four consecutive full runs
+clean afterwards, where two of the previous handful had failed.
+
+Worth noticing that the flaky test was the only thing pointing at this. The
+conformance suite never caught it, because its clients do not check what
+arrives before a close.
+
+### I measured a stale broker again
+
+Second time this session, and this one nearly went into the write-up. The
+broker I started failed to bind — an older instance was still on 1883 — so the
+conformance run I took afterwards was against the *previous* jar, and reported
+numbers that were not this code's.
+
+The tell was there in the log and I did not read it: no "Server starting on
+port 1883" line, and no stats lines at all, just a `BindException` at the top.
+The routine now is to grep the startup line and confirm the listening socket's
+pid is the process I started, before believing any run:
+
+```
+ss -ltnp | grep 1883      # whose pid owns it?
+grep "Server starting" broker.log
+```
+
+The v5 suite on a verified-fresh broker gives **23 to 26 of 27** depending on
+the run, and 3.1.1 gives **9 of 10** consistently. The spread is entirely the
+suite's own flakiness — the `subscribe_options` race described above, and
+`request_response`/`unsubscribe` failing on retained state a previous test left
+behind — and all four pass in isolation except `subscribe_failure`, which needs
+an authorisation policy the broker does not have.
+
 ### Notes to self
 
 * **mosquitto had quietly taken port 1883**, as a systemd service, and served
@@ -161,6 +249,17 @@ authorized rather than the 0x80 the test hard-codes. Leaving it, deliberately.
   pass in isolation and fail in the run. The suite clears retained messages
   once, at startup, so anything a later test leaves behind is somebody else's
   problem. Worth remembering before treating a suite failure as a broker bug.
+* **`test_subscribe_options` races, and the race is in the test.** After
+  subscribing *bclient* it waits on `callback.subscribeds` — aclient's callback,
+  not `callback2` — and `waitfor` loops `while len(queue) < depth`, so with
+  aclient's own SUBACK already sitting there `1 < 1` is false and it returns
+  without waiting at all. aclient then publishes, possibly before the broker has
+  processed bclient's SUBSCRIBE, and bclient gets nothing: `0 != 1`. Run alone
+  three times it gave OK, OK, FAILED. That failure signature is identical to the
+  one the No Local bug produced, which is worth knowing — I would otherwise have
+  gone looking at `deliverable-subscribers` again.
+* So the suite score is a range, not a number: 25 or 26 of 27 depending on the
+  run, and 9 or 10 of 10 on the 3.1.1 side. Quote the range.
 
 ## 20260908
 

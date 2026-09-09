@@ -1014,6 +1014,69 @@
           (assoc properties :message-expiry-interval remaining)
           ::expired)))))
 
+(defn retained-for-delivery
+  "The retained message on `topic` as it should be sent now, or nil.
+
+   nil covers both \"nothing is retained here\" and \"what was retained has
+   expired\", which are the same thing to a subscriber — §3.3.1.3 makes an
+   expired retained message no retained message at all, rather than one the
+   broker is withholding.
+
+   The interval that goes out is what is left of it, by the same rule as a
+   queued message (§3.3.2.3.3): a retained message published with a ten minute
+   life must not still be claiming ten minutes an hour later, or anything
+   bridging it onward resets the clock every hop."
+  [topic]
+  (when-let [{:keys [properties stored-at] :as entry} (get @*retained* topic)]
+    (let [live (expiring-properties properties stored-at)]
+      (when-not (= ::expired live)
+        (assoc entry :properties live)))))
+
+(defn sweep-retained!
+  "Drop retained messages whose interval has passed.
+
+   Delivery is already safe without this — retained-for-delivery refuses an
+   expired message whether or not it is still in the map. This is about the map
+   itself: $SYS and the console both count what is in it, and an entry nobody
+   ever subscribes to again would otherwise be held, and reported, for the life
+   of the broker."
+  []
+  (swap! *retained*
+         (fn [m]
+           (reduce-kv (fn [acc topic {:keys [properties stored-at] :as entry}]
+                        (if (= ::expired (expiring-properties properties stored-at))
+                          acc
+                          (assoc acc topic entry)))
+                      {} m))))
+
+(def retained-sweep-interval-ms
+  "How often expired retained messages are cleared out.
+
+   Nothing depends on this being prompt — delivery already refuses an expired
+   message the moment it is asked for, whatever the map still holds. This only
+   decides how long a dead entry keeps being counted."
+  10000)
+
+(defonce ^:private retained-sweep (atom nil))
+
+(defn start-retained-sweep!
+  "Begin clearing expired retained messages. Safe to call again: the previous
+   job is killed first, which matters because stopping the broker resets the
+   pool and leaves the old handle pointing at nothing."
+  []
+  (when-let [job @retained-sweep]
+    (try (at/kill job) (catch Exception _ nil)))
+  (reset! retained-sweep
+          (at/every retained-sweep-interval-ms
+                    (fn []
+                      (try
+                        (sweep-retained!)
+                        (catch Throwable t
+                          ;; Housekeeping must never take the broker down.
+                          (log/error t "sweeping retained messages failed"))))
+                    my-pool
+                    :initial-delay retained-sweep-interval-ms)))
+
 (defn- send-publish!
   [key {:keys [topic payload qos subscription-identifiers retain? duplicate?]
         properties :properties queued-at ::queued-at} packet-identifier]
@@ -1436,9 +1499,13 @@
       ;; able to tell it was not there at the time, and it could — content
       ;; type, response topic, correlation data and the user properties all
       ;; reached live subscribers and none of them survived being retained.
+      ;; Stamped, so the Message Expiry Interval on a retained message means
+      ;; something. §3.3.1.3: when it passes, the message is discarded and the
+      ;; topic simply has no retained message any more.
       (swap! *retained* assoc topic {:qos        qos
                                      :payload    payload
-                                     :properties (forwardable-properties properties)})))
+                                     :properties (forwardable-properties properties)
+                                     :stored-at  (System/currentTimeMillis)})))
   ;; `let` rather than `when-let`, which is what this was. The two behave the
   ;; same here only because triennium returns #{} for a topic nobody is
   ;; subscribed to, and an empty set is truthy — so the acknowledgements below
@@ -1512,13 +1579,12 @@
   ;; Closed either way. The reason code is a courtesy; the connection is over
   ;; because the client broke the protocol on it.
   ;;
-  ;; The pause is the same one handle-not-valid-protocol-version takes before
-  ;; its rejection CONNACK, and for the same reason: Connection.close queues
-  ;; STOP_WRITING behind whatever is already waiting, but closeConnection then
-  ;; shuts the channel, and the writer thread has to get there first. It is a
-  ;; race made unlikely rather than a race removed — draining properly means
-  ;; waiting on the writer, which is a change to every close in the broker.
-  (Thread/sleep 25)
+  ;; No pause before the close any more. This used to sleep 25ms and hope,
+  ;; because Connection.close queues STOP_WRITING behind whatever is waiting
+  ;; but closeConnection then shut the channel without waiting for the writer
+  ;; to reach it. MqttServer.closeConnection now waits on the writer, so the
+  ;; DISCONNECT above is sent rather than raced — which under load it was
+  ;; losing.
   (try
     (.closeConnection ^MqttServer (:server (meta @*server*)) client-key)
     (catch Exception e
@@ -1641,7 +1707,10 @@
                        (matching-subscribers retained-topic))
           subs (coalesce-subscriptions subs)]
       (when (seq subs)
-        (when-let [{:keys [payload properties qos]} (get @*retained* retained-topic)]
+        ;; Through retained-for-delivery, not the map: it is what applies
+        ;; §3.3.1.3's expiry and counts down §3.3.2.3.3's interval, and every
+        ;; one of the three QoS branches below needs both.
+        (when-let [{:keys [payload properties qos]} (retained-for-delivery retained-topic)]
           (log/trace "retained payload:" payload)
           (let [msg {:payload payload :properties properties}]
             (case (long qos)

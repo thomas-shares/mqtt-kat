@@ -69,9 +69,14 @@
         (let [b (tu/connect-v5! nil :id id)]
           (try
             (let [msg (tu/take! (:ch a) 3000)]
-              (is (= :DISCONNECT (:packet-type msg)))
-              (is (= 0x8E (bit-and (long (:reason-code msg)) 0xff))
-                  "session taken over"))
+              ;; Guarded, because when this fails it is because nothing
+              ;; arrived, and `(long nil)` reports that as a NullPointerException
+              ;; from deep in RT — which says nothing about what went wrong.
+              (is (= :DISCONNECT (:packet-type msg))
+                  (str "expected a DISCONNECT, got " (pr-str msg)))
+              (when (= :DISCONNECT (:packet-type msg))
+                (is (= 0x8E (bit-and (long (or (:reason-code msg) 0)) 0xff))
+                    "session taken over")))
             (finally (tu/close! b))))
         (finally (tu/close! a)))))
 

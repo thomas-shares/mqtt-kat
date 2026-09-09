@@ -79,7 +79,8 @@
                   {:packet-type :CONNACK
                    :session-present? false
                    :connect-return-code 0x01})))
-  (Thread/sleep 25)
+  ;; The close waits for the writer, so the rejection CONNACK above goes out
+  ;; before the socket does.
   (disconnect-client client-key))
 
 (def server-keep-alive
@@ -145,7 +146,12 @@
       (log/trace "storing retain:" topic qos (empty? payload))
       (if (empty? payload)
         (swap! *retained* dissoc topic)
-        (swap! *retained* assoc topic {:qos qos :payload payload :properties props}))))
+        ;; Stamped like any other retained message, so a Will Message published
+        ;; with a Message Expiry Interval expires on the same terms.
+        (swap! *retained* assoc topic {:qos       qos
+                                       :payload   payload
+                                       :properties props
+                                       :stored-at (System/currentTimeMillis)}))))
   
   ;; Session Present used to report whatever was parked under the client-id
   ;; regardless of clean-session, so a client asking for a fresh session was
@@ -169,7 +175,6 @@
   (send-buffer [client-key] (MqttConnAck/encode {:packet-type :CONNACK
                                                  :session-present? false
                                                  :connect-return-code 0x02}))
-  (Thread/sleep 25)
   (disconnect-client client-key))
 
 (defn take-over-existing!
@@ -191,17 +196,14 @@
     (when-not (= old-key new-key)
       (log/info "session taken over for client-id" client-id)
       ;; §4.13.1: tell it why, or it sees an unexplained close, reconnects, and
-      ;; takes the connection straight back off whoever displaced it.
+      ;; takes the connection straight back off whoever displaced it. The close
+      ;; below waits for the writer, so this is sent rather than raced.
       (when (>= (handlers/protocol-version-of old-key) 5)
         (send-buffer [old-key]
                      (MqttDisconnect/encode
                       {:packet-type      :DISCONNECT
                        :protocol-version 5
-                       :reason-code      MqttReasonCode/SESSION_TAKEN_OVER}))
-        ;; The same pause the other server-sent DISCONNECTs take: close queues
-        ;; STOP_WRITING behind this, and closeConnection must not beat the
-        ;; writer to the socket.
-        (Thread/sleep 25))
+                       :reason-code      MqttReasonCode/SESSION_TAKEN_OVER})))
       (disconnect-client old-key))))
 
 (defonce ^:private assigned-counter (atom 0))
