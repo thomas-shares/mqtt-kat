@@ -146,7 +146,17 @@ named topic filter with 0x80, which is an authorisation policy — the suite has
 `-n` option to tell it which filter the broker is configured to deny. This
 broker has no authentication of any kind, so a deny-list would be half a feature
 answering half a question, and version 5's honest code for it would be 0x87 Not
-authorized rather than the 0x80 the test hard-codes. Leaving it, deliberately.
+authorized rather than the 0x80 the test hard-codes.
+
+**Decided: leave it.** This is the permanent single failure in both suites — 26
+of 27 and 9 of 10 — and it is a feature the broker has chosen not to have rather
+than a defect. Worth writing down, because the failing line looks like a bug
+every time someone runs the suite: the broker answers a SUBSCRIBE for
+`test/nosubscribe` with granted QoS 2, the test wanted 0x80, and the whole
+difference is an authorisation policy that does not exist. The machinery to
+*report* a refusal is there and working — it is what returns 0x8F for a
+malformed filter. What is absent is anything that decides a well-formed filter
+is not allowed.
 
 ### Retained messages that expire
 
@@ -383,6 +393,43 @@ happened to run it — the tests that would have caught it existed and were
 skipped by default. And the first three explanations were all plausible enough
 to act on; the one that was right came from bisecting and reading a log, not
 from thinking harder.
+
+### A deprecation warning that was hiding a conformance bug
+
+Python 3.11 deprecated returning a value from a test case, and every test in
+the Paho suite ends `return succeeded`, so a run printed a `DeprecationWarning`
+per test. Sixteen lines, all identical, all dead — `unittest` ignores the
+return value — so removing them is the whole fix, and both suites are silent
+now.
+
+Except one of the sixteen was load-bearing in the wrong direction.
+`test_zero_length_clientid` in `client_test5.py` is the only test in either
+file that sets `succeeded = False` in its `except` and then **never asserts
+it**. It logged "failed", returned False into a value `unittest` discards, and
+reported `ok`. It could not fail.
+
+Adding the missing `self.assertEqual(succeeded, True)` turned it red
+immediately, on its first assertion: a zero-length client id connecting with
+CleanStart 0.
+
+3.1.1 §3.1.3.1 requires exactly the rejection the broker was giving — a
+zero-length id must come with CleanSession 1, because the server has no way to
+tell the client what it was named and a session stored under that name would be
+unreachable. **Version 5 dropped that restriction**, because it gained Assigned
+Client Identifier: the server names the client, says so in the CONNACK, and the
+session is addressable after all. The broker was applying the 3.1.1 rule to
+version 5 clients and refusing a connection the specification requires it to
+accept.
+
+One condition, now qualified by version. What is worth recording is how it was
+found: not by reading the specification, and not by the conformance suite, which
+had a test for it that was structurally incapable of failing. It came out of
+clearing a deprecation warning.
+
+That is the second time in two days that tidying up test output has turned up a
+real defect — the flaky `session_takeover_test` was a genuine close race, and
+this was a genuine version 5 bug. Noise in a test run is worth reading rather
+than filtering.
 
 ### Notes to self
 

@@ -258,10 +258,16 @@
     (protocol-name-not-valid? protocol-name) (disconnect-client client-key)
     (protocol-version-not-valid? protocol-version) (handle-not-valid-protocol-version msg)
     (client-contains? client-key) (disconnect-client client-key)
-    ;; The original emptiness, not the assigned name: §3.1.3.1 refuses a
-    ;; zero-length id asking to resume a session, since there is nothing it
-    ;; could name to resume.
-    (and anonymous? (not clean-session?)) (handle-incorrect-clean-session msg)
+    ;; The original emptiness, not the assigned name — and only for 3.1.1.
+    ;; Its §3.1.3.1 refuses a zero-length id that asks to resume a session,
+    ;; because there is no way to tell the client what it was named and a
+    ;; session stored under that name would be unreachable. Version 5 dropped
+    ;; the restriction when it gained Assigned Client Identifier (§3.1.3.1):
+    ;; the server names the client, says so in the CONNACK, and the session is
+    ;; addressable after all. Applying the old rule to a version 5 client
+    ;; refused a connection the specification requires be accepted.
+    (and anonymous? (not clean-session?) (not (version-5? protocol-version)))
+    (handle-incorrect-clean-session msg)
     :else (handle-success msg))
     ;; Anything this client left unacknowledged is still recorded against its
     ;; client-id, under the same identifiers it was sent with, so redelivery
