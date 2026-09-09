@@ -4,6 +4,7 @@
             [mqttkat.handlers.connect :as connect]
             [mqttkat.handlers.disconnect :as disconnect]
             [mqttkat.handlers.connack :as connack]
+            [mqttkat.profiling :as profiling]
             [mqttkat.sys :as sys]
             [mqttkat.web.server :as web]
             [mqttkat.util :as util]
@@ -81,6 +82,9 @@
   [& args]
   (let [port      (if-let [p (first args)] (Long/parseLong (str p)) 1883)
         http-port (if-let [p (second args)] (Long/parseLong (str p)) web/default-port)]
+    ;; Before the broker, so the profile covers startup as well as the run.
+    ;; A no-op unless -Dmqttkat.profile is set.
+    (profiling/start!)
     (start! "0.0.0.0" (int port))
     ;; Started here rather than in start!, so the test suite's broker does not
     ;; spend its life publishing retained $SYS messages into the state the

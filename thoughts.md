@@ -431,6 +431,58 @@ real defect — the flaky `session_takeover_test` was a genuine close race, and
 this was a genuine version 5 bug. Noise in a test run is worth reading rather
 than filtering.
 
+### Profiling, and what the broker actually spends its time on
+
+`-Dmqttkat.profile=cpu` starts async-profiler at boot and writes a flamegraph on
+exit — `mqttkat.profiling`, resolved at run time rather than required, so the
+profiler stays a :dev dependency and never reaches the uberjar. `alloc` and
+`wall` work too; `wall` is the one worth remembering, because a broker that is
+*waiting* looks idle to a CPU profile.
+
+First real run: 2,200 clients, 42M packets received, peak 210,195/s, nothing
+dropped. 2.56M samples.
+
+**Fourteen per cent of all CPU is inside `clojure.lang.Atom.swap`.**
+
+Attributing map lookups to the nearest frame of ours puts almost all of it in
+one place — the QoS 1/2 packet identifier bookkeeping:
+
+| | inclusive |
+|---|---|
+| `acquire-packet-identifier!` | 8.91% |
+| `release-packet-identifier!` | 6.13% |
+| `drain-pending!` | 2.27% |
+| — | |
+| `MqttPublish/encode` | 2.21% |
+| `matching-values` | 1.18% |
+| `coalesce-subscriptions` | 0.47% |
+| `alias-outbound` | 0.29% |
+
+Acquiring and releasing an identifier costs seven times what encoding the packet
+costs. `PersistentHashMap$ArrayNode.find`, `RT.get` and
+`PersistentArrayMap.indexOf` together are the largest group of leaves in the
+whole profile, and `ARef.validate` shows up on its own — a symptom of sheer
+volume of atom mutation rather than of any validator.
+
+The cause is structural. `*outbound*` is **one global atom** holding every
+client's in-flight map and pending queue, keyed by client id. Every QoS 1
+publish and every PUBACK does `update-in [client-id :inflight]` on it. With
+2,200 clients that is path-copying through a 2,200-entry hash map, and with
+every connection thread hitting the same atom it is CAS retries on top —
+`compareAndSet` frames appear under acquire and release at roughly 8,300 samples
+each.
+
+The fix is to stop sharing the atom: in-flight state belongs per connection,
+on the Connection object or in an atom of its own, where the swap is
+uncontended and the map being copied has a handful of entries rather than
+thousands. Not done yet, and it is not a small change — every reader of
+`*outbound*` moves with it.
+
+What this also settles is the earlier A/B. The version 5 machinery I spent two
+days worrying about the cost of — coalescing, aliases — is 0.76% of the profile
+between them, against 15% for identifier bookkeeping that predates all of it.
+The measurement said parity; the profile says why.
+
 ### Notes to self
 
 * **mosquitto had quietly taken port 1883**, as a systemd service, and served
