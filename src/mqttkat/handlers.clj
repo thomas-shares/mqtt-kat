@@ -1661,6 +1661,22 @@
    problem."
   25)
 
+(defn pause-before-close!
+  "Give a client a moment to read the last packet written to it.
+
+   The close itself already waits for the writer, so the packet has certainly
+   been *written* — see MqttServer.closeConnection. This is the other half:
+   written is not read. The broker has stopped reading this socket, so a client
+   still sending into it has data sitting unread, and closing in that state
+   sends RST rather than FIN, which can discard the very packet just written
+   before the client gets to it.
+
+   A named call rather than a bare Thread/sleep at four sites, which read like
+   an unexplained pause — and the long coercion happens once here instead of
+   being repeated to keep the reflection warning away."
+  []
+  (Thread/sleep (long grace-before-close-ms)))
+
 (defn disconnect-with-reason!
   "Tell a version 5 client why it is about to be hung up on, then hang up.
 
@@ -1686,13 +1702,9 @@
   ;;
   ;; Two different waits, and both are needed. closeConnection waits for the
   ;; writer, which is what guarantees the DISCONNECT above is actually written
-  ;; — that used to be a 25ms guess and lost the packet under load. This pause
-  ;; is the other half: written is not read. The broker has stopped reading
-  ;; this socket, so a client still sending into it has data sitting unread,
-  ;; and closing then sends RST rather than FIN — which can discard the very
-  ;; DISCONNECT just written before the client gets to it. A moment's grace
-  ;; lets the peer drain what it has been sent first.
-  (Thread/sleep grace-before-close-ms)
+  ;; — that used to be a 25ms guess and lost the packet under load. The pause
+  ;; below is the other half of it; see pause-before-close!.
+  (pause-before-close!)
   (try
     (.closeConnection ^MqttServer (:server (meta @*server*)) client-key)
     (catch Exception e

@@ -80,8 +80,8 @@
                    :session-present? false
                    :connect-return-code 0x01})))
   ;; The close waits for the writer to send that CONNACK; this leaves the
-  ;; client a moment to read it. See handlers/grace-before-close-ms.
-  (Thread/sleep handlers/grace-before-close-ms)
+  ;; client a moment to read it.
+  (handlers/pause-before-close!)
   (disconnect-client client-key))
 
 (def server-keep-alive
@@ -176,7 +176,7 @@
   (send-buffer [client-key] (MqttConnAck/encode {:packet-type :CONNACK
                                                  :session-present? false
                                                  :connect-return-code 0x02}))
-  (Thread/sleep handlers/grace-before-close-ms)
+  (handlers/pause-before-close!)
   (disconnect-client client-key))
 
 (defn take-over-existing!
@@ -206,7 +206,7 @@
                       {:packet-type      :DISCONNECT
                        :protocol-version 5
                        :reason-code      MqttReasonCode/SESSION_TAKEN_OVER}))
-        (Thread/sleep handlers/grace-before-close-ms))
+        (handlers/pause-before-close!))
       (disconnect-client old-key))))
 
 (defonce ^:private assigned-counter (atom 0))
