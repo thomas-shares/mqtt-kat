@@ -459,10 +459,28 @@ public class Connection {
 		if (waiters.isEmpty()) {
 			return;
 		}
+		// Each waiter is taken out of the set *before* it is resumed, rather
+		// than iterating and then clearing. The clear was not atomic with the
+		// iteration, so a pauseUntilDrained landing between the two had its
+		// publisher removed without ever being resumed — and since it was no
+		// longer a waiter, no later drained() would find it either. That
+		// publisher's socket was then never read again: it stopped
+		// acknowledging, its own window filled, and it went silent for good.
+		//
+		// A 400,000 message run at 2,000 subscribers wedged on this every
+		// time, with three or four publishers left paused, every subscriber
+		// queue empty and not one waiter left anywhere to explain it.
+		//
+		// remove() decides ownership: whichever thread takes a waiter out is
+		// the one that resumes it, so it cannot be resumed twice or dropped.
+		// An add that races this pass is simply left in the set, and the
+		// re-check at the end of pauseUntilDrained — or the next write, or the
+		// close — picks it up.
 		for (Connection publisher : waiters) {
-			publisher.resumeReading();
+			if (waiters.remove(publisher)) {
+				publisher.resumeReading();
+			}
 		}
-		waiters.clear();
 	}
 
 	// ── inbound ──────────────────────────────────────────────────────────────

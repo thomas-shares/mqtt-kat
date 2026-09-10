@@ -16,6 +16,8 @@
             [mqttkat.test-util :as tu])
   (:import [java.net Socket]
            [java.nio ByteBuffer]
+           [java.nio.channels Selector SocketChannel]
+           [java.util.concurrent CountDownLatch TimeUnit]
            [org.mqttkat MqttStat]
            [org.mqttkat.server Connection]
            [org.mqttkat.packages MqttConnect MqttSubscribe]))
@@ -344,3 +346,81 @@
       (tu/close! sub)
       (tu/close! pub)
       (settle!))))
+
+;; ── the hand-off itself ──────────────────────────────────────────────────
+;;
+;; The tests above drive back-pressure through a live broker. These two go at
+;; the bookkeeping directly, because what went wrong in it was a race that no
+;; amount of traffic makes reliable — and that the traffic tests could not see,
+;; since a wedged publisher just looks like a slow one.
+;;
+;; A publisher is paused by a subscriber whose outbound queue is deep, and
+;; released when that queue drains. The only thing that will ever release it is
+;; the subscriber holding it in `waiters`, so the invariant is: a paused
+;; publisher must be somebody's waiter.
+
+(defn- field-value [^Connection c ^String n]
+  (.get (doto (.getDeclaredField Connection n) (.setAccessible true)) c))
+
+(defn- bare-connection
+  "A Connection with a real SelectionKey and deliberately not started: this
+   exercises the pause bookkeeping, not the reader and writer threads."
+  [^Selector selector]
+  (let [ch (doto (SocketChannel/open) (.configureBlocking false))]
+    (Connection. (.register ch selector 0) ch nil)))
+
+(deftest a-paused-publisher-is-always-somebodys-waiter
+  (testing "an add racing a drain must not be dropped"
+    ;; drained() used to iterate the waiters and then clear() them. The two are
+    ;; not one step, so a pauseUntilDrained landing in between had its
+    ;; publisher removed without being resumed — and, no longer a waiter, no
+    ;; later drain would find it either. Its socket was never read again: it
+    ;; stopped acknowledging, its own window filled, and it went silent for the
+    ;; life of the broker. A 400,000 message run at 2,000 subscribers wedged on
+    ;; this every time. Against the old code this fails on about 50 rounds in
+    ;; 2,000.
+    (with-open [selector (Selector/open)]
+      (let [subscriber (bare-connection selector)
+            publisher  (bare-connection selector)
+            ;; A decoy already waiting, so drained() has work to do and reaches
+            ;; the point where it used to clear the set. With an empty set it
+            ;; returns on the first line and the race cannot happen at all —
+            ;; which is how the first draft of this test passed against the
+            ;; very bug it was written for.
+            decoy      (bare-connection selector)
+            ;; Above resumeAt(), so pauseUntilDrained's own re-check does not
+            ;; fire and paper over the race the way it does on an idle queue.
+            queued     (field-value subscriber "queuedCount")
+            rounds     2000
+            orphaned   (atom 0)]
+        (.set ^java.util.concurrent.atomic.AtomicInteger queued Integer/MAX_VALUE)
+        (dotimes [_ rounds]
+          (.resumeReading publisher)
+          (.pauseUntilDrained subscriber decoy)
+          (let [go   (CountDownLatch. 1)
+                done (CountDownLatch. 2)]
+            (.start (Thread. ^Runnable (fn [] (.await go) (.drained subscriber) (.countDown done))))
+            (.start (Thread. ^Runnable (fn [] (.await go) (.pauseUntilDrained subscriber publisher) (.countDown done))))
+            (.countDown go)
+            (.await done 5 TimeUnit/SECONDS))
+          ;; Either the publisher was released, or somebody still holds it and
+          ;; will release it later. Anything else is a socket never read again.
+          (when (and (.isReadingPaused publisher)
+                     (not (contains? (set (field-value subscriber "waiters")) publisher)))
+            (swap! orphaned inc))
+          (.drained subscriber))
+        (is (zero? @orphaned)
+            (str @orphaned " of " rounds " rounds left the publisher paused with"
+                 " nobody holding it — its socket would never be read again"))))))
+
+(deftest draining-releases-every-waiter
+  (testing "the ordinary case still works"
+    (with-open [selector (Selector/open)]
+      (let [subscriber (bare-connection selector)
+            publishers (vec (repeatedly 5 #(bare-connection selector)))]
+        (doseq [p publishers] (.pauseUntilDrained subscriber p))
+        (.drained subscriber)
+        (is (every? #(not (.isReadingPaused ^Connection %)) publishers)
+            "every publisher the subscriber stopped should be reading again")
+        (is (empty? (field-value subscriber "waiters"))
+            "and none should still be recorded as waiting")))))

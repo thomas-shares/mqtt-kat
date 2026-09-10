@@ -552,6 +552,71 @@ change — and it is the same shape as the lead recorded on 20260903, where a
 a handful of messages then and is thousands now at 2,000 subscribers, which
 makes it far easier to chase. Still not chased.
 
+### The stall: a publisher paused for ever
+
+The 400,000 message run wedged every time. Around 0.6% of publishes never
+completed, deliveries stopped proportionally, and everything sat at zero per
+second indefinitely. It reproduced on the pre-refactor build too, so it was not
+the per-client atoms, and it is the same shape as the lead from 20260903 — 27
+publishes unacknowledged, 540 deliveries missing — which had sat unchased since.
+
+I guessed twice and was wrong twice: first that the pending queue could deadlock
+with nothing left to drain it, then that `pausedByInbound` had a lost wakeup.
+What settled it was running the load in the same JVM as the broker and dumping
+the state the moment it stopped moving:
+
+```
+  total pending              : 0
+  total inflight             : 0
+  reading paused             : 3
+  paused connections in detail:
+    id=2147 pausedByPeers=true pausedByInbound=false inbound=0 queued=0
+  subscribers still holding waiters: {}
+```
+
+Nothing queued anywhere, three publishers still paused, and **not one waiter
+left in the entire broker** to explain why. That is the whole bug in one dump.
+
+`drained()` iterated the waiters, resumed each, and then called `clear()`:
+
+```java
+for (Connection publisher : waiters) { publisher.resumeReading(); }
+waiters.clear();
+```
+
+The iteration and the clear are not one step. A `pauseUntilDrained` landing
+between them adds its publisher to the set, pauses it — and then the `clear()`
+removes it without ever resuming it. It is no longer a waiter, so no later
+`drained()` finds it either. That publisher's socket is never read again: it
+stops acknowledging, its own window fills, and it goes silent for good. The
+re-check at the end of `pauseUntilDrained` covers the case where the subscriber
+drained *before* the pause, but not this one, because by then the set is empty
+and `drained()` returns on its first line.
+
+The fix is to take each waiter out before resuming it, and never blind-clear.
+`remove()` decides ownership: whoever takes a waiter is the one that resumes it,
+so it cannot be resumed twice or dropped, and an add that races the pass is left
+in the set for the re-check, the next write, or the close to find.
+
+Three consecutive 400,000 message runs afterwards: 8,000,000 delivered,
+**ratio 1.0000, zero unacknowledged**, where before it never finished at all.
+
+### A test that passed against the bug it was written for
+
+The first version of the regression test hammered `drained()` and
+`pauseUntilDrained` from two threads and asserted the invariant — *a paused
+publisher must be somebody's waiter*. It passed against the broken code.
+
+It could not have failed. Each round started with an empty waiter set, so
+`drained()` returned at `if (waiters.isEmpty())` and never reached the `clear()`
+where the race lives. Adding a decoy waiter, so the drain has real work to do,
+took it from 0 failures to 49 in 2,000 rounds against the old code, and 0 with
+the fix.
+
+Worth the paragraph because the test looked right, tested the right invariant,
+exercised both methods concurrently, and was worthless. The check that caught it
+is the only one that matters: put the bug back and watch the test fail.
+
 ### Notes to self
 
 * **mosquitto had quietly taken port 1883**, as a systemd service, and served
