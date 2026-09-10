@@ -19,7 +19,7 @@
 (defn- console-markup
   "Every page that is kept live, as one string."
   []
-  (str (console/overview-page) (console/topics-page)))
+  (str (console/overview-page) (console/topics-page) (console/clients-page)))
 
 (defn- listener [^LinkedBlockingQueue received]
   (reify WebSocket$Listener
@@ -119,7 +119,7 @@
 
 (deftest the-snapshot-carries-enough-to-draw-with
   (testing "a page that has just opened gets history, not an empty chart"
-    (let [snap (ws/snapshot)]
+    (let [snap (ws/snapshot :overview)]
       (is (= "snapshot" (:event snap)))
       (is (= ws/sample-interval-ms (:interval snap))
           "the page is told how often to expect a sample")
@@ -128,7 +128,18 @@
       (is (string? (get (:fields snap) "m-clients"))
           "and every reading on the page, ready to assign")
       (is (contains? snap :events)
-            "and the events already logged, so the list is not empty on open"))))
+            "and the events already logged, so the list is not empty on open")))
+
+  (testing "and only the table its own page can show"
+    ;; The topic list and the client list live on one page each. Sending both
+    ;; to all three would be bandwidth spent on a page with nowhere to put it,
+    ;; once a second, for as long as the tab is open.
+    (is (contains? (ws/snapshot :topics) :topics))
+    (is (not (contains? (ws/snapshot :topics) :clients)))
+    (is (contains? (ws/snapshot :clients) :clients))
+    (is (not (contains? (ws/snapshot :clients) :topics)))
+    (is (not (contains? (ws/snapshot :overview) :topics)))
+    (is (not (contains? (ws/snapshot :overview) :clients)))))
 
 (deftest every-id-the-page-renders-is-a-field-the-socket-sends
   (testing "the page and the socket agree about what is kept up to date"
@@ -147,7 +158,16 @@
                                    (str/starts-with? % "spark")
                                    (str/starts-with? % "axis")
                                    (str/starts-with? % "grad")
-                                   (= % "event-list"))))]
+                                   ;; Containers the browser rebuilds wholesale
+                                   ;; rather than assigns into, like the event
+                                   ;; list. Their contents are live; the node
+                                   ;; itself is only somewhere to put them.
+                                   (contains? #{"event-list"
+                                                "active-topics"
+                                                "active-topics-empty"
+                                                "client-list"
+                                                "client-list-empty"}
+                                              %))))]
       (is (seq ids) "the page should render ids at all")
       (doseq [id ids]
         (is (contains? fields id)

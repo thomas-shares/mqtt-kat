@@ -39,6 +39,7 @@
     (case uri
       "/"         (html (console/overview-page))
       "/topics"   (html (console/topics-page))
+      "/clients"  (html (console/clients-page))
       ;; No /settings. console/settings-page still exists, but every field on
       ;; it is invented and the broker reads none of it, so it is deliberately
       ;; not reachable rather than served as though it did something.

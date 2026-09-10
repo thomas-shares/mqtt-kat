@@ -11,11 +11,35 @@
 (function () {
   "use strict";
 
-  var HISTORY = 120;          // two minutes at one sample a second
   var RETRY_MAX = 10000;
+  var WINDOW_KEY = "mqttkat.chartWindowMs";
 
+  // Everything the server has sent, and the slice of it currently charted.
+  // The two are separate so changing the window is instant: the history is
+  // already here, and nothing has to be re-fetched or waited for.
   var samples = [];
+  var view = [];
+  var intervalMs = 1000;      // corrected by the snapshot
+  var retentionMs = 120000;   // ditto — how far back the server can go
+  var windowMs = 0;           // 0 means "everything the server has"
   var retry = 500;
+
+  function storedWindow() {
+    try { return parseInt(window.localStorage.getItem(WINDOW_KEY), 10) || 0; }
+    catch (e) { return 0; }   // private windows and blocked storage
+  }
+
+  function rememberWindow(ms) {
+    try { window.localStorage.setItem(WINDOW_KEY, String(ms)); } catch (e) {}
+  }
+
+  // The charts read this, never `samples` — so one place decides what is on
+  // screen and the hover, the axis and the peak all agree about it.
+  function recomputeView() {
+    if (!windowMs || samples.length === 0) { view = samples; return; }
+    var wanted = Math.max(2, Math.round(windowMs / intervalMs));
+    view = samples.length > wanted ? samples.slice(samples.length - wanted) : samples;
+  }
 
   var statusEl = document.querySelector(".live-text");
   var dotEl = document.querySelector(".live-dot");
@@ -26,6 +50,17 @@
   // the server, and arrives as a string — see mqttkat.web.state.
 
   function pad(n) { return String(n).padStart(2, "0"); }
+
+  // Topic names are chosen by whoever connected, so they are untrusted text
+  // and never markup. The rest of this page writes server-formatted strings
+  // into textContent; this one table builds HTML, so it escapes.
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
+  function commas(n) { return Number(n).toLocaleString("en-US"); }
 
   function clock(t) {
     var d = new Date(t);
@@ -185,11 +220,11 @@
 
   function drawAxis(id) {
     var el = document.getElementById(id);
-    if (!el || samples.length === 0) return;
+    if (!el || view.length === 0) return;
     var spans = el.querySelectorAll("span");
     for (var i = 0; i < spans.length; i++) {
-      var at = Math.round((i / (spans.length - 1)) * (samples.length - 1));
-      spans[i].textContent = clock(samples[at].t);
+      var at = Math.round((i / (spans.length - 1)) * (view.length - 1));
+      spans[i].textContent = clock(view[at].t);
     }
   }
 
@@ -206,7 +241,7 @@
   var clients = chartOf("chart-clients");
 
   function field(name) {
-    return samples.map(function (s) { return s[name] || 0; });
+    return view.map(function (s) { return s[name] || 0; });
   }
 
   function place(wrap, svg, selector, point) {
@@ -262,14 +297,144 @@
     for (var i = 0; i < sparks.length; i++) {
       var svg = document.getElementById(sparks[i].id);
       if (!svg) continue;
-      var values = samples.map(sparks[i].of);
+      var values = view.map(sparks[i].of);
       var peak = Math.max.apply(null, values.concat([0]));
       drawSeries(svg, sparks[i].series, values, niceMax(peak));
     }
   }
 
+  // ── active topics ───────────────────────────────────────────────────
+  //
+  // Only the topics page has this table; on the overview the payload is simply
+  // ignored. Rows are rebuilt rather than diffed — a dozen of them, once a
+  // second, is not worth the machinery, and rebuilding cannot leave a stale
+  // row behind when a topic drops out of the busiest few.
+
+  function setTopics(topics) {
+    var body = document.getElementById("active-topics");
+    if (!body || !topics) return;
+    if (topics.length === 0) {
+      // Only write the empty state once, or an idle broker rewrites this node
+      // every second for no reason.
+      if (!body.querySelector("#active-topics-empty")) {
+        body.innerHTML = '<tr id="active-topics-empty"><td colspan="3">' +
+                         '<div class="event-empty">Nothing published yet.</div></td></tr>';
+      }
+      return;
+    }
+    var html = "";
+    for (var i = 0; i < topics.length; i++) {
+      var t = topics[i];
+      html += '<tr><td class="cell-topic active-topic-name" title="' + escapeHtml(t.topic) + '">' +
+              escapeHtml(t.topic) + "</td>" +
+              '<td class="cell-right num active-topic-rate">' + commas(Math.round(t.rate || 0)) + "</td>" +
+              '<td class="cell-right num cell-dim active-topic-total">' + commas(t.total || 0) + "</td></tr>";
+    }
+    body.innerHTML = html;
+  }
+
+  // ── clients ─────────────────────────────────────────────────────────
+
+  function pill(connected) {
+    return '<span class="pill' + (connected ? '' : ' pill--dim') + '">' +
+           (connected ? "connected" : "parked") + "</span>";
+  }
+
+  function idle(ms) {
+    if (ms === null || ms === undefined) return "—";
+    if (ms < 1000) return "now";
+    if (ms < 60000) return Math.floor(ms / 1000) + "s";
+    if (ms < 3600000) return Math.floor(ms / 60000) + "m";
+    return Math.floor(ms / 3600000) + "h";
+  }
+
+  function setClients(clients) {
+    var body = document.getElementById("client-list");
+    if (!body || !clients) return;
+    if (clients.length === 0) {
+      if (!body.querySelector("#client-list-empty")) {
+        body.innerHTML = '<tr id="client-list-empty"><td colspan="8">' +
+                         '<div class="event-empty">No clients connected.</div></td></tr>';
+      }
+      return;
+    }
+    var html = "";
+    for (var i = 0; i < clients.length; i++) {
+      var c = clients[i];
+      // Client ids are chosen by whoever connected: untrusted text, escaped.
+      html += "<tr>" +
+        '<td class="cell-topic" title="' + escapeHtml(c.id) + '">' + escapeHtml(c.id) + "</td>" +
+        "<td>" + pill(c.connected) + "</td>" +
+        '<td class="cell-dim">' + escapeHtml(c.protocol) + "</td>" +
+        '<td class="cell-dim">' + (c.clean ? "clean" : "persistent") + "</td>" +
+        '<td class="cell-right num">' + commas(c.subscriptions || 0) + "</td>" +
+        '<td class="cell-right num">' + commas(c.inflight || 0) + "</td>" +
+        '<td class="cell-right num">' + commas(c.queued || 0) + "</td>" +
+        '<td class="cell-right num cell-dim">' + idle(c["age-ms"]) + "</td></tr>";
+    }
+    body.innerHTML = html;
+  }
+
+  // ── how far back to chart ───────────────────────────────────────────
+  //
+  // Built from the retention the server reports rather than hard-coded, so the
+  // page never offers a window it cannot fill — and picks up a broker started
+  // with -Dmqttkat.wsHistoryMinutes without being edited.
+
+  // Spelled out, because the control sits on a page of byte counts and
+  // uppercase "2M" reads as megabytes.
+  var WINDOWS = [
+    { ms: 120000, label: "2 min" },
+    { ms: 300000, label: "5 min" },
+    { ms: 900000, label: "15 min" },
+    { ms: 1800000, label: "30 min" },
+    { ms: 3600000, label: "1 hr" },
+    { ms: 10800000, label: "3 hr" }
+  ];
+
+  function windowLabel(ms) {
+    for (var i = 0; i < WINDOWS.length; i++) if (WINDOWS[i].ms === ms) return WINDOWS[i].label;
+    return "All";
+  }
+
+  function buildWindowPicker() {
+    var host = document.getElementById("chart-window");
+    if (!host) return;
+    var offered = WINDOWS.filter(function (w) { return w.ms < retentionMs; });
+    offered.push({ ms: 0, label: "All" });   // whatever the server has, always last
+
+    // A remembered choice the current retention cannot serve falls back to
+    // everything, rather than silently charting less than the label claims.
+    var wanted = storedWindow();
+    var usable = offered.some(function (w) { return w.ms === wanted; });
+    windowMs = usable ? wanted : 0;
+
+    host.innerHTML = "";
+    offered.forEach(function (w) {
+      var b = document.createElement("button");
+      b.type = "button";
+      b.className = "chart-window-option" + (w.ms === windowMs ? " is-selected" : "");
+      b.textContent = w.label;
+      b.setAttribute("aria-pressed", w.ms === windowMs ? "true" : "false");
+      b.addEventListener("click", function () {
+        windowMs = w.ms;
+        rememberWindow(w.ms);
+        var all = host.querySelectorAll(".chart-window-option");
+        for (var i = 0; i < all.length; i++) {
+          var on = all[i] === b;
+          all[i].classList.toggle("is-selected", on);
+          all[i].setAttribute("aria-pressed", on ? "true" : "false");
+        }
+        redraw();
+      });
+      host.appendChild(b);
+    });
+    host.setAttribute("aria-label", "Chart window, up to " + windowLabel(0));
+  }
+
   function redraw() {
-    if (samples.length === 0) return;
+    recomputeView();
+    if (view.length === 0) return;
     redrawThroughput();
     redrawClients();
     redrawSparks();
@@ -280,15 +445,15 @@
   function nearest(wrap, event) {
     var r = wrap.getBoundingClientRect();
     var fraction = Math.min(1, Math.max(0, (event.clientX - r.left) / r.width));
-    return Math.round(fraction * (samples.length - 1));
+    return Math.round(fraction * (view.length - 1));
   }
 
   function tip(wrap, index, rows) {
     var el = wrap.querySelector(".chart-tip");
     var cursor = wrap.querySelector(".chart-cursor");
     if (!el || !cursor) return;
-    var left = (index / Math.max(1, samples.length - 1)) * 100;
-    var html = '<div class="chart-tip-time">' + clock(samples[index].t) + "</div>";
+    var left = (index / Math.max(1, view.length - 1)) * 100;
+    var html = '<div class="chart-tip-time">' + clock(view[index].t) + "</div>";
     for (var i = 0; i < rows.length; i++) {
       html += '<div class="chart-tip-row ' + rows[i].cls + '">' +
               '<span class="chart-tip-key">' + rows[i].name + "</span>" +
@@ -316,9 +481,9 @@
   function trackHover(chart, rowsFor) {
     if (!chart || !chart.wrap) return;
     chart.wrap.addEventListener("mousemove", function (e) {
-      if (samples.length === 0) return;
+      if (view.length === 0) return;
       var i = nearest(chart.wrap, e);
-      tip(chart.wrap, i, rowsFor(samples[i]));
+      tip(chart.wrap, i, rowsFor(view[i]));
     });
     chart.wrap.addEventListener("mouseleave", function () { hideTip(chart.wrap); });
   }
@@ -470,14 +635,24 @@
     setFields(message.fields);
     if (message.event === "snapshot") {
       samples = message.history || [];
+      intervalMs = message.interval || intervalMs;
+      retentionMs = message.retention || retentionMs;
+      buildWindowPicker();
+      setTopics(message.topics);
+      setClients(message.clients);
       setEvents(message.events);
       redraw();
       return;
     }
     if (message.event === "tick") {
+      setTopics(message.topics);
+      setClients(message.clients);
       if (message.sample) {
         samples.push(message.sample);
-        while (samples.length > HISTORY) samples.shift();
+        // Trimmed to what the server itself keeps, so a tab left open all day
+        // holds no more than a reconnecting one would be given.
+        var cap = Math.max(2, Math.round(retentionMs / intervalMs));
+        while (samples.length > cap) samples.shift();
       }
       redraw();
       return;
@@ -491,7 +666,12 @@
 
   function connect() {
     var scheme = location.protocol === "https:" ? "wss:" : "ws:";
-    var socket = new WebSocket(scheme + "//" + location.host + "/ws");
+    // The page tells the socket what it is, so the server sends the one table
+    // this page has somewhere to put rather than all of them to all of us.
+    var page = location.pathname === "/topics" ? "topics"
+             : location.pathname === "/clients" ? "clients"
+             : "overview";
+    var socket = new WebSocket(scheme + "//" + location.host + "/ws?page=" + page);
 
     socket.onopen = function () {
       retry = 500;

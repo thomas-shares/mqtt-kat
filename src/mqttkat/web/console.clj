@@ -73,7 +73,7 @@
     (nav-item {:href "/topics"   :label "Topics"   :glyph icon-topics   :active? (= active :topics)})
     ;; Settings is not in the nav and is not routed. settings-page below still
     ;; builds it — see the note there.
-    (nav-item {:label "Clients"  :glyph icon-clients :disabled? true})]
+    (nav-item {:href "/clients"  :label "Clients"  :glyph icon-clients :active? (= active :clients)})]
    [:div.side-foot foot]])
 
 (defn- page-head [{:keys [eyebrow title tools]}]
@@ -210,6 +210,12 @@
         :title "Overview"
         :tools (list
                 [:div.page-stamp.num {:id "stamp"} (fields "stamp")]
+                ;; Filled in by the browser from the retention the server
+                ;; reports, so the options match what this broker actually
+                ;; keeps. Empty until then rather than guessed at here — a
+                ;; server-rendered "2m" that the page then replaced would be
+                ;; one flicker on every load.
+                [:div.chart-window {:id "chart-window" :role "group"}]
                 [:div.legend
                  [:div.legend-item [:div.legend-key] "Inbound"]
                  [:div.legend-item [:div.legend-key.legend-key--out] "Outbound"]])})
@@ -296,6 +302,82 @@
                        :qos qos}))]
       row)))
 
+(defn- active-topic-row
+  "One row of the busiest-topics table.
+
+   No id on the row. The table is rebuilt wholesale by the browser rather than
+   assigned field by field, so an id here would claim something is keeping that
+   row up to date when nothing is — which is exactly what
+   every-id-the-page-renders-is-a-field-the-socket-sends exists to catch, and
+   did."
+  [{:keys [topic total rate]}]
+  [:tr
+   [:td.cell-topic {:class "active-topic-name" :title topic} topic]
+   [:td.cell-right.num {:class "active-topic-rate"} (state/commas (Math/round (double (or rate 0))))]
+   [:td.cell-right.num.cell-dim {:class "active-topic-total"} (state/commas (or total 0))]])
+
+(defn- idle-str
+  "A duration, coarsely: seconds, then minutes, then hours.
+
+   Coarse on purpose. This column exists to separate the client that arrived a
+   moment ago from the one that has been here all day, and a figure that
+   changes every second is movement the eye follows for no reason."
+  [ms]
+  (cond
+    (nil? ms)        "—"
+    (< ms 1000)      "now"
+    (< ms 60000)     (str (quot ms 1000) "s")
+    (< ms 3600000)   (str (quot ms 60000) "m")
+    :else            (str (quot ms 3600000) "h")))
+
+(defn- client-row [{:keys [id connected protocol clean subscriptions inflight queued age-ms]}]
+  [:tr
+   [:td.cell-topic {:title id} id]
+   [:td [:span {:class (str "pill" (when-not connected " pill--dim"))}
+         (if connected "connected" "parked")]]
+   [:td.cell-dim protocol]
+   [:td.cell-dim (if clean "clean" "persistent")]
+   [:td.cell-right.num (state/commas subscriptions)]
+   [:td.cell-right.num (state/commas inflight)]
+   [:td.cell-right.num (state/commas queued)]
+   [:td.cell-right.num.cell-dim (idle-str age-ms)]])
+
+(defn clients-page []
+  (let [now     (state/current)
+        fields  (state/fields now)
+        {:keys [rows total]} (state/client-rows)]
+    (layout
+     {:title "Clients — MQTT Console"
+      :active :clients
+      :sidebar-foot (broker-foot fields)}
+     [:div.main
+      (page-head
+       {:eyebrow "Connections"
+        :title "Clients"
+        :tools [:div.page-stamp.num {:id "stamp"} (fields "stamp")]})
+
+      [:div.stat-row
+       [:div.stat [:div.label "Connected"] [:div.stat-value.num {:id "c-connected"} (fields "c-connected")]]
+       [:div.stat [:div.label "Parked sessions"] [:div.stat-value.num {:id "c-parked"} (fields "c-parked")]]
+       [:div.stat [:div.label "Subscriptions"] [:div.stat-value.num {:id "c-subs"} (fields "c-subs")]]]
+
+      [:div.panel.panel--flush
+       [:div.panel-head
+        [:h2.panel-title "Clients"]
+        [:div.chart-scale.num {:id "clients-note"} (fields "clients-note")]]
+       [:div.table-wrap
+        [:table.table
+         [:thead
+          [:tr [:th {:style "width:26%"} "Client"] [:th "State"] [:th "MQTT"] [:th "Session"]
+           [:th.cell-right "Subs"] [:th.cell-right "In flight"]
+           [:th.cell-right "Queued"] [:th.cell-right "Connected"]]]
+         ;; Rebuilt by the browser each second — see console.js.
+         [:tbody {:id "client-list"}
+          (if (empty? rows)
+            [:tr {:id "client-list-empty"}
+             [:td {:colspan 8} [:div.event-empty "No clients connected."]]]
+            (map client-row rows))]]]]])))
+
 (defn topics-page []
   (let [now    (state/current)
         fields (state/fields now)
@@ -306,16 +388,37 @@
       :sidebar-foot (broker-foot fields)}
      [:div.main
       (page-head
-       {:eyebrow "Retained topics"
+       {:eyebrow "Topic activity"
         :title "Topics"
         :tools [:div.page-stamp.num {:id "stamp"} (fields "stamp")]})
 
       [:div.stat-row
-       [:div.stat [:div.label "Topics listed"] [:div.stat-value.num {:id "t-topics"} (fields "t-topics")]]
+       ;; "Retained", not "listed": there are two tables on this page now, and
+       ;; this number only ever described one of them.
+       [:div.stat [:div.label "Retained topics"] [:div.stat-value.num {:id "t-topics"} (fields "t-topics")]]
        [:div.stat [:div.label "Subscriptions"] [:div.stat-value.num {:id "t-subs"} (fields "t-subs")]]
        [:div.stat [:div.label "Combined rate"]
         [:div.stat-value.num [:span {:id "t-rate"} (fields "t-rate")] " " [:small "msg/s"]]]]
 
+      [:div.panel.panel--flush
+       [:div.panel-head
+        [:h2.panel-title "Active topics"]
+        [:div.chart-scale.num {:id "active-topics-note"} (fields "active-topics-note")]]
+       [:div.table-wrap
+        [:table.table.table--fixed
+         [:colgroup [:col] [:col.col-value] [:col.col-rate]]
+         [:thead
+          [:tr [:th "Topic"] [:th.cell-right "Rate"] [:th.cell-right "Messages"]]]
+         ;; Rebuilt by the browser each second — see console.js. Server-rendered
+         ;; first all the same, so the page is right before the socket opens.
+         [:tbody {:id "active-topics"}
+          (let [rows (:topics now)]
+            (if (empty? rows)
+              [:tr {:id "active-topics-empty"}
+               [:td {:colspan 3} [:div.event-empty "Nothing published yet."]]]
+              (map active-topic-row rows)))]]]]
+
+      [:div.panel-head [:h2.panel-title "Retained topics"]]
       [:div.table-wrap
        [:table.table
         [:thead

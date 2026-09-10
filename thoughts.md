@@ -617,6 +617,142 @@ Worth the paragraph because the test looked right, tested the right invariant,
 exercised both methods concurrently, and was worthless. The check that caught it
 is the only one that matters: put the bug back and watch the test fail.
 
+### The charts remember more than two minutes
+
+The console kept 120 samples — two minutes at one a second — hard-coded on the
+server and again in the browser. Two minutes is short enough that a tab opened
+just after something interesting happened had already missed it.
+
+Retention is now a duration, `-Dmqttkat.wsHistoryMinutes`, defaulting to thirty,
+with `history-size` derived from it and the sample interval rather than being a
+second constant that has to agree. The snapshot carries the retention, so the
+page knows how far back it can look instead of guessing.
+
+On top of that a window picker: 2 min / 5 min / 15 min / All, sitting in the
+page head next to the legend. The options are built from the retention the
+server reports, so the page never offers a window it cannot fill, and a broker
+started with a different retention needs no edit here. The choice is kept in
+localStorage and restored on load; one that the current retention cannot serve
+falls back to All rather than charting less than the label claims.
+
+The browser keeps everything the server sends and charts a slice of it. Two
+arrays, `samples` and `view`, so switching windows is instant — the history is
+already in the page, nothing is refetched — and so that one place decides what
+is on screen. Every reader moved to `view`: the axis, the peak, the sparklines,
+the hover and the tooltip. Leaving any of them on `samples` would have been a
+tooltip disagreeing with the line under the cursor.
+
+Two things worth noting from doing it in front of a browser rather than in the
+editor:
+
+The first labels were "2m / 5m / 15m", and the shared control style uppercases
+its text — so they rendered as **2M, 5M, 15M** on a page whose every other
+figure is a byte count. It looked like a size selector. Spelled out as "2 min"
+and the uppercase dropped for that one control.
+
+And the picker is rendered empty by the server and filled in by the browser.
+Server-rendering a guess at the options would mean the page shipping "2 min"
+selected and then replacing it a moment later, which is a flicker on every
+load — the one thing the server-rendered readings exist to avoid.
+
+Verified in the browser, not by reading: with 4m26s of history, All charted 266
+seconds, 2 min charted 119, and 5 min charted all 266 because that is all there
+was. The selection survived a reload.
+
+### Which topics are actually busy
+
+The Topics page listed retained topics and nothing else, and said why in its
+own docstring: a publish that is not retained is forwarded and forgotten, and
+keeping the payloads to answer "what is busy" would make the broker a store
+rather than a console.
+
+That reasoning is about payloads. Counting *names* costs neither — the broker
+already has the topic string in hand, and a counter per topic is a few bytes.
+So the page now has an Active topics table above the retained tree: the busiest
+dozen by rate, with the running total beside it.
+
+`TopicStats` is a `ConcurrentHashMap` of `LongAdder`, which is the shape the
+outbound state should have been all along — this runs once per publish, and the
+lesson from that refactor was that a shared structure everyone swaps is the most
+expensive thing a broker can own. The rate is a difference between samples, like
+every other rate on the page, so a topic that has gone quiet drops off rather
+than sitting near the top on the strength of what it did an hour ago.
+
+Bounded at two thousand topics, because topics are not bounded. MQTT has no
+registration step, so a client may publish to a new topic on every message, and
+an unbounded map is a leak with a publisher's name on it. Past the cap the
+console says "busiest 12 of 2000+ tracked" rather than quietly implying the list
+is everything.
+
+**`$SYS` is not counted.** It went in counting everything, and the first run
+showed "busiest 12 of 96" on a broker doing nothing but talk to itself — sixty
+eight `$SYS` topics published on a timer, filling a table meant to answer "what
+are my clients doing". They are listed in their own tree lower down the same
+page. Excluded, an idle broker now says "Nothing published yet", which is true.
+
+Two things the tests and the browser caught between them:
+
+The rows went in with `id="active-topic-0"` and so on, and
+`every-id-the-page-renders-is-a-field-the-socket-sends` failed on all of them.
+It was right: an id on this page is a promise that `state/fields` hands out a
+string for it every second, and this table is rebuilt wholesale instead. The
+ids were removed rather than the test relaxed — the container keeps its id and
+joins `event-list` as something the browser fills rather than assigns into.
+
+And the table builds HTML rather than assigning textContent, which every other
+reading on this page does. Topic names are chosen by whoever connected, so they
+are untrusted text: it escapes.
+
+### A Clients page, and the socket learning which page it is talking to
+
+The Clients tab had been a disabled nav item pointing at `#` since the design
+went in. It lists clients now: id, connected or parked, protocol version,
+clean or persistent session, subscriptions, in flight, queued, and how long it
+has been here.
+
+Parked sessions are in the list alongside connected ones, which is the point of
+having it. `*clients*` is keyed by SelectionKey while a client is connected and
+re-keyed to its client id once the socket has gone and the session is kept
+(§3.1.2.4), so the key type is what tells the two apart. A parked session still
+holds subscriptions and still has messages queued against it — exactly what
+someone looking at this page wants to see, and nothing else on the console
+showed it.
+
+Capped at fifty rows, with the real count beside the table. The scale tests open
+fifty thousand connections; a table of that many rows is a hung browser.
+
+**The socket now knows which page it belongs to.** The topic table went in
+sending itself to every open socket, on the reasoning that a dozen entries a
+second was cheaper than teaching the socket what page it was. A client list of
+fifty rows is not, and two such tables going to three pages that each want one
+of them made the shortcut untenable. `console.js` passes `?page=` on the
+websocket URL, and the payload carries the one table that page can display. The
+broadcast builds a message per distinct page rather than per browser — three at
+most, and usually one. There is a test that each page gets its table and not the
+other's, because getting that wrong is invisible: everything still works, it
+just costs.
+
+### A column that was always a dash
+
+The first version of the table had an Idle column, from `:last-active`. Every
+row read "—".
+
+`:last-active` is created by `add-timer!`, and `add-timer!` only runs for a
+client that asked for a keep alive. Everything the load generator connects, and
+plenty of real clients, ask for none — so for most of them the broker genuinely
+does not know when it last heard from them, and the column was honest and
+useless at the same time.
+
+Clients now carry `:connected-at`, stamped in `add-client!` on the connection
+being accepted, and re-stamped when a session is resumed so the figure is about
+this connection rather than the one before it. That is known for every client,
+and "how long has this been here" is the more useful question for a list anyway.
+Coarse — seconds, then minutes, then hours — because a figure that changes every
+second is movement the eye follows for nothing.
+
+Worth noticing that only running it against a live broker showed this. The
+column rendered, the tests passed, and it was empty.
+
 ### Notes to self
 
 * **mosquitto had quietly taken port 1883**, as a systemd service, and served

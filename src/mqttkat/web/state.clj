@@ -22,7 +22,8 @@
             [mqttkat.util :as util])
   (:import [java.lang.management ManagementFactory]
            [java.util.concurrent.atomic LongAdder]
-           [org.mqttkat MqttStat]))
+           [java.nio.channels SelectionKey]
+           [org.mqttkat MqttStat TopicStats]))
 
 (set! *warn-on-reflection* true)
 
@@ -209,9 +210,90 @@
    [:connects "connects"] [:disconnects "disconnects"]
    [:subscriptions "subscriptions"] [:retained "retained"]])
 
+(def client-limit
+  "How many clients the console lists.
+
+   The connection-scale tests open fifty thousand of them; a table of that many
+   rows is a hung browser, not a console. The count beside the table says how
+   many there really are."
+  50)
+
+(defn- protocol-name [version]
+  (if (>= (long (or version 4)) 5) "5.0" "3.1.1"))
+
+(defn client-rows
+  "The connected clients, busiest housekeeping first.
+
+   *clients* is keyed by SelectionKey while a client is connected and re-keyed
+   to its client id once the socket has gone and the session is being kept
+   (§3.1.2.4), so the key type is what says which of the two a row is. Both are
+   listed: a parked session still holds subscriptions and still has messages
+   queued for it, which is exactly what someone looking at this page wants to
+   know."
+  []
+  (let [now      (System/currentTimeMillis)
+        outbound @h/*outbound*
+        entries  (for [[k v] @h/*clients*
+                       :let  [id (:client-id v)]
+                       :when id]
+                   (let [state (some-> (get outbound id) deref)]
+                     {:id            id
+                      :connected     (instance? SelectionKey k)
+                      :protocol      (protocol-name (:protocol-version v))
+                      :clean         (boolean (:clean-session? v))
+                      :subscriptions (count (:subscribed-topics v))
+                      :inflight      (count (:inflight state))
+                      :queued        (count (:pending state))
+                      ;; Idle is only known for clients that asked for a keep
+                      ;; alive — :last-active is created by add-timer! and
+                      ;; nothing else — so age is what the table shows. It is
+                      ;; known for every client.
+                      :age-ms        (when-let [t (:connected-at v)]
+                                       (max 0 (- now (long t))))
+                      :idle-ms       (when-let [t (:last-active v)]
+                                       (max 0 (- now (long @t))))}))]
+    {:total (count entries)
+     ;; Connected before parked, then the ones with work outstanding, then by
+     ;; name so the order is stable second to second.
+     :rows  (->> entries
+                 (sort-by (juxt (complement :connected)
+                                (comp - :inflight)
+                                (comp - :queued)
+                                :id))
+                 (take client-limit)
+                 (vec))}))
+
 (defonce ^:private previous (atom nil))
 (defonce ^:private latest-rates (atom {}))
 (defonce ^:private latest-cpu (atom nil))
+(defonce ^:private previous-topics (atom nil))
+(defonce ^:private latest-topics (atom []))
+
+(def active-topic-limit
+  "How many topics the console lists. The broker tracks more than it shows —
+   the point of the list is the busiest few, not a directory."
+  12)
+
+(defn- topic-activity
+  "The busiest topics since the last sample, newest counts against previous.
+
+   Rate comes from the difference, like every other rate here, so a topic that
+   went quiet drops off rather than sitting near the top on the strength of
+   what it did an hour ago. Total is carried too, because a rate alone cannot
+   tell a topic that has never been used from one that is merely idle now."
+  [now-counts before-counts elapsed]
+  (when (and elapsed (pos? elapsed))
+    (->> now-counts
+         (map (fn [[topic total]]
+                (let [before (get before-counts topic 0)]
+                  {:topic topic
+                   :total total
+                   :rate  (max 0.0 (/ (- total before) (double elapsed)))})))
+         ;; Busiest first, and a stable tie-break so equal rates do not shuffle
+         ;; the table every second — movement that reads as data.
+         (sort-by (juxt (comp - :rate) (comp - :total) :topic))
+         (take active-topic-limit)
+         (vec))))
 
 (defn- rates
   "Per second, over the time that actually elapsed rather than the interval
@@ -238,14 +320,19 @@
   "Take a reading, and the rates since the last one. Called once a second by
    the websocket ticker; the only thing here that keeps state."
   []
-  (let [now  (reading)
-        prev @previous
-        r    (rates now prev)
-        cpu  (cpu-since now prev)]
+  (let [now      (reading)
+        prev     @previous
+        r        (rates now prev)
+        cpu      (cpu-since now prev)
+        counts   (TopicStats/snapshot)
+        elapsed  (when prev (/ (- (:t now) (:t prev)) 1000.0))
+        topics   (or (topic-activity counts @previous-topics elapsed) @latest-topics)]
     (reset! previous now)
+    (reset! previous-topics counts)
     (reset! latest-rates r)
     (reset! latest-cpu cpu)
-    (assoc now :rates r :cpu cpu)))
+    (reset! latest-topics topics)
+    (assoc now :rates r :cpu cpu :topics topics)))
 
 (defn current
   "The state as it stands, with the rates from the most recent sample.
@@ -254,14 +341,16 @@
    passing through here with a second one would halve the interval that every
    rate had just been worked out over."
   []
-  (assoc (reading) :rates @latest-rates :cpu @latest-cpu))
+  (assoc (reading) :rates @latest-rates :cpu @latest-cpu :topics @latest-topics))
 
 (defn forget!
   "Drop the sampler's memory, so the next sample! reports no rates rather than
    a rate over however long the broker was stopped. For tests and restarts."
   []
   (reset! previous nil)
+  (reset! previous-topics nil)
   (reset! latest-rates {})
+  (reset! latest-topics [])
   (reset! latest-cpu nil))
 
 ;; ── what goes in the page ─────────────────────────────────────────────
@@ -330,6 +419,21 @@
       "m-mem-unit"     (bytes-str (:heap reading))
       "m-mem-note"     (str (bytes-str (:heap-max reading)) " heap · " cores " cores")
 
+      "active-topics-note"
+      (let [n (TopicStats/size)]
+        (cond
+          (zero? n)               ""
+          (TopicStats/isTruncated) (str "busiest " active-topic-limit " of " (commas n) "+ tracked")
+          :else                   (str "busiest " (min active-topic-limit n) " of " (commas n))))
+      "c-connected"    (commas (:clients reading))
+      "c-parked"       (commas (:parked reading))
+      "c-subs"         (commas (:subscriptions reading))
+      "clients-note"
+      (let [{:keys [total]} (client-rows)]
+        (cond
+          (zero? total)            ""
+          (> total client-limit)   (str "first " client-limit " of " (commas total))
+          :else                    (str (commas total) " listed")))
       "t-topics"       (commas (:listed reading))
       "t-subs"         (commas (:subscriptions reading))
       "t-rate"         (commas (Math/round (double msg-rate)))}

@@ -6,7 +6,7 @@
             [clojurewerkz.triennium.mqtt :as tr]
             [mqttkat.events :as events])
   (:import [java.util.concurrent.atomic LongAdder]
-           [org.mqttkat MqttStat MqttReasonCode]
+           [org.mqttkat MqttStat MqttReasonCode TopicStats]
            [java.nio.channels SelectionKey]
            [org.mqttkat.server Connection MqttServer]
            [org.mqttkat.packages MqttPublish MqttDisconnect
@@ -470,9 +470,16 @@
           (swap! *subscriber-trie* trie-insert (:topic-filter topic)
                  {:client-key client-key :qos (:qos topic) :topic-filter (:topic-filter topic)})))
       (log/trace "client-id:" client-id)
-      (swap! *clients* assoc client-key client)
+      ;; Stamped on the resumed connection, not carried over from the one that
+      ;; went away: the console shows how long this connection has been up.
+      (swap! *clients* assoc client-key (assoc client :connected-at (System/currentTimeMillis)))
       (swap! *clients* dissoc client-id))
-    (let [client (dissoc msg :packet-type :client-key)
+    (let [client (-> (dissoc msg :packet-type :client-key)
+                     ;; When this connection was accepted. The console has no
+                     ;; other way to say how long a client has been here:
+                     ;; :last-active exists only for clients that asked for a
+                     ;; keep alive, so it is nil for most of them.
+                     (assoc :connected-at (System/currentTimeMillis)))
           client-added (update-in client [:subscribed-topics] (fnil conj #{}) )]
       ;; §3.1.2.4: connecting with CleanSession 1 discards any session stored
       ;; under this client-id. Without this the parked entry, its offline
@@ -1636,6 +1643,9 @@
 
 (defn- publish-resolved [{:keys [topic qos retain? payload properties] :as msg}]
   (log/debug "PUBLISH:" (dissoc msg :client-key))
+  ;; Counted once per publish, not once per subscriber: this is how busy the
+  ;; topic is, not how much fan-out it caused.
+  (TopicStats/record topic)
   (log/trace "Matched Keys:" (matching-subscribers topic))
   ;(log/trace (str "valid publish: " (s/valid? :mqtt/publish msg)))
   ;(s/explain :mqtt/publish msg)

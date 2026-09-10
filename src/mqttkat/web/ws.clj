@@ -22,13 +22,25 @@
     (Long/parseLong p)
     1000))
 
-(def history-size
-  "Samples kept for the charts — two minutes at one a second.
+(def retention-minutes
+  "How much chart history the broker keeps, in minutes.
+   -Dmqttkat.wsHistoryMinutes=N.
 
-   Kept here rather than in the browser so a page that has just opened draws a
-   populated chart instead of one that fills in from the left over two
-   minutes."
-  120)
+   Kept on the server rather than in the browser so a page that has just opened
+   draws a populated chart instead of one that fills in from the left. That is
+   also why it is worth having more than a couple of minutes of it: a tab
+   opened after something interesting happened can still see it, which two
+   minutes never allowed.
+
+   The cost is a snapshot on connect proportional to this and a little heap:
+   one small map per sample, thirty minutes of them at one a second."
+  (if-let [p (System/getProperty "mqttkat.wsHistoryMinutes")]
+    (Long/parseLong p)
+    30))
+
+(def history-size
+  "Samples kept for the charts, derived from the retention and the interval."
+  (max 1 (quot (* retention-minutes 60000) sample-interval-ms)))
 
 (def event-log-size
   "How many broker events the 'recent events' list remembers."
@@ -47,7 +59,11 @@
    that it had gone."
   100)
 
-(defonce ^:private sockets (atom #{}))
+(defonce ^:private sockets
+  ;; channel -> the page it belongs to, as a keyword. What goes over a socket
+  ;; depends on the page: the topic table and the client list each live on one
+  ;; page only. A comment rather than a docstring: defonce takes none.
+  (atom {}))
 (defonce ^:private history (atom []))
 (defonce ^:private event-log (atom []))
 (defonce ^:private ticker (atom nil))
@@ -64,41 +80,72 @@
 
 (defn broadcast!
   "Send to every open socket. A send that fails takes that socket out rather
-   than the broadcast: one dead browser must not stop the others updating."
+   than the broadcast: one dead browser must not stop the others updating.
+
+   `payload` is a function of the page, so a message is built once per distinct
+   page rather than once per browser — three at most, and usually one."
   [payload]
-  (doseq [ch @sockets]
-    (try
-      (http/send! ch payload)
-      (catch Throwable t
-        (log/debug t "dropping a websocket that could not be written to")
-        (swap! sockets disj ch)))))
+  (let [open @sockets
+        by-page (into {} (map (fn [page] [page (payload page)])) (distinct (vals open)))]
+    (doseq [[ch page] open]
+      (try
+        (http/send! ch (get by-page page))
+        (catch Throwable t
+          (log/debug t "dropping a websocket that could not be written to")
+          (swap! sockets dissoc ch))))))
+
+(defn- page-of
+  "Which page a socket belongs to, from ?page= on the websocket URL.
+
+   Anything unrecognised is the overview, which is the page that wants least —
+   an unknown page getting the smallest payload is the safe way round."
+  [request]
+  (case (second (re-find #"(?:^|&)page=([^&]*)" (or (:query-string request) "")))
+    "topics"  :topics
+    "clients" :clients
+    :overview))
 
 (defn snapshot
   "What a page needs to be completely up to date the moment it connects: the
-   readings, the chart history behind them, and the events already logged."
-  []
+   readings, the chart history behind them, and the events already logged.
+
+   Plus whichever table that page has: the topic list or the client list. Each
+   lives on one page only, so sending both to all three would be idle bandwidth
+   on two of them."
+  [page]
   (let [now (state/current)]
-    {:event    "snapshot"
-     :interval sample-interval-ms
-     :fields   (state/fields now)
-     :history  @history
-     :events   (recent-events)}))
+    (cond-> {:event     "snapshot"
+             :interval  sample-interval-ms
+             ;; So the page can offer windows it can actually fill, rather than
+             ;; hard-coding a guess at what the server keeps.
+             :retention (* history-size sample-interval-ms)
+             :fields    (state/fields now)
+             :history   @history
+             :events    (recent-events)}
+      (= page :topics)  (assoc :topics (:topics now))
+      (= page :clients) (assoc :clients (:rows (state/client-rows))))))
 
 (defn handler [request]
-  (http/as-channel request
-                   {:on-open  (fn [ch]
-                                (swap! sockets conj ch)
-                                (http/send! ch (json/generate-string (snapshot))))
-                    :on-close (fn [ch _status]
-                                (swap! sockets disj ch))}))
+  (let [page (page-of request)]
+    (http/as-channel request
+                     {:on-open  (fn [ch]
+                                  (swap! sockets assoc ch page)
+                                  (http/send! ch (json/generate-string (snapshot page))))
+                      :on-close (fn [ch _status]
+                                  (swap! sockets dissoc ch))})))
 
 (defn- tick! []
   (let [reading (state/sample!)
         point   (remember! (state/sample-point reading))]
     (when (seq @sockets)
-      (broadcast! (json/generate-string {:event  "tick"
-                                         :fields (state/fields reading)
-                                         :sample point})))))
+      (broadcast!
+       (fn [page]
+         (json/generate-string
+          (cond-> {:event  "tick"
+                   :fields (state/fields reading)
+                   :sample point}
+            (= page :topics)  (assoc :topics (:topics reading))
+            (= page :clients) (assoc :clients (:rows (state/client-rows))))))))))
 
 (defn- describe
   "One line for the events list. The broker emits keywords and ids; turning
@@ -124,10 +171,12 @@
     ;; holes in it.
     (when (>= (- now sent) min-event-gap-ms)
       (swap! last-event assoc event now)
-      (broadcast! (json/generate-string
-                   {:event  (name event)
-                    :fields (state/fields (state/current))
-                    :entry  entry})))))
+      (let [payload (json/generate-string
+                     {:event  (name event)
+                      :fields (state/fields (state/current))
+                      :entry  entry})]
+        ;; The same for every page: an event is a reading, not a table.
+        (broadcast! (constantly payload))))))
 
 (defn start!
   "Begin sampling and forwarding. Idempotent."
@@ -153,9 +202,9 @@
     (when (instance? clojure.lang.Atom running)
       (reset! running false)))
   (reset! ticker nil)
-  (doseq [ch @sockets]
+  (doseq [ch (keys @sockets)]
     (try (http/close ch) (catch Throwable _ nil)))
-  (reset! sockets #{})
+  (reset! sockets {})
   (reset! last-event {})
   (state/forget!))
 
