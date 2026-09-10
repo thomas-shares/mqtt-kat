@@ -47,7 +47,9 @@
    :progress-ms 5000
    :drain-ms 5000
    :max-drain-ms 300000
-   :source-ips 0})
+   :source-ips 0
+   :churn 1
+   :resubscribe 1})
 
 (def ^:private option-doc
   [["--host HOST"          "broker host (localhost)"]
@@ -64,7 +66,9 @@
    ["--window N"           "unacknowledged publishes allowed per publisher (100)"]
    ["--drain-ms N"         "quiet period that counts as fully drained (5000)"]
    ["--max-drain-ms N"     "cap on the whole drain, however much is still arriving (300000)"]
-   ["--source-ips N"       "spread clients over N source addresses; 0 to choose automatically"]])
+   ["--source-ips N"       "spread clients over N source addresses; 0 to choose automatically"]
+   ["--churn N"            "subscribers reconnected per second, 0 to disable (1)"]
+   ["--resubscribe N"      "subscription cycles per second, 0 to disable (1)"]])
 
 (defn parse-args
   "`--key value` pairs. Hand-rolled rather than pulling in tools.cli for a
@@ -121,6 +125,16 @@
 ;; ── the run ───────────────────────────────────────────────────────────
 
 (defn- topic-name [i] (str "load/" i))
+
+(defn churn-pool-size
+  "How many subscribers rotate, for a given cycle rate.
+
+   Ten seconds' worth, and never fewer than four: a client wants long enough to
+   connect, subscribe and be delivered to before its turn comes round again, or
+   the run measures reconnection and nothing else. Sized on whichever of the two
+   rates is higher, since both draw on the same pool."
+  ^long [^double per-second]
+  (max 4 (long (Math/ceil (* 10.0 per-second)))))
 
 (defn- open-pool!
   "Open `n` clients and wait for all their CONNACKs at once, rather than a
@@ -274,7 +288,7 @@
 (defn report
   "Everything the run measured. Returns the map as well as printing it, so a
    test can assert on it."
-  [{:keys [opts counts service response ack elapsed-ms expected outstanding
+  [{:keys [opts counts service response ack elapsed-ms expected outstanding churn
            lateness-us blocked-us burst ended setup-ms total-ms drain]}]
   (let [attempted (:attempted counts 0)
         published (:published counts 0)
@@ -287,6 +301,7 @@
         all-secs  (max 0.001 (/ (double (or total-ms elapsed-ms)) 1000.0))
         payload   (max (long (:size opts)) lc/header-bytes)
         result {:opts opts :counts counts :expected expected :outstanding outstanding
+                :churn churn
                 :elapsed-ms elapsed-ms :ended (or ended :finished) :setup-ms setup-ms
                 :publish-rate (/ (double published) secs)
                 :deliver-rate (/ (double received) all-secs)
@@ -305,8 +320,12 @@
     (println)
     (println "  run")
     (println (format "    broker      %s:%d" (:host opts) (:port opts)))
-    (println (format "    clients     %d publishers, %d subscribers over %d topics"
-                     (:publishers opts) (:subscribers opts) (:topics opts)))
+    (println (format "    clients     %d publishers, %d subscribers over %d topics%s"
+                     (:publishers opts) (:subscribers opts) (:topics opts)
+                     (if churn
+                       (format ", plus %d cycling (%s/s reconnect, %s/s resubscribe)"
+                               (:pool-size churn) (:churn opts) (:resubscribe opts))
+                       "")))
     (println (format "    messages    QoS %d, %d byte payloads, window %d"
                      (:qos opts) (:size opts) (:window opts)))
     (println (format "    target      %s%s"
@@ -352,6 +371,22 @@
     (println (latency-line "service" service))
     (println (latency-line "response" response))
     (when ack (println (latency-line "ack" ack)))
+    (when churn
+      (println)
+      (println "  cycling subscribers")
+      (println (format "    %-14s %d over the run, %d in the pool"
+                       "reconnects" (:cycles churn) (:pool-size churn)))
+      ;; The acks are the point of reporting the resubscribes at all: a
+      ;; subscribe the broker never answered is a subscription that silently
+      ;; is not there, and the only other sign would be a quiet client.
+      (println (format "    %-14s %d, %d SUBACK, %d UNSUBACK"
+                       "resubscribes" (:resubs churn)
+                       (:subacks churn) (:unsubacks churn)))
+      ;; Deliberately outside delivered/expected above. These clients miss
+      ;; whatever is published while they are away, which is the point of them
+      ;; — counting that as a shortfall would make the ratio meaningless.
+      (println (format "    %-14s %d (not counted in delivered, see above)"
+                       "received" (:received churn))))
     (println)
     ;; Printed whether or not it is bad. A number that only appears when
     ;; something is wrong is a number nobody learns to read.
@@ -421,6 +456,119 @@
                                      (:received now) (per-sec :received)))
                     (recur now-at now))))))))
 
+(defn- cycling!
+  "Keep a pool of subscribers moving, for as long as `running`.
+
+   Two things happen to them, on independent schedules:
+
+     * a reconnect, at `churn` a second — the oldest is closed and a fresh
+       client connects and subscribes in its place;
+     * a resubscribe, at `resubscribe` a second — one stays connected and
+       unsubscribes, then subscribes again on a different topic.
+
+   The second is the one that has the broker mutating its subscription trie
+   while the fan-out is walking it. A reconnect does that too, but wrapped in a
+   whole connection lifecycle; this isolates it.
+
+   Both run on one thread, taking whichever is due next. That makes the two
+   schedules independent without making them concurrent — otherwise a
+   resubscribe could land on the client a reconnect is halfway through closing.
+
+   These are a pool of their own, additional to --subscribers, and they count
+   into their own counters. That is the whole reason the delivery ratio still
+   means something: it is publishes times the subscribers on that topic, and a
+   subscriber that was away, or unsubscribed, for part of the run has no
+   business in that sum. Counting it would turn an exact 1.0000 into a number
+   that drifts for a reason nobody could distinguish from a lost message.
+
+   So the static pool answers whether the broker delivered everything it owed,
+   and this pool answers whether it stayed upright while clients came and went."
+  ;; No primitive hints: Clojure only supports them on functions of four
+  ;; arguments or fewer, and this has seven. Coerced on the way in instead.
+  [opts shared running topics qos churn resubscribe]
+  (let [topics    (long topics)
+        churn     (double churn)
+        resub     (double resubscribe)
+        pool-size (churn-pool-size (max churn resub))
+        next-id   (java.util.concurrent.atomic.AtomicLong. 0)
+        cycles    (java.util.concurrent.atomic.LongAdder.)
+        resubs    (java.util.concurrent.atomic.LongAdder.)
+        open-one  (fn []
+                    (let [i (.getAndIncrement next-id)
+                          t (mod i topics)
+                          c (lc/open! (assoc shared
+                                             :host (:host opts) :port (:port opts)
+                                             :client-id (str "load-churn-" i)
+                                             :index (int t)
+                                             :window (:window opts)))]
+                      (when (lc/await-connack c 30000)
+                        (lc/subscribe! c (topic-name t) qos)
+                        (lc/await-suback c 30000))
+                      ;; The topic travels with the client: a resubscribe has to
+                      ;; know what to unsubscribe from, and it moves.
+                      (atom {:client c :topic (topic-name t)})))
+        live      (atom (into clojure.lang.PersistentQueue/EMPTY
+                              (repeatedly pool-size open-one)))
+        ;; nil for a disabled schedule, never a sentinel deadline. This was
+        ;; Long/MAX_VALUE, and `now + Long/MAX_VALUE` overflows to a negative
+        ;; number — so a disabled schedule looked permanently overdue, the loop
+        ;; spun on it, and the *enabled* one never fired. --resubscribe 0
+        ;; reported zero reconnects with churn on, which is what caught it.
+        period    (fn [rate] (when (pos? rate) (long (/ 1000.0 rate))))
+        due-at    (fn [rate] (some->> (period rate) (+ (System/currentTimeMillis))))]
+    (.start (Thread/ofVirtual)
+            ^Runnable
+            (fn []
+              (try
+                (loop [next-churn (due-at churn)
+                       next-resub (due-at resub)]
+                  (when (and (.get ^AtomicBoolean running)
+                             (or next-churn next-resub))
+                    (let [due  (if (and next-churn next-resub)
+                                 (min next-churn next-resub)
+                                 (or next-churn next-resub))
+                          wait (- (long due) (System/currentTimeMillis))]
+                      (when (pos? wait) (Thread/sleep wait))
+                      (cond
+                        (not (.get ^AtomicBoolean running)) nil
+
+                        (and next-churn (or (nil? next-resub)
+                                            (<= (long next-churn) (long next-resub))))
+                        (do
+                            ;; Oldest out, replacement in. Closing first keeps
+                            ;; the pool at its size rather than letting it
+                            ;; breathe, so the load the broker sees is steady.
+                            (let [old (peek @live)]
+                              (swap! live pop)
+                              (try (lc/close! (:client @old)) (catch Exception _ nil))
+                              (swap! live conj (open-one))
+                              (.increment cycles))
+                            (recur (due-at churn) next-resub))
+
+                        :else
+                        (do
+                            ;; A client that stays connected and changes what it
+                            ;; is subscribed to. A different topic rather than
+                            ;; the same one, so the trie really does lose an
+                            ;; entry and gain another somewhere else.
+                            (when-let [holder (peek @live)]
+                              (let [{:keys [client topic]} @holder
+                                    next-topic (topic-name (rand-int topics))]
+                                (try
+                                  (lc/unsubscribe! client topic)
+                                  (lc/subscribe! client next-topic qos)
+                                  (reset! holder {:client client :topic next-topic})
+                                  (.increment resubs)
+                                  (catch Exception _ nil))))
+                            ;; Rotated so the same client is not the only one
+                            ;; ever resubscribed.
+                            (swap! live (fn [q] (conj (pop q) (peek q))))
+                            (recur next-churn (due-at resub)))))))
+                (catch InterruptedException _ (Thread/currentThread))
+                (catch Throwable t
+                  (println "  cycling stopped:" (.getMessage t))))))
+    {:cycles cycles :resubs resubs :live live :pool-size pool-size}))
+
 (defn execute
   "Open the pools, publish, wait for the tail, report.
 
@@ -464,6 +612,30 @@
                    (throw (ex-info (str "no SUBACK for " (:client-id c)) {}))))
           _    (println (format "    subscribed to %d topics in %d ms"
                                 topics (- (System/currentTimeMillis) t1)))
+          ;; Its own counters and histograms: see churn!. Nothing these
+          ;; clients receive may reach the exact delivery ratio.
+          churn-rate (double (or (:churn opts) 0))
+          resub-rate (double (or (:resubscribe opts) 0))
+          ;; Its own counters and histograms: see cycling!. Nothing these
+          ;; clients receive may reach the exact delivery ratio. :subacks and
+          ;; :unsubacks are only on this map, so the broker's answers to the
+          ;; resubscribes are counted without adding two always-zero lines to
+          ;; the counters block of every other run.
+          churn-shared (when (or (pos? churn-rate) (pos? resub-rate))
+                         {:counters (assoc (stats/counters)
+                                           :subacks (LongAdder.)
+                                           :unsubacks (LongAdder.))
+                          :service-latency (stats/histogram)
+                          :response-latency (stats/histogram)
+                          :ack-latency (stats/histogram)})
+          churn (when churn-shared
+                  (let [t (System/currentTimeMillis)
+                        c (cycling! opts churn-shared running topics qos
+                                    churn-rate resub-rate)]
+                    (println (format "    %d cycling subscribers connected in %d ms (%s/s reconnect, %s/s resubscribe)"
+                                     (:pool-size c) (- (System/currentTimeMillis) t)
+                                     (:churn opts) (:resubscribe opts)))
+                    c))
           t2   (System/currentTimeMillis)
           pubs (open-pool! opts "load-pub" publishers shared)
           _    (println (format "    %d publishers connected in %d ms"
@@ -504,7 +676,15 @@
                       expected (reduce + 0 (map (fn [t] (* (.sum ^LongAdder (aget published-per-topic (int t)))
                                                            (long (nth subs-per-topic t))))
                                                 (range topics)))
-                      outstanding (reduce + 0 (map lc/outstanding pubs))]
+                      outstanding (reduce + 0 (map lc/outstanding pubs))
+                      churn-report (when churn
+                                     (let [cs (stats/read-counters (:counters churn-shared))]
+                                       {:cycles (.sum ^LongAdder (:cycles churn))
+                                        :resubs (.sum ^LongAdder (:resubs churn))
+                                        :pool-size (:pool-size churn)
+                                        :received (:received cs)
+                                        :subacks (:subacks cs)
+                                        :unsubacks (:unsubacks cs)}))]
                   (report {:opts opts
                            :counts (stats/read-counters counters)
                            :service (stats/snapshot service)
@@ -513,6 +693,7 @@
                            :elapsed-ms elapsed
                            :expected expected
                            :outstanding outstanding
+                           :churn churn-report
                            :lateness-us (.sum lateness)
                            :blocked-us (.sum blocked)
                            :burst (burst-size interval-ns)

@@ -14,7 +14,7 @@
            [org.mqttkat MqttHandler]
            [org.mqttkat.client MqttClient]
            [org.mqttkat.packages MqttConnect MqttDisconnect MqttPubAck MqttPubComp
-            MqttPublish MqttPubRec MqttPubRel MqttSubscribe]))
+            MqttPublish MqttPubRec MqttPubRel MqttSubscribe MqttUnsubscribe]))
 
 (set! *warn-on-reflection* true)
 
@@ -116,7 +116,13 @@
 (defn- handle [client msg]
   (case (:packet-type msg)
     :CONNACK  (.countDown ^CountDownLatch (:connack client))
-    :SUBACK   (.countDown ^CountDownLatch (:suback client))
+    ;; The latch is one-shot, for the subscribe at setup. The counter is what
+    ;; the cycling pool reads, and it is bumped on every SUBACK. bump! is
+    ;; nil-safe on a missing key, so an ordinary client — whose counters have
+    ;; no :subacks — pays nothing for this.
+    :SUBACK   (do (.countDown ^CountDownLatch (:suback client))
+                  (stats/bump! (:counters client) :subacks))
+    :UNSUBACK (stats/bump! (:counters client) :unsubacks)
     :PUBLISH  (on-publish client msg)
     ;; Subscriber side of QoS 2: the broker's PUBREL closes it out.
     :PUBREL   (send! client (MqttPubComp/encode {:packet-type :PUBCOMP
@@ -166,6 +172,15 @@
   (send! client (MqttSubscribe/encode {:packet-type :SUBSCRIBE
                                        :packet-identifier 1
                                        :topics [{:qos qos :topic-filter topic}]})))
+
+(defn unsubscribe!
+  "Drop `topic`. For the cycling pool, which subscribes and unsubscribes while
+   the run is going so the broker is mutating its trie under the fan-out rather
+   than only at setup."
+  [client topic]
+  (send! client (MqttUnsubscribe/encode {:packet-type :UNSUBSCRIBE
+                                         :packet-identifier 2
+                                         :topics [topic]})))
 
 (defn await-suback [client ^long ms]
   (.await ^CountDownLatch (:suback client) ms TimeUnit/MILLISECONDS))

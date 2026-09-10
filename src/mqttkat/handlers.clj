@@ -345,7 +345,7 @@
 
 (defn add-timer!
   [key time]
-  (log/trace "adding client to timer" time " and key:   "key)
+  (log/trace "adding client to timer" time " and key:   " key)
   (let [time-out (* 1500 time)]
     ;; Stamp liveness BEFORE scheduling. The job's initial delay starts running
     ;; the moment at/every is called, so a stamp taken afterwards leaves the
@@ -354,7 +354,7 @@
     (swap! *clients* assoc-in [key :last-active] (volatile! (System/currentTimeMillis)))
     (swap! *clients* assoc-in [key :timer]
            (at/every time-out #(check-timer key time-out) my-pool :initial-delay time-out)))
-  (log/trace @*clients*))
+  #_(log/trace @*clients*))
 
 (defn remove-timer! [key]
   (when-let [timer (get-in @*clients* [key :timer])]
@@ -480,7 +480,7 @@
                      ;; :last-active exists only for clients that asked for a
                      ;; keep alive, so it is nil for most of them.
                      (assoc :connected-at (System/currentTimeMillis)))
-          client-added (update-in client [:subscribed-topics] (fnil conj #{}) )]
+          client-added (update-in client [:subscribed-topics] (fnil conj #{}))]
       ;; §3.1.2.4: connecting with CleanSession 1 discards any session stored
       ;; under this client-id. Without this the parked entry, its offline
       ;; subscriptions and its queued messages stayed for the life of the
@@ -489,16 +489,16 @@
       (when (contains? @*clients* client-id)
         (discard-session! client-id))
       (swap! *clients* assoc client-key client-added)))
- (register-live! client-id client-key)
- (MqttStat/clientConnected)
- ;; The id goes with the event so a watcher can say *which* client, which is
- ;; the difference between a console that reports a number and one that
- ;; reports what happened.
- (events/emit! {:event     :client-connected
-                :client-id client-id
-                :clients   (MqttStat/connectedClients)})
- (log/trace "ADD: Subscriber trie POST:" @*subscriber-trie*)
- (log/trace "ADD: Clients:" @*clients*))
+  (register-live! client-id client-key)
+  (MqttStat/clientConnected)
+  ;; The id goes with the event so a watcher can say *which* client, which is
+  ;; the difference between a console that reports a number and one that
+  ;; reports what happened.
+  (events/emit! {:event     :client-connected
+                 :client-id client-id
+                 :clients   (MqttStat/connectedClients)})
+  (log/trace "ADD: Subscriber trie POST:" @*subscriber-trie*)
+  (log/trace "ADD: Clients:" @*clients*))
 
 
 ;; ── topic aliases (§3.3.2.3.4) ───────────────────────────────────────────
@@ -568,25 +568,25 @@
    (if (zero? maximum)
      {:topic topic}
      (let [[before after]
-            (swap-vals! topic-aliases update client-key
-                        (fn [{:keys [outbound assigned] :or {assigned 0} :as entry}]
-                          (if (or (get outbound topic) (>= (long assigned) maximum))
-                            entry
-                            (-> entry
-                                (assoc-in [:outbound topic] (inc (long assigned)))
-                                (assoc :assigned (inc (long assigned)))))))
-            bound (get-in after [client-key :outbound topic])]
-        (cond
-          ;; The allowance was already spent on other topics.
-          (nil? bound) {:topic topic}
-          ;; Fresh exactly when this swap! is what created it — which is what
-          ;; the before/after pair answers and a bare "is it the highest
-          ;; number" test does not: with two aliases in play, re-publishing
-          ;; the most recently assigned topic would spell its name out again
-          ;; on every message, and the alias would never save anything.
-          (nil? (get-in before [client-key :outbound topic]))
-          {:topic topic :topic-alias bound}
-          :else {:topic "" :topic-alias bound})))))
+           (swap-vals! topic-aliases update client-key
+                       (fn [{:keys [outbound assigned] :or {assigned 0} :as entry}]
+                         (if (or (get outbound topic) (>= (long assigned) maximum))
+                           entry
+                           (-> entry
+                               (assoc-in [:outbound topic] (inc (long assigned)))
+                               (assoc :assigned (inc (long assigned)))))))
+           bound (get-in after [client-key :outbound topic])]
+       (cond
+         ;; The allowance was already spent on other topics.
+         (nil? bound) {:topic topic}
+         ;; Fresh exactly when this swap! is what created it — which is what
+         ;; the before/after pair answers and a bare "is it the highest
+         ;; number" test does not: with two aliases in play, re-publishing
+         ;; the most recently assigned topic would spell its name out again
+         ;; on every message, and the alias would never save anything.
+         (nil? (get-in before [client-key :outbound topic]))
+         {:topic topic :topic-alias bound}
+         :else {:topic "" :topic-alias bound})))))
 
 (defn with-topic-alias
   "Apply an alias decision to an encoded-shaped PUBLISH.
@@ -836,8 +836,8 @@
          (swap-vals! (outbound-atom client-id)
                      (fn [state]
                        (if-let [msg (peek (:pending state))]
-                        ;; from-pending?: this message *is* the head, so the
-                        ;; queue being non-empty must not block it.
+                         ;; from-pending?: this message *is* the head, so the
+                         ;; queue being non-empty must not block it.
                          (let [reserved (reserve state msg true window)]
                            (if (identical? reserved state)
                              state                    ; window still full
@@ -1083,18 +1083,18 @@
     ;; instead of one per subscriber.
     matches
     (let [merged
-        (reduce
-         (fn [acc subscription]
-           (if (:share-group subscription)
-             ;; Shared subscriptions are never merged: a client subscribed both
-             ;; ordinarily and as a group member has asked for the message
-             ;; twice, in two capacities (§4.8.2). Keyed by the subscription
-             ;; itself so each stands alone.
-             (assoc! acc subscription (delivery-of subscription nil))
-             (let [k (:client-key subscription)]
-               (assoc! acc k (delivery-of subscription (get acc k))))))
-         (transient {})
-         matches)]
+          (reduce
+           (fn [acc subscription]
+             (if (:share-group subscription)
+               ;; Shared subscriptions are never merged: a client subscribed both
+               ;; ordinarily and as a group member has asked for the message
+               ;; twice, in two capacities (§4.8.2). Keyed by the subscription
+               ;; itself so each stands alone.
+               (assoc! acc subscription (delivery-of subscription nil))
+               (let [k (:client-key subscription)]
+                 (assoc! acc k (delivery-of subscription (get acc k))))))
+           (transient {})
+           matches)]
       (vec (vals (persistent! merged))))))
 
 (defn delivery-retain?
@@ -1222,36 +1222,36 @@
   ;; stamped at queueing time would be a number the new connection never
   ;; agreed to.
   (let [properties (expiring-properties properties queued-at)]
-   (if (= ::expired properties)
-    ;; §3.3.2.3.3: no longer worth delivering. Treated exactly as a packet over
-    ;; the maximum size below — discarded, and the identifier given back.
-    (do (log/debug "discarding an expired publish for" key)
-        (.increment ^LongAdder MqttStat/droppedMessages)
-        false)
-    (let [buf (MqttPublish/encode
-                (with-topic-alias
-                  (publish-for (protocol-version-of key)
-                               {:packet-type       :PUBLISH
-                                :payload           payload
-                                :topic             topic
-                                :qos               qos
-                                :retain?           (boolean retain?)
-                                :duplicate?        (boolean duplicate?)
-                                :packet-identifier packet-identifier}
-                               properties
-                               subscription-identifiers)
-                  (alias-outbound key topic)))]
-    ;; §3.1.2.11.4: too big for what this client agreed to receive, so it is
-    ;; discarded and the server behaves as if delivery had completed. Reported
-    ;; back so the caller can give the packet identifier up — the identifier is
-    ;; reserved before the packet is built, and holding on to one per oversized
-    ;; message would fill the client's window with things never sent.
-      (if (too-large-for? key (.remaining ^java.nio.ByteBuffer buf))
-        (do (log/debug "discarding a publish over the maximum packet size for" key)
-            (.increment ^LongAdder MqttStat/droppedMessages)
-            false)
-        (do (send-buffer [key] buf)
-            true))))))
+    (if (= ::expired properties)
+      ;; §3.3.2.3.3: no longer worth delivering. Treated exactly as a packet over
+      ;; the maximum size below — discarded, and the identifier given back.
+      (do (log/debug "discarding an expired publish for" key)
+          (.increment ^LongAdder MqttStat/droppedMessages)
+          false)
+      (let [buf (MqttPublish/encode
+                 (with-topic-alias
+                   (publish-for (protocol-version-of key)
+                                {:packet-type       :PUBLISH
+                                 :payload           payload
+                                 :topic             topic
+                                 :qos               qos
+                                 :retain?           (boolean retain?)
+                                 :duplicate?        (boolean duplicate?)
+                                 :packet-identifier packet-identifier}
+                                properties
+                                subscription-identifiers)
+                   (alias-outbound key topic)))]
+        ;; §3.1.2.11.4: too big for what this client agreed to receive, so it is
+        ;; discarded and the server behaves as if delivery had completed. Reported
+        ;; back so the caller can give the packet identifier up — the identifier is
+        ;; reserved before the packet is built, and holding on to one per oversized
+        ;; message would fill the client's window with things never sent.
+        (if (too-large-for? key (.remaining ^java.nio.ByteBuffer buf))
+          (do (log/debug "discarding a publish over the maximum packet size for" key)
+              (.increment ^LongAdder MqttStat/droppedMessages)
+              false)
+          (do (send-buffer [key] buf)
+              true))))))
 
 (defn- connection-of ^Connection [key]
   (when key
@@ -1385,8 +1385,8 @@
       (vreset! last-active (System/currentTimeMillis)))))
 
 (defn send-buffer [keys buf]
-  (log/trace "sending buffer from clj")
-  (log/trace  keys)
+  #_(log/trace "sending buffer from clj")
+  #_(log/trace  keys)
   ;; No update-timestamps here on purpose: keep alive measures the time since
   ;; a packet was RECEIVED from the client, so writing to it proves nothing.
   ;; mqttkat.server/default-handler-fn marks liveness on the inbound path.
@@ -1454,39 +1454,39 @@
           ;; rather than an identical map built per subscriber purely to be a
           ;; grouping key. Identity makes the hashing trivial as well.
           plain     {:topic topic}]
-     (doseq [[[version retain-flag identifiers addressing] group]
-            (group-by (fn [subscription]
-                        (let [k      (:client-key subscription)
-                              client (get clients k)
-                              alias-max (long (or (get-in client [:properties :topic-alias-maximum]) 0))]
-                          [(long (get client :protocol-version 4))
-                           (delivery-retain? subscription retain published)
-                           (identifiers-of subscription)
-                           ;; Subscribers that agreed to no aliases — every
-                           ;; 3.1.1 one and every version 5 one that did not
-                           ;; ask — all answer `plain` and stay in the single
-                           ;; group they were in before aliases existed.
-                           (if (zero? alias-max)
-                             plain
-                             (alias-outbound k topic alias-max))]))
-                      keys)]
-      (send-encoded-to group
-                             (MqttPublish/encode
-                              (with-topic-alias
-                                (publish-for version
-                                             {:packet-type :PUBLISH
-                                              :payload     payload
-                                              :topic       topic
-                                              :qos         0
-                                              :retain?     retain-flag}
-                                             properties
-                                             identifiers)
-                                addressing))
-                             ;; nil for a will or a replayed retained message:
-                             ;; the broker is the publisher there and there is
-                             ;; nothing to slow down.
-                             publisher-key
-                             clients)))))
+      (doseq [[[version retain-flag identifiers addressing] group]
+              (group-by (fn [subscription]
+                          (let [k      (:client-key subscription)
+                                client (get clients k)
+                                alias-max (long (or (get-in client [:properties :topic-alias-maximum]) 0))]
+                            [(long (get client :protocol-version 4))
+                             (delivery-retain? subscription retain published)
+                             (identifiers-of subscription)
+                             ;; Subscribers that agreed to no aliases — every
+                             ;; 3.1.1 one and every version 5 one that did not
+                             ;; ask — all answer `plain` and stay in the single
+                             ;; group they were in before aliases existed.
+                             (if (zero? alias-max)
+                               plain
+                               (alias-outbound k topic alias-max))]))
+                        keys)]
+        (send-encoded-to group
+                         (MqttPublish/encode
+                          (with-topic-alias
+                            (publish-for version
+                                         {:packet-type :PUBLISH
+                                          :payload     payload
+                                          :topic       topic
+                                          :qos         0
+                                          :retain?     retain-flag}
+                                         properties
+                                         identifiers)
+                            addressing))
+                         ;; nil for a will or a replayed retained message:
+                         ;; the broker is the publisher there and there is
+                         ;; nothing to slow down.
+                         publisher-key
+                         clients)))))
 
 (defn qos-1-send
   ;; `retain` says this is a replay to a new subscriber rather than live
@@ -1496,7 +1496,7 @@
   ;; live one its subscription asked to see as published (§3.8.3.1).
   ([keys topic msg] (qos-1-send keys topic msg false))
   ([keys topic {:keys [payload properties retain?] publisher-key :client-key :as msg} retain]
-   (log/trace "respond qos 1:" (count keys))
+   #_(log/trace "respond qos 1:" (count keys))
    (doseq [subscription keys]
      (let [key (:client-key subscription)]
        ;; No client-id means the subscriber went away between the trie lookup
@@ -1544,7 +1544,7 @@
                           MqttReasonCode/NO_MATCHING_SUBSCRIBERS))))
 
 (defn qos-1 [keys topic {:keys [client-key packet-identifier] :as msg}]
-  (log/trace  "qos 1 received... " (count keys))
+  #_(log/trace  "qos 1 received... " (count keys))
   (send-buffer [client-key]
                (MqttPubAck/encode
                 (ack-for :PUBACK client-key packet-identifier (seq keys))))
@@ -1614,7 +1614,7 @@
   ;; publisher whether anything matched. Left underscored it resolved to
   ;; clojure.core/keys — which compiles, and fails at run time.
   [keys topic {:keys [client-key packet-identifier] :as recv-msg}]
-  (log/trace "QOS 2")
+  #_(log/trace "QOS 2")
   (if (over-receive-maximum? client-key)
     ;; §4.9. Without this the broker accepts everything and answers nothing —
     ;; which is not merely impolite: the Paho conformance suite publishes one
@@ -1792,7 +1792,7 @@
 
 
 (defn puback [{:keys [packet-identifier client-key]}]
-  (log/debug "PUBACK:" packet-identifier)
+  #_(log/debug "PUBACK:" packet-identifier)
   (let [client-id (:client-id (get @*clients* client-key))]
     (if (release-packet-identifier! client-id packet-identifier)
       ;; A slot just freed, so let the next message waiting on it through.
@@ -1803,7 +1803,7 @@
                  "which was never issued to it - ignored"))))
 
 (defn pubrec [{:keys [client-key packet-identifier]}]
-  (log/debug "PUBREC:" packet-identifier)
+  #_(log/debug "PUBREC:" packet-identifier)
   (send-buffer [client-key]
                (MqttPubRel/encode
                 {:packet-type :PUBREL :packet-identifier packet-identifier})))
@@ -1811,33 +1811,33 @@
 (defn qos-2-send
   ([keys topic msg] (qos-2-send keys topic msg false))
   ([keys topic {:keys [payload properties retain?] publisher-key :client-key :as msg} retain]
-  (some-> (filter qos-0? keys)
-          (seq)
-          (qos-0 topic msg retain))
-  (some-> (filter qos-1? keys)
-          (seq)
-          (qos-1-send topic msg retain))
-  ;; Over the subscriptions rather than over their keys, and passing the
-  ;; publisher's properties on: this delivery map was written out by hand as
-  ;; topic, payload and QoS, so a QoS 2 message arrived stripped of its content
-  ;; type, response topic, correlation data and user properties, and of the
-  ;; subscription identifier the server owes it (§3.3.4). QoS 0 and 1 were
-  ;; right, which is what made it hard to see — the same publish delivered
-  ;; correctly at two QoS levels out of three.
-  (doseq [subscription (some->> (filter qos-2? keys) (seq))]
-    (let [key (:client-key subscription)]
-      (when-let [client-id (:client-id (get @*clients* key))]
-        (deliver-or-queue! key client-id
-                           {:topic topic :payload payload :qos 2
-                            :properties properties
-                            :retain? (delivery-retain? subscription retain retain?)
-                            :subscription-identifiers (identifiers-of subscription)}
-                           publisher-key))))))
+   (some-> (filter qos-0? keys)
+           (seq)
+           (qos-0 topic msg retain))
+   (some-> (filter qos-1? keys)
+           (seq)
+           (qos-1-send topic msg retain))
+   ;; Over the subscriptions rather than over their keys, and passing the
+   ;; publisher's properties on: this delivery map was written out by hand as
+   ;; topic, payload and QoS, so a QoS 2 message arrived stripped of its content
+   ;; type, response topic, correlation data and user properties, and of the
+   ;; subscription identifier the server owes it (§3.3.4). QoS 0 and 1 were
+   ;; right, which is what made it hard to see — the same publish delivered
+   ;; correctly at two QoS levels out of three.
+   (doseq [subscription (some->> (filter qos-2? keys) (seq))]
+     (let [key (:client-key subscription)]
+       (when-let [client-id (:client-id (get @*clients* key))]
+         (deliver-or-queue! key client-id
+                            {:topic topic :payload payload :qos 2
+                             :properties properties
+                             :retain? (delivery-retain? subscription retain retain?)
+                             :subscription-identifiers (identifiers-of subscription)}
+                            publisher-key))))))
 
 ;;there is no need to do
 (defn pubrel
   [{:keys [packet-identifier client-key]}]
-  (log/debug "received (PUBREL:" packet-identifier)
+  #_(log/debug "received (PUBREL:" packet-identifier)
   (send-buffer [client-key]
                (MqttPubComp/encode {:packet-type       :PUBCOMP
                                     :packet-identifier packet-identifier}))
@@ -1856,7 +1856,7 @@
     (swap! *inflight* dissoc [client-id packet-identifier])))
 
 (defn pubcomp [{:keys [packet-identifier client-key] :as msg}]
-  (log/debug "received PUBCOMP:" (dissoc msg :client-key))
+  #_(log/debug "received PUBCOMP:" (dissoc msg :client-key))
   (let [client-id (:client-id (get @*clients* client-key))]
     (if (release-packet-identifier! client-id packet-identifier)
       (drain-pending! client-key client-id)
@@ -1882,24 +1882,24 @@
   ([key] (process-retained-messages key nil))
   ([key replay-filters]
    (doseq [retained-topic (keys @*retained*)]
-    (let [subs (filter #(and (= key (:client-key %))
-                             ;; nil means "no restriction" — a reconnect
-                             ;; replaying a parked session, not a SUBSCRIBE.
-                             (or (nil? replay-filters)
-                                 (contains? replay-filters (:topic-filter %))))
-                       (matching-subscribers retained-topic))
-          subs (coalesce-subscriptions subs)]
-      (when (seq subs)
-        ;; Through retained-for-delivery, not the map: it is what applies
-        ;; §3.3.1.3's expiry and counts down §3.3.2.3.3's interval, and every
-        ;; one of the three QoS branches below needs both.
-        (when-let [{:keys [payload properties qos]} (retained-for-delivery retained-topic)]
-          (log/trace "retained payload:" payload)
-          (let [msg {:payload payload :properties properties}]
-            (case (long qos)
-              0 (qos-0 subs retained-topic msg true)
-              1 (qos-1-send subs retained-topic msg true)
-              2 (qos-2-send subs retained-topic msg true)))))))))
+     (let [subs (filter #(and (= key (:client-key %))
+                              ;; nil means "no restriction" — a reconnect
+                              ;; replaying a parked session, not a SUBSCRIBE.
+                              (or (nil? replay-filters)
+                                  (contains? replay-filters (:topic-filter %))))
+                        (matching-subscribers retained-topic))
+           subs (coalesce-subscriptions subs)]
+       (when (seq subs)
+         ;; Through retained-for-delivery, not the map: it is what applies
+         ;; §3.3.1.3's expiry and counts down §3.3.2.3.3's interval, and every
+         ;; one of the three QoS branches below needs both.
+         (when-let [{:keys [payload properties qos]} (retained-for-delivery retained-topic)]
+           (log/trace "retained payload:" payload)
+           (let [msg {:payload payload :properties properties}]
+             (case (long qos)
+               0 (qos-0 subs retained-topic msg true)
+               1 (qos-1-send subs retained-topic msg true)
+               2 (qos-2-send subs retained-topic msg true)))))))))
 
 (defn subscription-entry
   "What is stored for one subscription, in the trie and against the client.
@@ -1947,8 +1947,8 @@
     true))
 
 (defn subscribe [{:keys [client-key topics packet-identifier properties] :as msg}]
-  (log/debug "SUBSCRIBE:" (dissoc msg :client-key))
-  (log/trace "Subscribed PRE ADD:" @*subscriber-trie*)
+  #_(log/debug "SUBSCRIBE:" (dissoc msg :client-key))
+  #_(log/trace "Subscribed PRE ADD:" @*subscriber-trie*)
   (let [version    (protocol-version-of client-key)
         ;; §3.8.2.1.2: at most one, and it applies to every filter in the packet.
         identifier (first (:subscription-identifiers properties))
@@ -1981,7 +1981,7 @@
             (swap! *clients* update-in [client-key :subscribed-topics] conj entry)
             (swap! *subscriber-trie* trie-insert (:topic-filter entry)
                    (assoc entry :client-key client-key))))
-        (log/trace "subscribers POST ADD:" @*subscriber-trie*)
+        #_(log/trace "subscribers POST ADD:" @*subscriber-trie*)
         (send-buffer [client-key]
                      (MqttSubAck/encode
                       (cond-> {:packet-type       :SUBACK
@@ -2005,7 +2005,7 @@
 
 (defn unsubscribe
   [{:keys [topics client-key] :as msg}]
-  (log/debug "UNSUBSCRIBE:" (dissoc msg :client-key))
+  #_(log/debug "UNSUBSCRIBE:" (dissoc msg :client-key))
   ;(swap! subscribers remove-subsciber (:topics msg) (:client-key msg))
   ;;TODO remove message from outbound messages.. but check if this is really the case.
   (let [version (protocol-version-of client-key)

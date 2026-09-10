@@ -811,6 +811,96 @@ One thing stands out for next time. `java.util.regex.Matcher.hasMatch` and
 triennium's `split-topic` splits the topic on a regex, once per publish, to walk
 the trie. Splitting on a single character does not need a regex. Not chased.
 
+### Subscriptions that come and go too
+
+`--churn` cycles whole connections. `--resubscribe N` is the other half: a
+client that stays connected and changes what it is subscribed to, N times a
+second, one by default. It unsubscribes and subscribes again on a *different*
+topic, so the broker's trie really does lose an entry and gain one somewhere
+else rather than replacing a value in place.
+
+That is the case connection churn does not reach. A reconnect mutates the trie
+too, but wrapped in a whole connection lifecycle — accept, CONNECT, session
+setup — so if something goes wrong there it is hard to say which part did it.
+This isolates SUBSCRIBE and UNSUBSCRIBE against a live fan-out.
+
+Both draw on the same rotating pool, and both run on **one** thread taking
+whichever schedule is due next. Independent schedules without concurrency:
+otherwise a resubscribe could land on the very client a reconnect is halfway
+through closing.
+
+The report counts the broker's answers, not just the requests:
+
+```
+    reconnects     39 over the run, 50 in the pool
+    resubscribes   99, 188 SUBACK, 99 UNSUBACK
+```
+
+That arithmetic is the check. 188 is 50 initial subscribes plus 39 reconnects
+plus 99 resubscribes, and the UNSUBACKs match the resubscribes exactly — so the
+broker answered every one. A subscribe it never answered would be a
+subscription that silently is not there, and the only other sign would be a
+client that had gone quiet.
+
+**A sentinel that overflowed.** Disabled schedules started as a deadline of
+`Long/MAX_VALUE`, and `now + Long/MAX_VALUE` wraps to a negative number — so a
+disabled schedule looked permanently overdue, the loop spun on it, and the
+*enabled* one never fired. `--resubscribe 0` reported zero reconnects with churn
+switched on, which is what caught it. Disabled schedules are `nil` now, and
+"nothing scheduled" ends the loop rather than being a very distant time.
+
+### Subscribers that come and go
+
+Every run so far opened its clients, subscribed them, and left them there for
+the duration. Real brokers do not get that: clients drop, reconnect, resubscribe,
+and the subscription trie is mutated while the fan-out is walking it. None of
+that was being exercised.
+
+`--churn N` reconnects N subscribers a second, one by default, 0 to switch it
+off. Each cycle closes the oldest of a rotating pool and opens a replacement
+that connects, subscribes and starts receiving.
+
+**The cycling subscribers are a pool of their own, not the ones `--subscribers`
+names, and they count into their own counters.** That is not tidiness, it is the
+whole reason the run still means anything. The delivery ratio is
+publishes-per-topic times subscribers-on-that-topic, and it is the single most
+valuable number the generator produces — `1.0000` is how you know the broker
+lost nothing. A subscriber that was away for part of the run legitimately misses
+whatever was published while it was gone. Counted in that sum it would turn an
+exact 1.0000 into a number that drifts, and nothing about the drift would
+distinguish "this client was reconnecting" from "the broker dropped a message".
+
+So the static pool answers whether the broker delivered everything it owed, and
+the cycling pool answers whether it stayed upright while clients came and went.
+The report keeps them apart and says so:
+
+```
+    delivered     200000 in  15.00 s  (    13331/s)
+    expected      200000               (1.0000 delivered)
+
+  cycling subscribers
+    reconnects     19 over the run, 20 in the pool
+    received       99990 (not counted in delivered, see above)
+```
+
+The pool is ten seconds' worth of churn, minimum four: a client wants long
+enough to connect, subscribe and be delivered to before its turn comes round
+again, or the run measures reconnection and nothing else. Churn stops when
+publishing does, so the drain is still a drain rather than a moving target.
+
+The rotating pool is a `PersistentQueue`. It was a vector first, cycled with
+`subvec` and `conj` — which is a slow leak: `conj` on a subvec grows the vector
+underneath it and slides the window along, so the array retains every client
+ever closed. At one a second that is thousands of dead connections held for the
+life of an overnight run. The broker's pending queue is a `PersistentQueue` for
+the same reason, noted there in 20260902.
+
+Two old lessons turned up again on the way in. A `defn` taking six arguments
+cannot carry primitive hints — Clojure allows them on four or fewer — which is
+the same wall `put-header!` and `publish!` hit. And a docstring written through
+a Python heredoc had its escaped quotes unescaped on the way, closing the string
+early and producing an error about `did` not being a parameter vector.
+
 ### Notes to self
 
 * **mosquitto had quietly taken port 1883**, as a systemd service, and served
@@ -1229,6 +1319,12 @@ has no finer pacing to give; the report says so when it is doing that.
 `--rate 0` means flat out, and the report is careful to call the resulting
 number a ceiling for the generator *and* the broker together rather than a
 measurement of the broker.
+
+**`--churn`** is how many subscribers are reconnected per second, and
+**`--resubscribe`** how many unsubscribe and subscribe again without dropping
+their connection. Both default to one a second and take 0 to switch off; both
+draw on the same pool. See the 20260910 entry for why those clients are a pool
+of their own rather than the ones named by `--subscribers`.
 
 **`--window`** is the in-flight limit per publisher, MQTT 5's Receive Maximum
 by another name. Time spent waiting for a slot is reported, and it is usually
