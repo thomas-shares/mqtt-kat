@@ -753,6 +753,64 @@ second is movement the eye follows for nothing.
 Worth noticing that only running it against a live broker showed this. The
 column rendered, the tests passed, and it was empty.
 
+### Thirty-eight per cent of the broker was resolving loggers
+
+Profiled again after the outbound refactor, the back-pressure fix and the topic
+counter. The counter cost nothing measurable — 111,410 samples against 115,061
+before it existed — but something else did.
+
+**38.5% of the broker's CPU was under `clojure.tools.logging`**, at level INFO,
+with not one of those messages emitted.
+
+tools.logging expands `(log/trace ...)` into
+
+```clojure
+(let [logger (impl/get-logger *logger-factory* ns)]
+  (if (impl/enabled? logger level) ...))
+```
+
+The logger is fetched *before* the level is checked, so a disabled statement
+still pays for the lookup. And the lookup is not a map read: the factory is
+slf4j over log4j2, and log4j2 works out the calling class by walking the stack.
+Every frame under tools.logging in the profile was stack-walking machinery —
+`vframeStream`, `StackFrameInfo`, `MethodHandles::init_method_MemberName` — and
+the lock around it.
+
+Per call site, `send_buffer` was the worst at 18.7%: it logs twice and runs once
+per delivery. Then `default_handler_fn` at 9.3% and `puback` at 8.3%.
+
+Loggers are stable for the life of a namespace, so `mqttkat.logging` wraps the
+factory in a `ConcurrentHashMap` and `server/start!` installs it. Level changes
+still work — a log4j2 Logger is a live view of the configuration, which is what
+`enabled?` consults, so the test helper that silences a logger is unaffected.
+The suite proves that: it passes unchanged, including the tests that turn
+loggers off mid-run.
+
+| | before | after |
+|---|---|---|
+| under tools.logging | 38.51% | **0.40%** |
+| total samples, same work | 111,410 | **75,711** |
+
+A third of the broker's CPU, spent on messages nobody asked for. End to end,
+three interleaved pairs unprofiled, every pair positive: 247,204 against
+256,507 deliveries a second, **+3.8%**, with p99 latency down 8.7%. Less than
+the CPU saving, as ever, because this load is not purely CPU-bound — but this
+time it does move the number.
+
+Worth keeping in mind before adding a `log/trace` to anything that runs per
+message. The statement is free to *read* and was costing more than encoding the
+packets.
+
+### What is left
+
+The profile is a healthy shape now: `MqttPublish/encode` at 6.93% is the top
+frame, which is the broker doing its actual job, and G1 behind it at 5.41%.
+
+One thing stands out for next time. `java.util.regex.Matcher.hasMatch` and
+`Pattern.split` together are about 2.5%, and they are on the publish path:
+triennium's `split-topic` splits the topic on a regex, once per publish, to walk
+the trie. Splitting on a single character does not need a regex. Not chased.
+
 ### Notes to self
 
 * **mosquitto had quietly taken port 1883**, as a systemd service, and served

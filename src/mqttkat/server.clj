@@ -4,6 +4,7 @@
             [mqttkat.handlers.connect :as connect]
             [mqttkat.handlers.disconnect :as disconnect]
             [mqttkat.handlers.connack :as connack]
+            [mqttkat.logging :as logging]
             [mqttkat.profiling :as profiling]
             [mqttkat.sys :as sys]
             [mqttkat.web.server :as web]
@@ -57,6 +58,9 @@
   ([ip port]
    (start! ip port (MqttHandler. ^clojure.lang.IFn default-handler-fn 4)))
   ([ip port handler]
+   ;; Before the broker takes a connection: every log statement on the publish
+   ;; path resolves a logger, and unwrapped that is a stack walk each time.
+   (logging/install!)
    (reset! *server* (run-server ip port handler))
    ;; Here rather than at namespace load: stop! resets the pool these run on,
    ;; so the schedule belongs with the thing being started.
