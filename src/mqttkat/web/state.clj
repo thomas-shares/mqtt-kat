@@ -129,10 +129,7 @@
 (defn- inflight-count
   "Messages awaiting an acknowledgement, and those queued behind the window."
   []
-  (reduce (fn [acc [_ state]]
-            (+ acc (count (:inflight state)) (count (:pending state))))
-          0
-          @h/*outbound*))
+  (h/queued-count))
 
 (defn- subscription-count []
   (reduce + 0 (map #(count (:subscribed-topics %)) (vals @h/*clients*))))

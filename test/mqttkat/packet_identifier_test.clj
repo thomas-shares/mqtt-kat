@@ -81,7 +81,8 @@
 (deftest the-counter-wraps-and-never-yields-zero
   (fresh
    (fn []
-     (reset! h/*outbound* {"c" {:next-id (dec h/max-packet-identifier) :inflight {}}})
+     ;; An atom per client: *outbound* is the registry, not the state itself.
+     (reset! h/*outbound* {"c" (atom {:next-id (dec h/max-packet-identifier) :inflight {}})})
      (is (= h/max-packet-identifier (h/acquire-packet-identifier! "c" msg)))
      (is (= 1 (h/acquire-packet-identifier! "c" msg))
          "wraps back to 1; 0 is not a valid identifier"))))

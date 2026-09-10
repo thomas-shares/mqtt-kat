@@ -166,11 +166,12 @@
 
 (defn- queued-count
   "Messages held for clients: in flight awaiting acknowledgement, plus those
-   waiting for a window slot."
+   waiting for a window slot.
+
+   Through handlers rather than over *outbound* directly: each client's state
+   is its own atom now, and how that is shaped is not this namespace's business."
   []
-  (reduce + (map (fn [[_ state]]
-                   (+ (count (:inflight state)) (count (:pending state))))
-                 @h/*outbound*)))
+  (h/queued-count))
 
 (defn stats
   "Every $SYS topic and its value right now, as strings.

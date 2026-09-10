@@ -161,7 +161,27 @@
    is found in *clients* under its client-id as before."
   (atom {}))
 
-(def ^:dynamic *outbound* (atom {}))
+(def ^:dynamic *outbound*
+  "client-id -> an atom holding that client's outbound state.
+
+   An atom of atoms, which is the point. This used to be one atom holding every
+   client's state, and every QoS 1 publish and every PUBACK did
+   `update-in [client-id :inflight]` on it. With a couple of thousand clients
+   that is path-copying through a map of that size on each message, and since
+   every connection thread hits the same atom, CAS retries on top of it. A CPU
+   profile of a 2,200-client run put 14% of the broker's time inside
+   `clojure.lang.Atom.swap`, with acquire and release of packet identifiers
+   costing seven times what encoding the packet cost.
+
+   Now the registry is only read on the hot path — one lookup, no swap — and
+   written when a session is created or discarded. The mutation happens on the
+   client's own atom, uncontended except by its own threads, over a map holding
+   at most `inflight-window` entries.
+
+   Still keyed by client-id and not by connection, which is deliberate and
+   unchanged: §4.4 requires a persistent session's unacknowledged messages to
+   survive the connection and be redelivered on the next one."
+  (atom {}))
 (def ^:dynamic *retained* (atom {}))  ;; {:topic {:qos qos :payload payload}})
 
 (defn- wildcard-rooted?
@@ -660,6 +680,42 @@
 ;; knows what is outstanding, rather than a pool that has to be kept in step
 ;; with it.
 
+(defn- outbound-atom
+  "This client's outbound state, created on first use.
+
+   The read comes first and is what almost every call does; the swap! runs once
+   per client, on its first outstanding message."
+  [client-id]
+  (or (get @*outbound* client-id)
+      (get (swap! *outbound*
+                  (fn [registry]
+                    (if (contains? registry client-id)
+                      registry
+                      (assoc registry client-id (atom {})))))
+           client-id)))
+
+(defn- existing-outbound
+  "This client's outbound state if it has any, without creating it.
+
+   For the paths that answer a client rather than send to one — releasing an
+   identifier nobody issued must not conjure a session for a client that has
+   gone."
+  [client-id]
+  (get @*outbound* client-id))
+
+(defn queued-count
+  "Messages the broker is holding for clients: in flight awaiting an
+   acknowledgement, plus those waiting for a window slot.
+
+   Here rather than in the two places that report it, so the shape of the
+   outbound state stays this namespace's business."
+  []
+  (reduce (fn [acc a]
+            (let [state @a]
+              (+ acc (count (:inflight state)) (count (:pending state)))))
+          0
+          (vals @*outbound*)))
+
 (defn- next-identifier
   "The next free identifier for this client, or nil if there is none.
 
@@ -706,10 +762,9 @@
    fan-out."
   ([client-id msg] (acquire-packet-identifier! client-id msg inflight-window))
   ([client-id msg window]
-  (let [[before after] (swap-vals! *outbound* update client-id reserve msg false window)]
-    (when (> (count (get-in after [client-id :inflight]))
-             (count (get-in before [client-id :inflight])))
-      (get-in after [client-id :next-id])))))
+   (let [[before after] (swap-vals! (outbound-atom client-id) reserve msg false window)]
+     (when (> (count (:inflight after)) (count (:inflight before)))
+       (:next-id after)))))
 
 (defn release-packet-identifier!
   "Retire `id` for `client-id`.
@@ -719,18 +774,19 @@
    then ignored rather than acted on. That check is the whole defence against
    a client corrupting the identifier space."
   [client-id id]
-  (let [[before _] (swap-vals! *outbound* update-in [client-id :inflight] dissoc id)]
-    (get-in before [client-id :inflight id])))
+  (when-let [a (existing-outbound client-id)]
+    (let [[before _] (swap-vals! a update :inflight dissoc id)]
+      (get-in before [:inflight id]))))
 
 (defn inflight-count
   "How many messages are outstanding for `client-id`."
   [client-id]
-  (count (get-in @*outbound* [client-id :inflight])))
+  (count (:inflight (some-> (existing-outbound client-id) deref))))
 
 (defn pending-count
   "How many messages are waiting for a window slot for `client-id`."
   [client-id]
-  (count (get-in @*outbound* [client-id :pending])))
+  (count (:pending (some-> (existing-outbound client-id) deref))))
 
 (defn queue-pending!
   "Hold `msg` for `client-id` until a window slot frees up.
@@ -740,7 +796,7 @@
    left: it has not been delivered and nothing is pretending otherwise."
   [client-id msg]
   (let [[before after]
-        (swap-vals! *outbound* update client-id
+        (swap-vals! (outbound-atom client-id)
                     (fn [state]
                       (if (>= (count (:pending state)) pending-limit)
                         state
@@ -759,8 +815,7 @@
                                 ;; wire — forwardable-properties would not pass
                                 ;; it even if it tried.
                                 (assoc msg ::queued-at (System/currentTimeMillis))))))]
-    (> (count (get-in after [client-id :pending]))
-       (count (get-in before [client-id :pending])))))
+    (> (count (:pending after)) (count (:pending before)))))
 
 (defn take-pending!
   "Reserve an identifier for the next message waiting on `client-id`'s window.
@@ -770,21 +825,19 @@
    exactly the rate the client is acknowledging."
   ([client-id] (take-pending! client-id inflight-window))
   ([client-id window]
-  (let [[before after]
-        (swap-vals! *outbound* update client-id
-                    (fn [state]
-                      (if-let [msg (peek (:pending state))]
+   (let [[before after]
+         (swap-vals! (outbound-atom client-id)
+                     (fn [state]
+                       (if-let [msg (peek (:pending state))]
                         ;; from-pending?: this message *is* the head, so the
                         ;; queue being non-empty must not block it.
-                        (let [reserved (reserve state msg true window)]
-                          (if (identical? reserved state)
-                            state                     ; window still full
-                            (update reserved :pending pop)))
-                        state)))]
-    (when (< (count (get-in after [client-id :pending]))
-             (count (get-in before [client-id :pending])))
-      [(get-in after [client-id :next-id])
-       (peek (get-in before [client-id :pending]))]))))
+                         (let [reserved (reserve state msg true window)]
+                           (if (identical? reserved state)
+                             state                    ; window still full
+                             (update reserved :pending pop)))
+                         state)))]
+     (when (< (count (:pending after)) (count (:pending before)))
+       [(:next-id after) (peek (:pending before))]))))
 
 (declare send-buffer)
 
@@ -1284,7 +1337,7 @@
    a first delivery — right dialect, properties, subscription identifiers,
    topic alias and maximum packet size — differing only in DUP."
   [key client-id]
-  (doseq [[identifier msg] (get-in @*outbound* [client-id :inflight])]
+  (doseq [[identifier msg] (:inflight (some-> (existing-outbound client-id) deref))]
     (log/trace "redelivering to" client-id "identifier:" identifier)
     (when-not (send-publish! key (assoc msg :duplicate? true) identifier)
       (release-packet-identifier! client-id identifier))))

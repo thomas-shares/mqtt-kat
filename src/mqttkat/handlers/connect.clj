@@ -1,7 +1,7 @@
 (ns mqttkat.handlers.connect
   (:require [clojure.tools.logging :as log]
             [mqttkat.handlers :as handlers]
-            [mqttkat.handlers :refer [*clients* *retained* *outbound* send-buffer add-client!
+            [mqttkat.handlers :refer [*clients* *retained* send-buffer add-client!
                                       add-timer! flush-pending!]]
             [mqttkat.handlers.disconnect :refer :all])
   (:import [org.mqttkat MqttReasonCode]

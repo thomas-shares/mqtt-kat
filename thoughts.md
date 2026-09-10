@@ -483,6 +483,75 @@ days worrying about the cost of — coalescing, aliases — is 0.76% of the prof
 between them, against 15% for identifier bookkeeping that predates all of it.
 The measurement said parity; the profile says why.
 
+### An atom per client, and what it did and did not buy
+
+The profile said 14% of the broker's time was inside `clojure.lang.Atom.swap`,
+nearly all of it acquiring and releasing packet identifiers. `*outbound*` was
+one atom holding every client's in-flight map and pending queue, and every QoS 1
+publish and every PUBACK did `update-in [client-id :inflight]` on it: path
+copying through a map with an entry per client, and CAS retries because every
+connection thread wanted the same atom.
+
+It is now an atom *of* atoms. The registry is still keyed by client id — that
+part was never the problem and is required, since §4.4 makes a persistent
+session's unacknowledged messages outlive the connection — but each client's
+state is its own atom. The registry is read on the hot path and written only
+when a session is created or discarded; the mutation happens on a small,
+uncontended map.
+
+`queued-count` moved into handlers with it. `sys` and `web.state` had each
+written their own fold over `*outbound*`, which meant the shape of the state was
+known in three namespaces; now it is known in one.
+
+**Profiled, same load, both builds:**
+
+| | base | per-client |
+|---|---|---|
+| total samples | 234,912 | **115,061** |
+| `Atom.swap` | 45.98% | **9.23%** |
+| `acquire-packet-identifier!` | 9.20% | 3.09% |
+| `release-packet-identifier!` | 15.19% | 3.77% |
+| `take-pending!` | 15.02% | 2.72% |
+
+Absolute samples in `Atom.swap` fell 90%, and the broker did the same 2,400,000
+deliveries for **half the CPU**. The top frames are now G1 and
+`MqttPublish/encode`, which is a healthy shape for a broker: garbage and the
+actual work.
+
+**And end-to-end throughput did not move.** 142,207/s before, 142,081/s after,
+three interleaved pairs, one of them negative. That is not a contradiction: at
+this load the broker is not CPU-bound. Median service latency is 3.2 seconds,
+which is queueing an order of magnitude deeper than the in-flight window, so
+what sets the rate is the delivery path and the acknowledgement round trip, not
+cycles. Halving the CPU of something that was not the bottleneck changes the
+headroom, not the number.
+
+Where it does show is when CPU *is* scarce. Under the profiler — which taxes
+every thread — the same load gave 145,490 deliveries/s on the old code and
+213,333 on the new, with median latency 3,146 ms against 1,442 ms. Same work,
+ratio 1.0000 both times.
+
+So: a large and real saving, honestly worth having, that this particular
+benchmark cannot show. Worth writing down in that shape rather than quoting the
+47%, which is a number produced by a profiler's overhead and not by the broker.
+
+### Two things the measuring turned up
+
+**My A/B harness had been starting the broker with no JVM options.** Every
+earlier `java -jar` comparison ran on a default heap rather than the `-Xmx4G`
+the project sets, which is why the profiled runs and the plain runs disagreed so
+violently at first. The comparisons stay valid — both arms had the same handicap
+— but the absolute numbers in them were of a differently-configured JVM. The
+harness passes the project's options now.
+
+**A 400k-message QoS 1 run wedges, on both builds.** Around 0.6% of publishes
+never complete, deliveries stop, and everything sits at zero per second
+indefinitely. It reproduces on the pre-refactor build too, so it is not this
+change — and it is the same shape as the lead recorded on 20260903, where a
+300k run left 27 publishes unacknowledged and 540 deliveries missing. That was
+a handful of messages then and is thousands now at 2,000 subscribers, which
+makes it far easier to chase. Still not chased.
+
 ### Notes to self
 
 * **mosquitto had quietly taken port 1883**, as a systemd service, and served
