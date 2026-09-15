@@ -1,9 +1,10 @@
 (ns mqttkat.handlers.connect
   (:require [clojure.tools.logging :as log]
             [mqttkat.handlers :as handlers]
-            [mqttkat.handlers :refer [*clients* *retained* send-buffer add-client!
+            [mqttkat.handlers :refer [*clients* send-buffer add-client!
                                       add-timer! flush-pending!]]
-            [mqttkat.handlers.disconnect :refer :all])
+            [mqttkat.handlers.disconnect :refer :all]
+            [mqttkat.retained :as retained])
   (:import [org.mqttkat MqttReasonCode]
            [org.mqttkat.packages MqttConnAck MqttDisconnect MqttPublish]))
 
@@ -131,6 +132,13 @@
        :session-present?    present?
        :connect-return-code 0x00})))
 
+(defn- connection-id
+  "A name for one connection, unique across restarts too. Random rather than
+   counted for that reason: two runs of the broker must not both call a
+   connection \"1\", because the record of the first outlives it."
+  []
+  (str (java.util.UUID/randomUUID)))
+
 (defn handle-success
   [{:keys [client-key keep-alive client-id clean-session?] :as msg}]
   (log/trace "SUCCESS here now...." (contains? @*clients* client-id))
@@ -146,26 +154,37 @@
       (log/trace "there is a RETAINED will!" (str (:will msg)))
       (log/trace "storing retain:" topic qos (empty? payload))
       (if (empty? payload)
-        (swap! *retained* dissoc topic)
+        (retained/clear! topic)
         ;; Stamped like any other retained message, so a Will Message published
         ;; with a Message Expiry Interval expires on the same terms.
-        (swap! *retained* assoc topic {:qos       qos
-                                       :payload   payload
-                                       :properties props
-                                       :stored-at (System/currentTimeMillis)}))))
+        (retained/retain! topic {:qos       qos
+                                 :payload   payload
+                                 :properties props
+                                 :stored-at (System/currentTimeMillis)}))))
   
+  ;; The session may be live on another broker, which then has to let it
+  ;; go (§3.1.4); and a persistent one may be parked there, or on the
+  ;; cluster after the broker that parked it went away. Asked before
+  ;; Session Present is decided, and parked here from then on.
+  (handlers/adopt-session! client-id)
   ;; Session Present used to report whatever was parked under the client-id
   ;; regardless of clean-session, so a client asking for a fresh session was
   ;; told it had resumed one. See connack-for.
   (send-buffer [client-key] (MqttConnAck/encode (connack-for msg)))
-  (add-client! msg)
-  ;; After add-client!, never before: it replaces this key's whole entry, which
-  ;; would throw away the :timer and :last-active that add-timer! writes.
-  ;; The negotiated number, not the one asked for: having told the client to
-  ;; use 60 the broker cannot go on timing it out against its own 120.
+  ;; The negotiated keep-alive, not the one asked for: having told the client
+  ;; to use 60 the broker cannot go on timing it out against its own 120. It
+  ;; is what the timer runs on and what the stored client says — the CONNACK
+  ;; above went out on the original, which is how it knows to mention the
+  ;; change. And a name for this one connection, so that whatever hears it
+  ;; ended can say which one: the client-id is the same across every
+  ;; connection the client ever makes.
   (let [agreed (if (version-5? (:protocol-version msg))
                  (effective-keep-alive keep-alive)
                  keep-alive)]
+    (add-client! (assoc msg :keep-alive agreed :connect-id (connection-id)))
+    ;; After add-client!, never before: it replaces this key's whole entry,
+    ;; which would throw away the :timer and :last-active that add-timer!
+    ;; writes.
     (when (pos? (long agreed))
       (add-timer! client-key agreed))))
 

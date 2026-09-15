@@ -4,7 +4,10 @@
             [mqttkat.s :refer [*server*]]
             [overtone.at-at :as at]
             [clojurewerkz.triennium.mqtt :as tr]
-            [mqttkat.events :as events])
+            [mqttkat.events :as events]
+            [mqttkat.bridge :as bridge]
+            [mqttkat.retained :as retained]
+            [mqttkat.trie :refer [trie-insert trie-delete trie-matching-vals sieve-dollar]])
   (:import [java.util.concurrent.atomic LongAdder]
            [org.mqttkat MqttStat MqttReasonCode TopicStats]
            [java.nio.channels SelectionKey]
@@ -73,80 +76,9 @@
    matches here is queued against the client-id instead of written to a socket."
   (atom (tr/make-trie)))
 
-(def ^:private matches-one "+")
-(def ^:private matches-none-or-many "#")
-
-;; ── the subscription tries ───────────────────────────────────────────────
-;;
-;; Both tries go through these two rather than through triennium's insert and
-;; delete, because triennium's insert corrupts a node it did not create.
-;;
-;;   (-> (tr/make-trie) (tr/insert "a/b" x) (tr/insert "a" y))
-;;
-;; The second insert finds a node already at ["a"] — created as a parent of
-;; ["a" "b"] — and its :values is nil, so `(conj (:values node) val)` conjes
-;; onto nil and stores a *list*. Delete then calls disj on it and throws
-;; ClassCastException: PersistentList cannot be cast to IPersistentSet.
-;;
-;; A subscription filter that is a prefix of another is entirely ordinary —
-;; `sport/#` alongside `sport/tennis/#` — so this fired in the wild rather
-;; than in theory. It threw out of the CONNECT handler while restoring a
-;; resumed session's subscriptions, which left that client never added, and
-;; the broker then wedged for anything that waited on it.
-
-(defn trie-insert
-  "Add `value` under `topic-filter`, keeping :values a set whether or not the
-   node was already there as somebody else's parent."
-  [trie topic-filter value]
-  (update-in trie (conj (vec (tr/split-topic topic-filter)) :values)
-             (fnil conj #{}) value))
-
-(defn- matching-values
-  "Every value stored under a filter matching `segments`, from `node` down.
-
-   Three branches at each level, which is the whole of §4.7.1: the literal
-   segment, `+` standing for exactly one, and `#` standing for this level and
-   all below it — so `#` contributes wherever it is found and does not recurse.
-
-   The empty-segments case is the one triennium got wrong. When the topic runs
-   out, this node's own values match, *and so does a `#` directly beneath it*:
-   §4.7.1.2 makes the multi-level wildcard cover the parent level too, so
-   `sport/#` matches `sport` and not only `sport/tennis`. triennium consulted
-   `#` only at levels it passed through, never at the one it stopped on, so
-   that subscription missed every message published to the parent itself."
-  [node segments]
-  (if (empty? segments)
-    (into (set (:values node)) (:values (get node matches-none-or-many)))
-    (let [s     (first segments)
-          more  (rest segments)
-          exact (get node s)
-          any   (get node matches-one)]
-      ;; Only into branches that exist. Recursing into a missing one looks
-      ;; harmless — nil has no children, so it finds nothing — but each nil
-      ;; node spawns two more nil recursions, one per branch, and the cost is
-      ;; 2^levels-remaining. It measured 1.8 seconds for a 22-level topic
-      ;; against a trie holding one short filter, and a publish is what triggers
-      ;; it: any client could hang a broker thread with a deep enough topic.
-      (cond-> (set (:values (get node matches-none-or-many)))
-        exact (into (matching-values exact more))
-        any   (into (matching-values any more))))))
-
-(defn trie-matching-vals
-  "The subscriptions matching `topic`."
-  [trie ^String topic]
-  (matching-values trie (tr/split-topic topic)))
-
-(defn trie-delete
-  "Remove `value` from under `topic-filter`, matching on the whole stored
-   value — an MQTT 5 subscription carries No Local, Retain As Published,
-   Retain Handling and a subscription identifier as well as its QoS, and an
-   entry rebuilt from the filter alone matches none of them.
-
-   delete-matching rather than delete: it rebuilds the collection with `set`
-   instead of calling disj on it, so it also copes with any list an earlier
-   insert left behind, and it prunes empty nodes the same way."
-  [trie topic-filter value]
-  (tr/delete-matching trie topic-filter #(= % value)))
+;; The two tries below are mqttkat.trie tries: triennium's layout, with the
+;; insert, match and delete the broker needed to get right on top of it. See
+;; that namespace for what was wrong with triennium's own.
 
 (def ^:dynamic *live-clients*
   "client-id -> the SelectionKey of its current connection.
@@ -182,21 +114,11 @@
    unchanged: §4.4 requires a persistent session's unacknowledged messages to
    survive the connection and be redelivered on the next one."
   (atom {}))
-(def ^:dynamic *retained* (atom {}))  ;; {:topic {:qos qos :payload payload}})
-
-(defn- wildcard-rooted?
-  "Whether a topic filter begins with a wildcard level."
-  [^String topic-filter]
-  (and topic-filter
-       (or (.startsWith topic-filter "#")
-           (.startsWith topic-filter "+"))))
-
-(defn- sieve-dollar
-  "Drop wildcard-rooted filters when the topic name begins with $."
-  [^String topic matched]
-  (if (and topic (.startsWith topic "$"))
-    (into #{} (remove (comp wildcard-rooted? :topic-filter)) matched)
-    matched))
+(def ^:dynamic *retained*
+  "topic -> {:qos :payload :properties :stored-at}. mqttkat.retained's own
+   atom, so a read here and a write there are the same map; writes go
+   through that namespace, which is how the cluster hears about them."
+  retained/store)
 
 (defn matching-offline-sessions
   "Persistent sessions subscribed to `topic` whose client is not connected."
@@ -220,6 +142,7 @@
 
 (def my-pool (at/mk-pool))
 (declare qos-0)
+(declare hand-over-unacknowledged!)
 (declare qos-1-send)
 (declare qos-2-send)
 (declare remove-client!)
@@ -244,19 +167,26 @@
 (defn forwardable-properties [properties]
   (select-keys properties forwarded-publish-properties))
 
+(declare route)
+(declare forward-to-brokers!)
+
 (defn publish-will [{:keys [topic qos retain payload properties]}]
   (log/trace "Sending will message on topic:" payload)
-  (when-let [keys (coalesce-subscriptions (select-shared (matching-subscribers topic)))]
-    (log/trace "Will keys:" keys)
-    ;; §3.1.3.2: the Will Properties are the message's, and go out with it.
-    ;; Through the same whitelist as a forwarded publish, which is what keeps
-    ;; the Will Delay Interval out of it — that one is an instruction to the
-    ;; broker about when to send this, and means nothing to a subscriber.
-    (let [msg {:payload payload :properties (forwardable-properties properties)}]
+  ;; §3.1.3.2: the Will Properties are the message's, and go out with it.
+  ;; Through the same whitelist as a forwarded publish, which is what keeps
+  ;; the Will Delay Interval out of it — that one is an instruction to the
+  ;; broker about when to send this, and means nothing to a subscriber.
+  ;; Routed like any publish: the client whose will this is was here, so
+  ;; this is never a bridged copy, and the other brokers get theirs.
+  (let [msg {:qos qos :payload payload :properties (forwardable-properties properties)}
+        {:keys [plan serve-group?]} (route topic msg)]
+    (when-let [keys (coalesce-subscriptions (select-shared (matching-subscribers topic) serve-group?))]
+      (log/trace "Will keys:" keys)
       (case (long qos)
         0 (qos-0 keys topic msg retain)
         1 (qos-1-send keys topic msg)
-        2 (qos-2-send keys topic msg)))))
+        2 (qos-2-send keys topic msg)))
+    (forward-to-brokers! plan topic msg)))
 
 (defonce ^:private delayed-wills
   ;; client-id -> the scheduled job that will publish its will. Held so a
@@ -472,7 +402,11 @@
       (log/trace "client-id:" client-id)
       ;; Stamped on the resumed connection, not carried over from the one that
       ;; went away: the console shows how long this connection has been up.
-      (swap! *clients* assoc client-key (assoc client :connected-at (System/currentTimeMillis)))
+      ;; The new connection's name too, not the one that parked the session:
+      ;; that connection is over, and its disconnect has been reported.
+      (swap! *clients* assoc client-key (assoc client
+                                               :connected-at (System/currentTimeMillis)
+                                               :connect-id   (:connect-id msg)))
       (swap! *clients* dissoc client-id))
     (let [client (-> (dissoc msg :packet-type :client-key)
                      ;; When this connection was accepted. The console has no
@@ -493,9 +427,13 @@
   (MqttStat/clientConnected)
   ;; The id goes with the event so a watcher can say *which* client, which is
   ;; the difference between a console that reports a number and one that
-  ;; reports what happened.
+  ;; reports what happened. And the terms of the CONNECT, for a watcher that
+  ;; keeps a record of the session — what it asked for, under the name this
+  ;; connection was given.
   (events/emit! {:event     :client-connected
                  :client-id client-id
+                 :connect   (select-keys msg [:connect-id :client-id :protocol-version
+                                              :clean-session? :keep-alive :properties])
                  :clients   (MqttStat/connectedClients)})
   (log/trace "ADD: Subscriber trie POST:" @*subscriber-trie*)
   (log/trace "ADD: Clients:" @*clients*))
@@ -610,9 +548,14 @@
   ;; twice for one connection, and a count that drifts is worse than no count.
   (when (contains? @*clients* key)
     (MqttStat/clientDisconnected)
-    (events/emit! {:event     :client-disconnected
-                   :client-id (get-in @*clients* [key :client-id])
-                   :clients   (MqttStat/connectedClients)}))
+    ;; Which connection, not only which client: on a takeover this fires for
+    ;; the displaced connection after the replacement has already announced
+    ;; itself, and a watcher keeping a record would otherwise mark the new
+    ;; connection as gone.
+    (events/emit! {:event      :client-disconnected
+                   :client-id  (get-in @*clients* [key :client-id])
+                   :connect-id (get-in @*clients* [key :connect-id])
+                   :clients    (MqttStat/connectedClients)}))
   (log/trace "REMOVE: clean session?" (get-in @*clients* [key :clean-session?] true))
   (log/trace "key:" key)
   (let [client            (get @*clients* key)
@@ -642,6 +585,9 @@
           (swap! *inflight* #(into {} (remove (fn [[[id _] _]] (= id client-id))) %)))
         (swap! *clients* dissoc key))
       (do
+        ;; While attached, what it leaves unacknowledged goes to the cluster,
+        ;; so it can come back anywhere; a broker on its own keeps it here.
+        (hand-over-unacknowledged! client-id)
         ;; Parked rather than forgotten: a publish arriving while this session
         ;; is away still has to match it, or there is nothing to queue.
         (doseq [topic subscribed-topics]
@@ -795,6 +741,94 @@
   [client-id]
   (count (:pending (some-> (existing-outbound client-id) deref))))
 
+(defonce session-source
+  ;; {:resume    (fn [client-id] -> {:session :subscriptions :queued} or nil)
+  ;;  :enqueue!  (fn [client-id msg])
+  ;;  :dequeue!  (fn [client-id keys])
+  ;;  :takeover! (fn [broker-id client-id connect-id])} or nil.
+  ;; Installed by mqttkat.rama.cluster when the broker is attached to a
+  ;; cluster: sessions then live there, a client may come back to any
+  ;; broker, and what is owed to it while it is away is queued there too —
+  ;; so this broker queues nothing in memory for a session that is away,
+  ;; hands over what a session leaves unacknowledged when it goes, and asks
+  ;; on a CONNECT whether there is a session to take over and a connection
+  ;; elsewhere to end. nil means a broker on its own, which parks and
+  ;; queues in memory as it always did.
+  (atom nil))
+
+(declare queue-pending!)
+
+(defn- settled!
+  "A message from the cluster's queue has been acknowledged, or found
+   expired: it is done, and comes off the queue there. Any other message
+   was never on it."
+  [client-id msg]
+  (when-let [k (::cluster-key msg)]
+    (when-let [{:keys [dequeue!]} @session-source]
+      (dequeue! client-id [k]))))
+
+(defn- hand-over-unacknowledged!
+  "A session is going away while attached: whatever the broker was still
+   to deliver to it goes to the cluster's queue, and nothing stays here.
+   What came from that queue is still on it — unacknowledged, so never
+   taken off — and is left out; what was delivered live and is in flight
+   or waiting is put on, so a resume anywhere sends it (§4.4). The queue
+   here is emptied either way: a resume, here or elsewhere, starts from the
+   cluster's copy, and a second copy here would be delivered twice."
+  [client-id]
+  (when-let [{:keys [enqueue!]} @session-source]
+    (when-let [a (existing-outbound client-id)]
+      (let [[{:keys [pending inflight]} _]
+            (swap-vals! a assoc :pending clojure.lang.PersistentQueue/EMPTY :inflight {})]
+        (doseq [msg (concat (vals inflight) pending)
+                :when (not (::cluster-key msg))]
+          (enqueue! client-id (cond-> (select-keys msg [:topic :payload :qos :properties])
+                                (::queued-at msg) (assoc :queued-at (::queued-at msg)))))))))
+
+(defn adopt-session!
+  "Take over `client-id`'s session from the cluster, on its CONNECT.
+
+   Three things, each only when it applies. If the client is connected on
+   another broker, that broker is told to drop it — §3.1.4's takeover,
+   across brokers. If the session is persistent, it is parked here from the
+   cluster's copy — the record and the offline trie, exactly as
+   remove-client! leaves a session that went away from this broker — so
+   that add-client! resumes it like any other; a copy already parked here
+   is replaced, since the cluster's is the one that was kept up to date
+   while the client was elsewhere. And what is queued for it is put on the
+   broker's own queue, so that flush-pending! sends it, each message still
+   carrying the key it has on the cluster's queue: it comes off there when
+   the client acknowledges it, not before.
+
+   Returns true when the cluster knew the session."
+  [client-id]
+  (when-let [{:keys [resume takeover!]} @session-source]
+    (when-let [{:keys [session subscriptions queued]} (resume client-id)]
+      (when (and (:connected? session)
+                 (:broker-id session)
+                 (not= (:broker-id session) (:my-broker-id @session-source)))
+        (log/info "session" client-id "is connected on" (:broker-id session) "- taking it over")
+        (takeover! (:broker-id session) client-id (:connect-id session)))
+      (when (false? (:clean-session? session))
+        (let [entries (set (vals subscriptions))]
+          (when-let [parked (get @*clients* client-id)]
+            (doseq [{:keys [topic-filter qos]} (:subscribed-topics parked)]
+              (swap! *offline-trie* trie-delete topic-filter
+                     {:client-id client-id :qos qos :topic-filter topic-filter})))
+          (doseq [{:keys [topic-filter qos]} entries]
+            (swap! *offline-trie* trie-insert topic-filter
+                   {:client-id client-id :qos qos :topic-filter topic-filter}))
+          (swap! *clients* assoc client-id {:client-id         client-id
+                                            :clean-session?    false
+                                            :subscribed-topics entries})
+          (log/info "session" client-id "taken over from the cluster:"
+                    (count entries) "subscriptions," (count queued) "queued"))
+        (doseq [[k msg] queued]
+          (queue-pending! client-id (assoc msg
+                                           ::queued-at (:queued-at msg)
+                                           ::cluster-key k))))
+      true)))
+
 (defn queue-pending!
   "Hold `msg` for `client-id` until a window slot frees up.
 
@@ -821,7 +855,10 @@
                                 ;; outside :properties, so it cannot reach the
                                 ;; wire — forwardable-properties would not pass
                                 ;; it even if it tried.
-                                (assoc msg ::queued-at (System/currentTimeMillis))))))]
+                                ;; Unless it was stamped already: a message
+                                ;; that waited in the cluster's queue has
+                                ;; been waiting since then, not since now.
+                                (update msg ::queued-at #(or % (System/currentTimeMillis)))))))]
     (> (count (:pending after)) (count (:pending before)))))
 
 (defn take-pending!
@@ -973,15 +1010,22 @@
    Ordinary subscriptions pass through untouched, including one held by a
    client that also belongs to a group: the two subscriptions are independent,
    and a client subscribed both ways receives the message twice."
-  [matches]
-  (let [{shared true ordinary false} (group-by #(some? (:share-group %)) matches)]
-    (if (empty? shared)
-      matches
-      (into (vec ordinary)
-            (keep (fn [[k members]] (pick-shared k members)))
-            ;; Grouped by name *and* filter, which together are the identity of
-            ;; a share — the same name on two filters is two groups.
-            (group-by (juxt :share-group :topic-filter) shared)))))
+  ([matches] (select-shared matches (constantly true)))
+  ([matches serve-group?]
+   (let [{shared true ordinary false} (group-by #(some? (:share-group %)) matches)]
+     (if (empty? shared)
+       matches
+       (into (vec ordinary)
+             (keep (fn [[k members]]
+                     ;; A group another broker serves for this publish is
+                     ;; left alone here, however many of its members are
+                     ;; local: one member of the group, cluster-wide, is
+                     ;; the whole point of a share.
+                     (when (serve-group? k)
+                       (pick-shared k members))))
+             ;; Grouped by name *and* filter, which together are the identity
+             ;; of a share — the same name on two filters is two groups.
+             (group-by (juxt :share-group :topic-filter) shared))))))
 
 (defn deliverable-subscribers
   "The matches that should actually be sent to, once No Local is applied.
@@ -1177,13 +1221,11 @@
    ever subscribes to again would otherwise be held, and reported, for the life
    of the broker."
   []
-  (swap! *retained*
-         (fn [m]
-           (reduce-kv (fn [acc topic {:keys [properties stored-at] :as entry}]
-                        (if (= ::expired (expiring-properties properties stored-at))
-                          acc
-                          (assoc acc topic entry)))
-                      {} m))))
+  (doseq [[topic {:keys [properties stored-at]}] @*retained*
+          :when (= ::expired (expiring-properties properties stored-at))]
+    ;; Through clear!, so the record hears it too: every broker sweeps its
+    ;; own copy, and the first to find a message expired clears it for all.
+    (retained/clear! topic)))
 
 (def retained-sweep-interval-ms
   "How often expired retained messages are cleared out.
@@ -1296,7 +1338,11 @@
    delivered as well as it is going to be. The QoS stored is the lesser of the
    publish and the subscription, as it would be on delivery."
   [topic {:keys [qos payload properties]}]
-  (when (pos? (long qos))
+  ;; Not when attached to a cluster: sessions that are away are queued for
+  ;; there, by whichever broker saw the publish, from the cluster's own copy
+  ;; of the subscriptions — see mqttkat.rama.cluster/plan. Queuing here as
+  ;; well would deliver twice on resume.
+  (when (and (pos? (long qos)) (nil? @session-source))
     (doseq [{:keys [client-id] sub-qos :qos} (matching-offline-sessions topic)]
       (when client-id
         ;; With its properties. They used to be dropped here, so a message that
@@ -1325,7 +1371,9 @@
         ;; session that was away long enough returns to a window full of
         ;; messages it will never be sent.
         (when-not (send-publish! key msg packet-identifier)
-          (release-packet-identifier! client-id packet-identifier))
+          (release-packet-identifier! client-id packet-identifier)
+          ;; Expired here is expired there: nobody will be sent it.
+          (settled! client-id msg))
         (recur (inc sent))))))
 
 (defn redeliver-inflight!
@@ -1636,10 +1684,41 @@
    client's several matching subscriptions to one delivery. The PUBREL path
    skipped all three, so No Local and shared subscriptions simply did not apply
    to QoS 2 messages, and a will skipped them too."
-  [topic publisher-key]
-  (coalesce-subscriptions
-   (select-shared
-    (deliverable-subscribers (matching-subscribers topic) publisher-key))))
+  ([topic publisher-key] (subscribers-for topic publisher-key (constantly true)))
+  ([topic publisher-key serve-group?]
+   (coalesce-subscriptions
+    (select-shared
+     (deliverable-subscribers (matching-subscribers topic) publisher-key)
+     serve-group?))))
+
+(defn- route
+  "Where a publish on `topic` goes, when there are other brokers.
+
+   Returns {:plan :serve-group?}. A publish that arrived over a bridge came
+   from another broker for this one's subscribers and goes no further —
+   every subscription is held by exactly one broker, so one hop is the whole
+   route — and it serves only the shared groups its sender named (see
+   mqttkat.bridge/share-property). Any other publish is planned: the plan
+   says which brokers get a copy and which groups they serve, and this
+   broker leaves those groups to them. With no other brokers the plan is
+   nil and every group is served here, which is how the broker always
+   behaved on its own."
+  [topic {:keys [client-key] :as msg}]
+  (if (bridge/bridge? (:client-id (get @*clients* client-key)))
+    {:plan nil :serve-group? (or (::shares msg) #{})}
+    (let [plan (bridge/plan topic)]
+      {:plan         plan
+       :serve-group? (if-let [skip (seq (:skip plan))]
+                       (complement (set skip))
+                       (constantly true))})))
+
+(defn- forward-to-brokers!
+  "Hand a publish to the brokers its plan names. No-op on a nil plan."
+  [plan topic {:keys [qos payload properties]}]
+  (when plan
+    (bridge/forward! plan topic {:qos        qos
+                                 :payload    payload
+                                 :properties (forwardable-properties properties)})))
 
 (defn- publish-resolved [{:keys [topic qos retain? payload properties] :as msg}]
   (log/debug "PUBLISH:" (dissoc msg :client-key))
@@ -1652,7 +1731,7 @@
   (when retain?
     (log/trace "publish with retain:" topic qos (empty? payload))
     (if (empty? payload)
-      (swap! *retained* dissoc topic)
+      (retained/clear! topic)
       ;; The properties are kept with it (§3.3.1.3). What is retained is the
       ;; message, not just its bytes: a subscriber arriving later should not be
       ;; able to tell it was not there at the time, and it could — content
@@ -1661,10 +1740,10 @@
       ;; Stamped, so the Message Expiry Interval on a retained message means
       ;; something. §3.3.1.3: when it passes, the message is discarded and the
       ;; topic simply has no retained message any more.
-      (swap! *retained* assoc topic {:qos        qos
-                                     :payload    payload
-                                     :properties (forwardable-properties properties)
-                                     :stored-at  (System/currentTimeMillis)})))
+      (retained/retain! topic {:qos        qos
+                               :payload    payload
+                               :properties (forwardable-properties properties)
+                               :stored-at  (System/currentTimeMillis)})))
   ;; `let` rather than `when-let`, which is what this was. The two behave the
   ;; same here only because triennium returns #{} for a topic nobody is
   ;; subscribed to, and an empty set is truthy — so the acknowledgements below
@@ -1673,13 +1752,18 @@
   ;; on delivery (§4.3.2, §4.3.3), so they must not be conditional on there
   ;; being subscribers. A `matching-vals` that returned nil for no match would
   ;; otherwise have left a QoS 1 publisher retrying for ever.
-  (let [keys (subscribers-for topic (:client-key msg))]
+  (let [{:keys [plan serve-group?]} (route topic msg)
+        keys (subscribers-for topic (:client-key msg) serve-group?)]
     (case (long qos)
-      0 (qos-0 keys topic msg false)
+      0 (do (qos-0 keys topic msg false)
+            (forward-to-brokers! plan topic msg))
       1 (do (qos-1 keys topic msg)
-            (queue-for-offline-sessions! topic msg))
+            (queue-for-offline-sessions! topic msg)
+            (forward-to-brokers! plan topic msg))
       ;; Not for QoS 2: that message is not published until its PUBREL
-      ;; arrives (§4.3.3), so it is kept for offline sessions there.
+      ;; arrives (§4.3.3), so it is kept for offline sessions there — and
+      ;; routed there, for the same reason: the subscribers are whoever
+      ;; matches then.
       2 (qos-2 keys topic msg))))
 
 (defn resolve-topic-alias
@@ -1773,11 +1857,63 @@
     (catch Exception e
       (log/debug e "closing a connection after a protocol error failed"))))
 
+(defn- unbridge
+  "A publish as it came over a bridge, with the other broker's instructions
+   taken off the properties and kept aside under ::shares. Anything else
+   passes untouched."
+  [{:keys [client-key properties] :as msg}]
+  (if (and (:user-properties properties)
+           (bridge/bridge? (:client-id (get @*clients* client-key))))
+    (let [[shares properties'] (bridge/take-shares properties)]
+      (assoc msg :properties properties' ::shares shares))
+    msg))
+
+(def control-prefix
+  "Where the brokers talk to each other in-band: a publish on a topic under
+   this, arriving over a bridge, is an instruction for this broker, not a
+   message for its subscribers. `$mqttkat/takeover` names a client and the
+   connection this broker holds for it, which is to end because the client
+   has connected elsewhere (§3.1.4)."
+  bridge/control-prefix)
+
+(defn- take-over-for-elsewhere!
+  "Drop `client-id`'s connection here, if it is still the one named."
+  [client-id connect-id]
+  (if-let [key (live-connection client-id)]
+    (if (= connect-id (get-in @*clients* [key :connect-id]))
+      (do (log/info "session" client-id "taken over by another broker")
+          ;; Told why, then closed — and then forgotten here by hand: a close
+          ;; the broker starts is not reported back to the handlers the way
+          ;; a socket going away is, and the will, the timer and the record
+          ;; all have to go exactly as they do when a client on this broker
+          ;; takes the session over (see connect/take-over-existing!).
+          (disconnect-with-reason! key MqttReasonCode/SESSION_TAKEN_OVER
+                                   "the client connected to another broker")
+          (handle-will-if-present key)
+          (remove-client! key))
+      (log/debug "takeover for" client-id "names a connection that is already over"))
+    (log/debug "takeover for" client-id "which is not connected here")))
+
+(defn- control!
+  "Act on an instruction from another broker."
+  [{:keys [topic properties]}]
+  (let [ups (into {} (map vec) (:user-properties properties))]
+    (case (subs topic (count control-prefix))
+      "takeover" (take-over-for-elsewhere! (get ups "client-id") (get ups "connect-id"))
+      (log/warn "unknown instruction from another broker:" topic))))
+
+(defn- control-message?
+  [{:keys [client-key topic]}]
+  (and (string? topic)
+       (.startsWith ^String topic control-prefix)
+       (bridge/bridge? (:client-id (get @*clients* client-key)))))
+
 (defn publish
   "A PUBLISH from a client, with any topic alias resolved first."
   [msg]
-  (let [resolved (resolve-topic-alias msg)]
-    (if (or (= ::invalid-alias resolved) (nil? (:topic resolved)))
+  (let [resolved (unbridge (resolve-topic-alias msg))]
+    (cond
+      (or (= ::invalid-alias resolved) (nil? (:topic resolved)))
       ;; §3.3.2.3.4: a bad alias is a protocol error, and the publisher
       ;; deserves to hear about it. This used to log and drop, so a client
       ;; could publish into a void indefinitely without ever learning its
@@ -1788,15 +1924,22 @@
         (disconnect-with-reason! (:client-key msg)
                                  MqttReasonCode/TOPIC_ALIAS_INVALID
                                  "topic alias is zero, out of range, or was never declared"))
+
+      (control-message? resolved)
+      (control! resolved)
+
+      :else
       (publish-resolved resolved))))
 
 
 (defn puback [{:keys [packet-identifier client-key]}]
   #_(log/debug "PUBACK:" packet-identifier)
   (let [client-id (:client-id (get @*clients* client-key))]
-    (if (release-packet-identifier! client-id packet-identifier)
-      ;; A slot just freed, so let the next message waiting on it through.
-      (drain-pending! client-key client-id)
+    (if-let [msg (release-packet-identifier! client-id packet-identifier)]
+      (do
+        (settled! client-id msg)
+        ;; A slot just freed, so let the next message waiting on it through.
+        (drain-pending! client-key client-id))
       ;; An acknowledgement for something never sent. Ignoring it is the point:
       ;; acting on it used to put a live identifier back into circulation.
       (log/debug "PUBACK from" client-id "for identifier" packet-identifier
@@ -1804,6 +1947,12 @@
 
 (defn pubrec [{:keys [client-key packet-identifier]}]
   #_(log/debug "PUBREC:" packet-identifier)
+  ;; §4.3.3: on PUBREC the receiver has the message, and the sender keeps
+  ;; only the identifier until PUBCOMP. That is the moment a message from
+  ;; the cluster's queue is done there.
+  (let [client-id (:client-id (get @*clients* client-key))]
+    (when-let [msg (get-in @(or (existing-outbound client-id) (atom {})) [:inflight packet-identifier])]
+      (settled! client-id msg)))
   (send-buffer [client-key]
                (MqttPubRel/encode
                 {:packet-type :PUBREL :packet-identifier packet-identifier})))
@@ -1846,8 +1995,10 @@
     (when topic
       ;; §4.3.3 publishes on the PUBREL, so the subscribers are whoever matches
       ;; now — but they are chosen the same way as on any other publish.
-      (qos-2-send (subscribers-for topic (:client-key msg)) topic msg)
-      (queue-for-offline-sessions! topic msg))
+      (let [{:keys [plan serve-group?]} (route topic msg)]
+        (qos-2-send (subscribers-for topic (:client-key msg) serve-group?) topic msg)
+        (queue-for-offline-sessions! topic msg)
+        (forward-to-brokers! plan topic msg)))
     (when (contains? @*inflight* [client-id packet-identifier])
       ;; The slot is given back on PUBREL, which is what makes the quota a
       ;; limit on messages in flight rather than on messages ever sent.
@@ -1980,7 +2131,17 @@
                      (assoc old :client-key client-key)))
             (swap! *clients* update-in [client-key :subscribed-topics] conj entry)
             (swap! *subscriber-trie* trie-insert (:topic-filter entry)
-                   (assoc entry :client-key client-key))))
+                   (assoc entry :client-key client-key))
+            ;; For whoever keeps a record of the session: the filter as the
+            ;; client named it and the entry as stored, under the name of
+            ;; this connection. A replacement is a subscribe like any other —
+            ;; the same filter, a new entry.
+            (let [client (get @*clients* client-key)]
+              (events/emit! {:event      :client-subscribed
+                             :client-id  (:client-id client)
+                             :connect-id (:connect-id client)
+                             :filter     (:filter entry)
+                             :entry      entry}))))
         #_(log/trace "subscribers POST ADD:" @*subscriber-trie*)
         (send-buffer [client-key]
                      (MqttSubAck/encode
@@ -2031,6 +2192,11 @@
                      ;; leaving the client in the group after it had left.
                      (swap! *subscriber-trie* trie-delete (:topic-filter entry)
                             (assoc entry :client-key client-key))
+                     (let [client (get @*clients* client-key)]
+                       (events/emit! {:event      :client-unsubscribed
+                                      :client-id  (:client-id client)
+                                      :connect-id (:connect-id client)
+                                      :filter     (:filter entry)}))
                      (long MqttReasonCode/SUCCESS))
                    (do
                      (log/trace "No such subscription to remove:" topic)

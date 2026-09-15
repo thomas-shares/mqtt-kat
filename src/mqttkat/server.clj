@@ -6,6 +6,7 @@
             [mqttkat.handlers.connack :as connack]
             [mqttkat.logging :as logging]
             [mqttkat.profiling :as profiling]
+            [mqttkat.rama.cluster :as rama]
             [mqttkat.sys :as sys]
             [mqttkat.web.server :as web]
             [mqttkat.util :as util]
@@ -73,7 +74,9 @@
     ;;(prof/stop {})
     (at/stop-and-reset-pool! h/my-pool :strategy :kill)
     (alter-meta! *server* #(assoc % :timeout 1000))
-    (reset! *server* nil)))
+    (reset! *server* nil)
+    ;; Nothing to do unless -main opened one.
+    (rama/disconnect!)))
 
 (defn -main
   "Start the broker, the $SYS publisher and the status page, and report until
@@ -89,7 +92,19 @@
     ;; Before the broker, so the profile covers startup as well as the run.
     ;; A no-op unless -Dmqttkat.profile is set.
     (profiling/start!)
+    ;; Before the broker listens, so a client is never accepted into a broker
+    ;; whose durable side is still coming up. A no-op unless -Dmqttkat.rama
+    ;; is set, and like sys/start! below it is here and not in start!: the
+    ;; test suite's broker runs without it, and rama-test attaches its own.
+    (rama/connect!)
     (start! "0.0.0.0" (int port))
+    ;; Once listening, and not before: this tells the other brokers where
+    ;; to forward to, and they will take it at its word. And taken back on
+    ;; the way out, whichever way out it is: a SIGTERM never reaches stop!,
+    ;; and an announcement left behind has the others forwarding to a broker
+    ;; that is gone until something else notices.
+    (rama/register! port)
+    (.addShutdownHook (Runtime/getRuntime) (Thread. ^Runnable rama/disconnect!))
     ;; Started here rather than in start!, so the test suite's broker does not
     ;; spend its life publishing retained $SYS messages into the state the
     ;; tests are asserting about. Anything that wants them calls sys/start!.

@@ -1,12 +1,12 @@
 (ns mqttkat.trie-test
   "The subscription tries.
 
-   These go through mqttkat.handlers rather than through triennium directly,
+   These go through mqttkat.trie rather than through triennium directly,
    because triennium's own insert corrupts a node it did not create and the
    broker cannot use it as it stands."
   (:require [clojure.test :refer [deftest is testing]]
             [clojurewerkz.triennium.mqtt :as tr]
-            [mqttkat.handlers :as h]))
+            [mqttkat.trie :as h]))
 
 (deftest a-filter-that-is-a-prefix-of-another
   (testing "inserting under an existing parent node keeps the values a set"

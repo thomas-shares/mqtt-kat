@@ -58,6 +58,151 @@ It actually does now... but memory only, there is no storing to disk. So a broke
 
 Maybe... with Claude's help I might be able to add this now.
 
+## Rama
+
+The answer to "memory only" above is going to be [Rama](https://redplanetlabs.com/):
+the state MQTT says must outlive a connection or a restart — persistent sessions,
+their subscriptions and queued messages, retained messages — belongs in a durable,
+replicated store, and Rama is one that speaks Clojure. The broker's hot path stays
+in memory; Rama is where the things that must not be lost end up.
+
+Several brokers in front of one Rama cluster. Each broker keeps its own
+in-memory subscription trie — matching a publish must stay in memory, a single
+disk seek costs more than a whole QoS 0 round trip — and Rama holds the table
+every broker's trie is a copy of, pushing each change to all of them through its
+reactive queries. A subscribe on one broker is in every broker's trie a few
+milliseconds later; a publish on any broker is matched there, delivered to its
+own clients, and forwarded over MQTT to the brokers holding the rest. See
+`doc/rama-subscriptions.md` for the shapes considered and why.
+
+In `src/mqttkat/rama/` and around it:
+
+- `module.clj` — `MqttKatModule`: one `*session-events` depot carrying connects,
+  disconnects, subscribes, unsubscribes, queued messages, retained messages and
+  broker announcements, and a stream topology keeping six PStates. `$$sessions`
+  is one record per client id: the last CONNECT's terms, whether it is still
+  connected and on which broker, how many times it has been, and its
+  subscriptions — a clean session's go on disconnect, a persistent session's
+  stay. `$$subscriptions` is the same subscriptions arranged for the brokers:
+  `shard → filter → client-id → entry`, sixty-four shards, each small enough to
+  be proxied, each entry saying whether its client is connected. `$$retained` is
+  the retained messages, sharded the same way. `$$queued` is what is waiting for
+  each persistent session that is away. `$$brokers` is where each broker says
+  where it listens, and `$$broker->clients` which clients it holds — when a
+  broker comes back, whatever its previous run held is let go. Stream, so an
+  append with `:ack` returns with the PStates updated; every connection has a
+  `connect-id`, every run of a broker an incarnation, and every write is a
+  replace or a delete, so a record run twice gives the same answer.
+- `cluster.clj` — the switch between in-process and a real cluster, and both
+  directions of traffic. Up: it listens on the broker's event bus and appends
+  asynchronously, so nothing a client waits for ever waits on Rama; the handlers
+  know nothing about it. Down: `watch!` opens a reactive proxy per shard and one
+  on the registry, and applies every diff to `:trie` and `:brokers`. The first
+  callback of each proxy carries the whole value, so a broker that starts later
+  has everything without a separate load. On a publish it names the other
+  brokers with a matching subscription and hands the message to the bridge.
+- `bridge.clj` — broker to broker, in MQTT: one client connection per peer,
+  opened on first use, identified as `mqttkat-bridge/<broker-id>`. A publish
+  arriving on a bridge connection is delivered locally and never forwarded again;
+  every subscription is held by exactly one broker, so one hop is the whole
+  route. Not through Rama, on purpose: state goes through Rama, traffic is one
+  socket write. A shared subscription (`$share/g/…`) with members on several
+  brokers is served by one of them per publish, chosen on the publisher's broker
+  where the whole group is visible and told to the chosen one in a user property
+  on the forwarded copy; the others leave the group alone.
+- Sessions roam. A persistent session's subscriptions and whatever is owed to
+  it — queued while it was away by whichever broker saw the publish, or left
+  unacknowledged when it went — live in Rama; a client coming back on any
+  broker, including after the broker it was on died, gets its session and its
+  messages there, and a message leaves the cluster's queue only once the
+  client has acknowledged it. A client connecting while its session is live on
+  another broker takes it over from there: that broker is told, and drops the
+  old connection with `Session taken over`.
+- `retained.clj` — the retained messages, one atom every broker reads from;
+  writes go through it and are recorded in Rama, and what Rama pushes back is
+  applied to every broker's copy, so a message retained on one broker is
+  replayed on any and is still there after all of them have restarted. `$SYS`
+  topics stay each broker's own.
+- `trie.clj` — the subscription trie, triennium's layout with the three
+  operations the broker had to fix, shared by the broker's own tries and the
+  cluster copy.
+- `test/mqttkat/rama_test.clj` — the module under an InProcessCluster with two
+  "brokers" on it plus a stand-in peer listener; connects, disconnects,
+  subscribes, unsubscribes, retained messages, shared groups and forwarded
+  publishes at every QoS through the real broker; part of `lein test`.
+
+Each broker needs a name and an address the others can reach:
+`-Dmqttkat.brokerId` (default: the host name) and `-Dmqttkat.advertise`
+(default: the host name; the port is the one it listens on).
+
+### In-process
+
+```
+java -Dmqttkat.rama=in-process -jar target/mqtt-kat-0.0.1-standalone.jar 1883 8081
+```
+
+Starts an InProcessCluster inside the broker and launches the module into it. No
+cluster to run and nothing to deploy — this is what to use in the REPL and what
+the tests use. Its data is in a temporary directory that goes with the JVM, so it
+gives durability across a client's reconnect, not across a broker restart.
+
+### External cluster
+
+A real cluster from the Rama 1.9.0 distribution (the version must match the
+`com.rpl/rama` dependency in `project.clj`). A single node is Zookeeper, a
+Conductor and one Supervisor, each in its own terminal from the unpacked release;
+the `rama.yaml` there needs `conductor.host` and `zookeeper.servers` pointing at
+`localhost`:
+
+```
+./rama devZookeeper
+./rama conductor
+./rama supervisor
+```
+
+The module goes to the cluster as the thin jar — `lein jar`, not `lein uberjar`:
+the workers have Rama and Clojure already, and the module's namespace depends on
+nothing else in this project.
+
+```
+lein jar
+./rama deploy --action launch --jar /path/to/mqtt-kat/target/mqtt-kat-0.0.1.jar \
+    --module mqttkat.rama.module/MqttKatModule --tasks 4 --threads 2 --workers 1
+```
+
+Then the brokers connect to it as clients — here two on one machine:
+
+```
+java -Dmqttkat.rama=external -Dmqttkat.rama.conductor=localhost \
+     -Dmqttkat.brokerId=broker-A -Dmqttkat.advertise=127.0.0.1 \
+     -jar target/mqtt-kat-0.0.1-standalone.jar 1885 8085
+java -Dmqttkat.rama=external -Dmqttkat.rama.conductor=localhost \
+     -Dmqttkat.brokerId=broker-B -Dmqttkat.advertise=127.0.0.1 \
+     -jar target/mqtt-kat-0.0.1-standalone.jar 1886 8086
+
+mosquitto_sub -p 1886 -t 'demo/#' -v &
+mosquitto_pub -p 1885 -t demo/hello -m "from A"
+
+mosquitto_pub -p 1885 -t state/x -m "kept" -r     # retained on A…
+mosquitto_sub -p 1886 -t 'state/#' -v -C 1        # …replayed on B
+
+mosquitto_sub -p 1885 -t '$share/g/work/#' -v &   # one member on each broker:
+mosquitto_sub -p 1886 -t '$share/g/work/#' -v &   # each job reaches exactly one
+
+mosquitto_sub -p 1885 -i roamer -c -q 1 -t 'roam/#' # persistent session on A; kill A
+mosquitto_pub -p 1886 -t roam/x -m "while away" -q 1  # queued in Rama by B
+mosquitto_sub -p 1886 -i roamer -c -q 1 -t 'roam/#' -C 1 # back on B: gets it
+```
+
+Without `-Dmqttkat.rama.conductor` it reads a `rama.yaml` from the classpath. The
+Cluster UI is on port 8888 of the Conductor. `./rama deploy --action update` with
+a new jar updates the running module; see `./rama help` for the rest. If
+something else on the machine has port 3000, the Supervisor will not start:
+give it `supervisor.port.range: [3100, 4200]` in `rama.yaml` (the range must be
+at least a thousand wide).
+
+Without `-Dmqttkat.rama` at all the broker runs as it always has.
+
 ## And here are some links with info to help me:
 https://gist.github.com/Botffy/3860641
 

@@ -151,10 +151,12 @@
   "One line for the events list. The broker emits keywords and ids; turning
    those into a sentence is a presentation job and belongs on this side of the
    boundary, not in handlers."
-  [{:keys [event client-id]}]
+  [{:keys [event client-id] :as broker-event}]
   (case event
     :client-connected    {:text "connected" :subject (or client-id "a client")}
     :client-disconnected {:text "disconnected" :subject (or client-id "a client")}
+    :client-subscribed   {:text (str "subscribed to " (:filter broker-event)) :subject (or client-id "a client")}
+    :client-unsubscribed {:text (str "unsubscribed from " (:filter broker-event)) :subject (or client-id "a client")}
     {:text (name event) :subject (or client-id "")}))
 
 (defn- log-event! [broker-event]
