@@ -397,8 +397,14 @@
           (log/trace "Adding to sub-trie for topic:" (:topic-filter topic)  "   qos: " (:qos topic))
           (swap! *offline-trie* trie-delete (:topic-filter topic)
                  {:client-id client-id :qos (:qos topic) :topic-filter (:topic-filter topic)})
+          ;; The whole entry, exactly as subscribe stores one and as
+          ;; remove-client! will delete it. This used to insert only the
+          ;; filter and QoS, so a resumed session lost its version 5 options
+          ;; — and its entry, deleted by the full value on the next
+          ;; disconnect, was never found: it stayed in the live trie pointing
+          ;; at a socket that was gone, for the life of the broker.
           (swap! *subscriber-trie* trie-insert (:topic-filter topic)
-                 {:client-key client-key :qos (:qos topic) :topic-filter (:topic-filter topic)})))
+                 (assoc topic :client-key client-key))))
       (log/trace "client-id:" client-id)
       ;; Stamped on the resumed connection, not carried over from the one that
       ;; went away: the console shows how long this connection has been up.
@@ -552,10 +558,15 @@
     ;; the displaced connection after the replacement has already announced
     ;; itself, and a watcher keeping a record would otherwise mark the new
     ;; connection as gone.
-    (events/emit! {:event      :client-disconnected
-                   :client-id  (get-in @*clients* [key :client-id])
-                   :connect-id (get-in @*clients* [key :connect-id])
-                   :clients    (MqttStat/connectedClients)}))
+    (events/emit! (cond-> {:event      :client-disconnected
+                           :client-id  (get-in @*clients* [key :client-id])
+                           :connect-id (get-in @*clients* [key :connect-id])
+                           :clients    (MqttStat/connectedClients)}
+                    ;; The interval as it stands now: a DISCONNECT may have
+                    ;; changed it (§3.14.2.2.2), and it decides how long the
+                    ;; session is kept.
+                    (>= (long (or (get-in @*clients* [key :protocol-version]) 4)) 5)
+                    (assoc :session-expiry-interval (session-expiry-seconds (get @*clients* key))))))
   (log/trace "REMOVE: clean session?" (get-in @*clients* [key :clean-session?] true))
   (log/trace "key:" key)
   (let [client            (get @*clients* key)

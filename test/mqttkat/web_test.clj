@@ -55,6 +55,8 @@
   (testing "each console page is served, and nothing else is"
     (doseq [[uri title] [["/"         "Overview — MQTT Console"]
                          ["/topics"   "Topics — MQTT Console"]
+                         ["/clients"  "Clients — MQTT Console"]
+                         ["/brokers"  "Brokers — MQTT Console"]
                          ["/status"   "mqtt-kat"]]]
       (let [ok (web/handler {:request-method :get :uri uri})]
         (is (= 200 (:status ok)) (str uri " should be served"))
@@ -125,7 +127,8 @@
 (deftest the-active-nav-item-is-marked
   (testing "each page marks its own nav entry, for CSS and for screen readers"
     (doseq [[page href] [[(console/overview-page) "/"]
-                         [(console/topics-page) "/topics"]]]
+                         [(console/topics-page) "/topics"]
+                         [(console/brokers-page) "/brokers"]]]
       (is (re-find (re-pattern (str "aria-current=\"page\"[^>]*href=\"" href "\"|"
                                     "href=\"" href "\"[^>]*aria-current=\"page\"")) page)
           (str href " should be the current page")))
@@ -198,7 +201,8 @@
     ;; settings-page is in here although nothing serves it: its stylesheet is
     ;; kept for when it is wired up, and this is what stops those rules being
     ;; dropped as unused in the meantime.
-    (let [markup   (str (console/overview-page) (console/topics-page) (console/settings-page))
+    (let [markup   (str (console/overview-page) (console/topics-page) (console/brokers-page)
+                        (console/settings-page))
           used     (into #{} (mapcat #(str/split % #"\s+"))
                          (map second (re-seq #"class=\"([^\"]+)\"" markup)))
           css      (str (slurp (io/resource "public/css/modernist.css"))
@@ -254,3 +258,9 @@
               "a port that cannot be bound should give nil, not an exception")))
       (finally
         (web/stop!)))))
+
+(deftest the-brokers-page-says-when-there-is-no-cluster
+  (testing "a broker on its own has no registry to show, and says so"
+    (let [page (console/brokers-page)]
+      (is (str/includes? page "Not attached to a Rama cluster"))
+      (is (str/includes? page "id=\"broker-list\"")))))

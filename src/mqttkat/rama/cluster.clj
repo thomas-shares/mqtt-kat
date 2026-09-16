@@ -189,11 +189,12 @@
    ended — a DISCONNECT, a dropped socket, a takeover. Names the connection,
    so a disconnect that reaches Rama after the client is already back on a
    new one marks nothing."
-  [{:keys [connect-id client-id]}]
-  {:event      :disconnect
-   :connect-id connect-id
-   :client-id  client-id
-   :at         (System/currentTimeMillis)})
+  [{:keys [connect-id client-id session-expiry-interval]}]
+  (cond-> {:event      :disconnect
+           :connect-id connect-id
+           :client-id  client-id
+           :at         (System/currentTimeMillis)}
+    session-expiry-interval (assoc :session-expiry-interval (long session-expiry-interval))))
 
 (defn ->subscribe
   "The record for a subscription the broker has accepted: the filter as the
@@ -242,6 +243,15 @@
   "The record for messages taken off `client-id`'s queue, by key."
   [client-id keys]
   {:event :dequeue :client-id client-id :keys (vec keys) :at (System/currentTimeMillis)})
+
+(defn ->broker-stats
+  "The record of how this broker is doing, for the others' consoles."
+  [stats]
+  {:event       :broker-stats
+   :broker-id   broker-id
+   :incarnation incarnation
+   :stats       stats
+   :at          (System/currentTimeMillis)})
 
 (defn ->broker-down
   "The record withdrawing this broker."
@@ -524,9 +534,19 @@
                  is not off. One per JVM, like the server itself."}
   *connection* (atom nil))
 
+(defn brokers
+  "Every broker in the cluster as the registry has it, this one included:
+   broker-id -> {:host :port :at :incarnation :stats :stats-at}. Empty when
+   not attached."
+  []
+  (if-let [c @*connection*]
+    @(:brokers c)
+    {}))
+
 (defn- on-broker-event
-  "What the broker tells its listeners, turned into a session event. Only
-   the four that are about a session; the broker says other things too."
+  "What the broker tells its listeners, turned into a session event. The
+   four about a session, and the console's sample of this broker's figures;
+   the broker says other things too."
   [{:keys [event connect] :as broker-event}]
   (when-let [c @*connection*]
     (case event
@@ -534,6 +554,7 @@
       :client-disconnected (record! c (->disconnect broker-event))
       :client-subscribed   (record! c (->subscribe broker-event))
       :client-unsubscribed (record! c (->unsubscribe broker-event))
+      :broker-sample       (record! c (->broker-stats (:stats broker-event)))
       nil)))
 
 (defn attach!

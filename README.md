@@ -88,8 +88,11 @@ In `src/mqttkat/rama/` and around it:
   be proxied, each entry saying whether its client is connected. `$$retained` is
   the retained messages, sharded the same way. `$$queued` is what is waiting for
   each persistent session that is away. `$$brokers` is where each broker says
-  where it listens, and `$$broker->clients` which clients it holds — when a
-  broker comes back, whatever its previous run held is let go. Stream, so an
+  where it listens and how it is doing — a few figures every five seconds, so
+  any broker's console can show every broker — and `$$broker->clients` which
+  clients it holds; when a broker comes back, whatever its previous run held
+  is let go. `$$expiring`
+  is when each parked session is due, swept by a tick. Stream, so an
   append with `:ack` returns with the PStates updated; every connection has a
   `connect-id`, every run of a broker an incarnation, and every write is a
   replace or a delete, so a record run twice gives the same answer.
@@ -130,6 +133,12 @@ In `src/mqttkat/rama/` and around it:
   "brokers" on it plus a stand-in peer listener; connects, disconnects,
   subscribes, unsubscribes, retained messages, shared groups and forwarded
   publishes at every QoS through the real broker; part of `lein test`.
+
+The console has a **Brokers** tab (`/brokers`): every broker in the cluster
+as the registry has it — address, version, uptime, clients, parked sessions and
+subscriptions, message rates, queue depth, heap and CPU, and how long ago it
+last reported. A broker three reports behind is shown as stale. Live over the
+websocket like the other pages; on a broker running without Rama it says so.
 
 Each broker needs a name and an address the others can reach:
 `-Dmqttkat.brokerId` (default: the host name) and `-Dmqttkat.advertise`

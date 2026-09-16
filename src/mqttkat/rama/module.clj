@@ -27,10 +27,18 @@
    order. Queued by whichever broker saw the publish, delivered by whichever
    broker the client comes back to.
 
-   `$$brokers` — where each broker listens, for the others to forward to.
+   `$$brokers` — where each broker listens, for the others to forward to,
+   and how each is doing: every broker reports a few figures every few
+   seconds, and since every broker watches the registry, every broker's
+   console can show every broker.
 
    `$$broker->clients` — which clients are connected on each broker: what a
    broker coming back needs to know about the one it replaced.
+
+   `$$expiring` — when each parked session is due to be forgotten
+   (§3.1.2.11.2), kept on the session's own task and swept by a tick, so a
+   session expires on the cluster's clock whether or not the broker that
+   parked it is still there.
 
    The sharding is for the proxies: a proxied value is read, sent and
    rewritten whole, so it must stay small, and Rama cannot proxy the root of
@@ -47,7 +55,8 @@
      {:event :connect      :connect-id :client-id :broker-id :incarnation
                            :protocol-version :clean-session? :keep-alive
                            :session-expiry-interval :at}
-     {:event :disconnect   :connect-id :client-id :at}
+     {:event :disconnect   :connect-id :client-id :at
+                           [:session-expiry-interval]}   ; a DISCONNECT may change it
      {:event :subscribe    :connect-id :client-id :filter :entry :at}
      {:event :unsubscribe  :connect-id :client-id :filter :at}
      {:event :enqueue      :client-id :key :message :at}
@@ -55,6 +64,7 @@
      {:event :retain       :topic :message :at}
      {:event :unretain     :topic :at}
      {:event :broker-up    :broker-id :incarnation :host :port :at}
+     {:event :broker-stats :broker-id :incarnation :stats :at}
      {:event :broker-down  :broker-id :at}
      {:event :lost         :client-id :broker-id :incarnation :at}
 
@@ -92,6 +102,57 @@
   [^String s]
   (mod (hash s) shard-count))
 
+(def REPLACE-TICK-DEPOT
+  "Tests set this true, with-redefs, before launching: the expiry sweep then
+   runs off an ordinary depot the test appends `{:now millis}` to, instead
+   of a tick depot on a timer. Read at launch."
+  false)
+
+(def expiry-sweep-millis
+  "How often parked sessions are checked for ones whose time has come.
+   Nothing depends on this being prompt — a client resuming an expired
+   session that has not been swept yet simply gets it back, which §3.1.2.11
+   allows the server to do."
+  5000)
+
+(def never-expires
+  "0xFFFFFFFF — §3.1.2.11.2's \"do not expire\", not a very long timer."
+  4294967295)
+
+(defn expiry-key
+  "How `$$expiring` orders parked sessions: by when they are due, then by
+   client id, so a range up to now is exactly the ones whose time has come."
+  [expires-at client-id]
+  (format "%013d|%s" (long expires-at) client-id))
+
+(defn expiry-key->client-id [^String k]
+  (subs k 14))
+
+(defn task-is-partition
+  "`$$expiring`'s key partitioner: the key is the task, so it is the
+   partition. A top-level function, which is what Rama requires of one."
+  [_num-partitions task]
+  task)
+
+(defn kept?
+  "Whether a session outlives its connection, by the broker's own rule
+   (mqttkat.handlers/keep-session?): version 5 decides on the Session
+   Expiry Interval, 3.1.1 on CleanSession."
+  [protocol-version clean-session? session-expiry-interval]
+  (if (>= (long (or protocol-version 4)) 5)
+    (pos? (long (or session-expiry-interval 0)))
+    (false? clean-session?)))
+
+(defn expires-at
+  "When a session parked at `at` is forgotten, or nil for one that never
+   is: a 3.1.1 session, or a version 5 one that asked not to be."
+  [protocol-version session-expiry-interval at]
+  (let [interval (long (or session-expiry-interval 0))]
+    (when (and (>= (long (or protocol-version 4)) 5)
+               (pos? interval)
+               (not= interval never-expires))
+      (+ (long at) (* 1000 interval)))))
+
 (def queue-limit
   "How many messages are kept for one session that is away before more are
    refused. The broker's own pending-limit, for the same reason: something
@@ -116,6 +177,7 @@
                       :connected-at            Long
                       :disconnected-at         Long
                       :connections             Long
+                      :expires-at              Long
                       :subscriptions           (map-schema String Object)}))
 
 (defn partition-key
@@ -146,6 +208,9 @@
   ;; subscribe. One depot for every kind of event for that reason: two
   ;; depots would give no order between them.
   (declare-depot setup *session-events (hash-by partition-key))
+  (if REPLACE-TICK-DEPOT
+    (declare-depot setup *expiry-tick :random {:global? true})
+    (declare-tick-depot setup *expiry-tick expiry-sweep-millis))
 
   ;; A stream topology, so a record is in the PStates by the time an append
   ;; with :ack returns. See the namespace doc for what stream's at-least-once
@@ -161,8 +226,42 @@
     ;; message — its time and a random suffix — so they come back in the
     ;; order they were queued, and the same message queued twice is once.
     (declare-pstate s $$queued {String (map-schema String Object {:subindex? true})})
+    ;; One entry per task, keyed by the task itself: the index for the
+    ;; sessions on this task lives on this task, next to them, and the sweep
+    ;; runs everywhere at once without a hop. Inside, a sorted map of due
+    ;; time and client id, so what is due is one range.
+    (declare-pstate s $$expiring {Long (map-schema String String {:subindex? true})}
+                    {:key-partitioner task-is-partition})
 
     (<<sources s
+      ;; ── the sweep ──────────────────────────────────────────────────
+      (source> *expiry-tick :> *tick)
+      (<<if (map? *tick)
+        (get *tick :now :> *now)
+        (else>)
+        (System/currentTimeMillis :> *now))
+      (|all)
+      (ops/current-task-id :> *task)
+      (expiry-key *now "" :> *upto)
+      (local-select> [(keypath *task) (sorted-map-range-to *upto 256) ALL]
+                     $$expiring {:allow-yield? true} :> [*ikey *due-connect-id])
+      (expiry-key->client-id *ikey :> *client-id)
+      (local-transform> [(keypath *task *ikey) NONE>] $$expiring)
+      (local-select> [(keypath *client-id)] $$sessions :> *current)
+      ;; Still away, and still the connection that parked it: a client that
+      ;; came back, or came and went again, has a later entry of its own.
+      (<<if (and> (not (get *current :connected?))
+                  (= *due-connect-id (get *current :connect-id)))
+        (get *current :subscriptions {} :> *subs)
+        (local-transform> [(keypath *client-id) NONE>] $$queued)
+        (local-transform> [(keypath *client-id) NONE>] $$sessions)
+        (ops/explode (vec (keys *subs)) :> *filter)
+        (shard-of *filter :> *shard)
+        (|hash *shard)
+        (local-transform> [(keypath *shard *filter *client-id) NONE>] $$subscriptions)
+        (local-transform> [(keypath *shard *filter) (pred empty?) NONE>] $$subscriptions))
+
+      ;; ── the events ─────────────────────────────────────────────────
       (source> *session-events :> {:keys [*event *client-id *connect-id *at] :as *record})
       (<<switch *event
 
@@ -172,9 +271,10 @@
         (identity registry-key :> *registry)
         (|hash *registry)
         (local-transform> [(keypath *registry *b)
-                           (termval {:host (get *record :host)
-                                     :port (get *record :port)
-                                     :at   *at})]
+                           (termval {:host        (get *record :host)
+                                     :port        (get *record :port)
+                                     :incarnation (get *record :incarnation)
+                                     :at          *at})]
                           $$brokers)
         ;; Whatever the broker this one replaces was holding is not held any
         ;; more: every client it had connected is told to the client's own
@@ -191,6 +291,22 @@
                                   :incarnation (get *record :incarnation)
                                   :at          *at}
                                  :append-ack)
+
+        ;; Only onto an entry that is there: a report from a broker that has
+        ;; withdrawn, or has not announced yet, must not conjure one up
+        ;; without an address. Only from the run that is announced: a report
+        ;; still in flight from the run before is about a broker that is
+        ;; gone.
+        (case> :broker-stats)
+        (get *record :broker-id :> *b)
+        (identity registry-key :> *registry)
+        (|hash *registry)
+        (local-select> [(keypath *registry *b)] $$brokers :> *entry)
+        (<<if (and> *entry (= (get *entry :incarnation) (get *record :incarnation)))
+          (local-transform> [(keypath *registry *b)
+                             (multi-path [:stats (termval (get *record :stats))]
+                                         [:stats-at (termval *at)])]
+                            $$brokers))
 
         (case> :broker-down)
         (identity registry-key :> *registry)
@@ -260,6 +376,11 @@
                                          :connections             (inc *n)
                                          :subscriptions           *kept})]
                               $$sessions)
+            ;; Back before its time: no longer due.
+            (<<if (get *current :expires-at)
+              (ops/current-task-id :> *task)
+              (local-transform> [(keypath *task (expiry-key (get *current :expires-at) *client-id)) NONE>]
+                                $$expiring))
             (|hash *b)
             (local-transform> [(keypath *b) NONE-ELEM (termval *client-id)] $$broker->clients)
             (ops/explode (vec (keys *subs)) :> *filter)
@@ -288,24 +409,36 @@
                   (not= (get *record :incarnation) (get *current :incarnation))
                   :> *ends?))
           (<<if *ends?
-            (get *current :clean-session? :> *clean?)
             (get *current :broker-id :> *b)
+            ;; §3.14.2.2.2: a DISCONNECT may change the interval on the way
+            ;; out; otherwise the session keeps the one it connected with.
+            (get *record :session-expiry-interval (get *current :session-expiry-interval) :> *interval)
+            (kept? (get *current :protocol-version) (get *current :clean-session?) *interval :> *kept?)
+            (not *kept? :> *clean?)
             (<<if *clean?
               ;; The session ends with the connection: its subscriptions go,
               ;; the record stays as history.
               (local-transform> [(keypath *client-id)
                                  (multi-path [:connected? (termval false)]
                                              [:disconnected-at (termval *at)]
+                                             [:session-expiry-interval (termval *interval)]
                                              [:subscriptions (termval {})])]
                                 $$sessions)
               (else>)
-              ;; Two fields of the record, the rest untouched: the session is
-              ;; still what the client asked for, it is just not here right
-              ;; now.
+              ;; Parked: still what the client asked for, just not here
+              ;; right now — and, for a version 5 session with an interval,
+              ;; due to be forgotten when it passes, which the sweep sees to.
+              (expires-at (get *current :protocol-version) *interval *at :> *expires)
               (local-transform> [(keypath *client-id)
                                  (multi-path [:connected? (termval false)]
-                                             [:disconnected-at (termval *at)])]
-                                $$sessions))
+                                             [:disconnected-at (termval *at)]
+                                             [:session-expiry-interval (termval *interval)]
+                                             [:expires-at (termval *expires)])]
+                                $$sessions)
+              (<<if *expires
+                (ops/current-task-id :> *task)
+                (local-transform> [(keypath *task (expiry-key *expires *client-id)) (termval *connect-id)]
+                                  $$expiring)))
             (|hash *b)
             (local-transform> [(keypath *b) (set-elem *client-id) NONE>] $$broker->clients)
             (ops/explode (vec (keys *subs)) :> *filter)

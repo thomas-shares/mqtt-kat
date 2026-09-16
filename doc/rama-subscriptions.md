@@ -404,6 +404,56 @@ Open:
   any more. Messages the old broker hands over when that connection
   finally ends land on the cluster's queue and reach the client on its
   next resume, not this one.
-- Session expiry is still per broker: the broker that parked a session
-  discards its own copy when the interval passes, and the cluster's record
-  stays.
+
+## 12. Sessions expire on the cluster's clock
+
+The broker's rule for whether a session outlives its connection is now
+Rama's too (`module/kept?`, the same rule as `handlers/keep-session?`):
+3.1.1 decides on CleanSession and never expires; version 5 decides on the
+Session Expiry Interval, which a DISCONNECT may change on the way out
+(§3.14.2.2.2) — the disconnect event carries the interval as it stands —
+and 0xFFFFFFFF means never. Before this the topology kept a session on the
+clean flag alone, which is 3.1.1's rule applied to version 5.
+
+When a version 5 session with an interval is parked, its due time goes in
+the record (`:expires-at`) and in `$$expiring`: one entry per task, keyed
+by the task itself through a key partitioner, holding a sorted map of
+`due-time|client-id` → connect-id. So the index for a task's sessions is on
+that task, and the sweep — a tick depot every five seconds, `|all`, one
+range read per task up to now — finds what is due without a hop, checks
+the session is still away and still the connection that parked it, and
+forgets it: the record, the queue, and the subscriptions in the shards
+(one hop per filter). A client coming back in time deletes its own entry;
+one whose entry is stale is simply skipped. Tests replace the tick with a
+depot they append `{:now …}` to.
+
+The broker that parked a session still discards its own in-memory copy on
+its own timer; that copy is replaced from the cluster's on the next
+CONNECT anyway.
+
+Verified on the real cluster with the real tick: a version 5 client with a
+thirty-second interval connected, subscribed and disconnected; the record
+showed it parked and counting down, and it was gone at the first sweep
+after its time.
+
+## 13. The brokers, on every console
+
+Every broker reports a small sample of its state every five seconds — a
+`:broker-sample` on the event bus from the websocket ticker, recorded as a
+`:broker-stats` event — and the topology stores it on the broker's entry
+in `$$brokers`, the registry every broker already watches. A report only
+lands on an entry that exists and only from the run that announced it, so a
+withdrawn or unannounced broker gets no ghost entry and a report in flight
+from a previous run is dropped. Each broker's `:brokers` atom therefore
+carries every broker's latest figures within a proxy push, and the console's
+Brokers tab (`/brokers`, `state/broker-rows`) renders them, this broker
+first, with a stale mark once three reports are missing. The page is served
+from the atom and kept live over the websocket exactly as the clients
+table is.
+
+Found on the way: `add-client!` resumed a parked session by inserting a
+reduced entry — filter and QoS only — into the live trie, while every
+delete matches the whole entry. A resumed session lost its version 5
+options, and after its next disconnect its entry stayed in the live trie
+pointing at a socket that was gone, for the life of the broker. It inserts
+the whole entry now.

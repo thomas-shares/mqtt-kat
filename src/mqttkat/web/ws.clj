@@ -103,6 +103,7 @@
   (case (second (re-find #"(?:^|&)page=([^&]*)" (or (:query-string request) "")))
     "topics"  :topics
     "clients" :clients
+    "brokers" :brokers
     :overview))
 
 (defn snapshot
@@ -123,7 +124,8 @@
              :history   @history
              :events    (recent-events)}
       (= page :topics)  (assoc :topics (:topics now))
-      (= page :clients) (assoc :clients (:rows (state/client-rows))))))
+      (= page :clients) (assoc :clients (:rows (state/client-rows)))
+      (= page :brokers) (assoc :brokers (state/broker-rows)))))
 
 (defn handler [request]
   (let [page (page-of request)]
@@ -134,9 +136,21 @@
                       :on-close (fn [ch _status]
                                   (swap! sockets dissoc ch))})))
 
+(def report-every
+  "Every how many samples this broker tells the cluster how it is doing:
+   one report in five seconds, for a table that is looked at rather than
+   charted."
+  5)
+
+(defonce ^:private ticks (atom 0))
+
 (defn- tick! []
   (let [reading (state/sample!)
         point   (remember! (state/sample-point reading))]
+    ;; Onto the event bus, for whoever keeps the cluster's registry — the
+    ;; console does not know whether there is one, and need not.
+    (when (zero? (mod (swap! ticks inc) report-every))
+      (events/emit! {:event :broker-sample :stats (state/broker-stats reading)}))
     (when (seq @sockets)
       (broadcast!
        (fn [page]
@@ -145,7 +159,8 @@
                    :fields (state/fields reading)
                    :sample point}
             (= page :topics)  (assoc :topics (:topics reading))
-            (= page :clients) (assoc :clients (:rows (state/client-rows))))))))))
+            (= page :clients) (assoc :clients (:rows (state/client-rows)))
+            (= page :brokers) (assoc :brokers (state/broker-rows)))))))))
 
 (defn- describe
   "One line for the events list. The broker emits keywords and ids; turning

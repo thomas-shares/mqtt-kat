@@ -12,16 +12,20 @@
    by the time the append's future is realised the session is in the PState
    and assertions can be immediate. Through the broker the append is
    asynchronous, so those assertions wait."
-  (:require [clojure.test :refer [deftest is testing use-fixtures]]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is testing use-fixtures]]
             [com.rpl.rama :as r]
             [com.rpl.rama.path :refer [keypath]]
             [mqttkat.bridge :as bridge]
             [mqttkat.client :as client]
+            [mqttkat.events :as events]
             [mqttkat.handlers :as h]
             [mqttkat.rama.cluster :as cluster]
             [mqttkat.rama.module :as module]
             [mqttkat.retained :as retained]
-            [mqttkat.test-util :as tu])
+            [mqttkat.test-util :as tu]
+            [mqttkat.web.console :as console]
+            [mqttkat.web.state :as state])
   (:import [org.mqttkat MqttHandler]
            [org.mqttkat.packages MqttPubRec]
            [org.mqttkat.server MqttServer]))
@@ -116,7 +120,8 @@
         (cluster/matching-subscriptions conn topic)))
 
 (deftest sessions-module
-  (with-redefs [cluster/in-process-config {:tasks (rand-nth [2 4 8]) :threads 2 :workers 1}]
+  (with-redefs [cluster/in-process-config {:tasks (rand-nth [2 4 8]) :threads 2 :workers 1}
+                module/REPLACE-TICK-DEPOT true]
     (let [conn (cluster/connect :in-process)
           ;; Another broker, as far as Rama can tell: its own handles on the
           ;; same cluster, watching the same subscriptions, recording nothing.
@@ -197,6 +202,7 @@
                         :connected?              false
                         :connected-at            (:at c)
                         :disconnected-at         (:at d)
+                        :expires-at              (+ (:at d) 600000)
                         :connections             1
                         :subscriptions           {}}
                        (dissoc (cluster/session conn "sensor-7") :incarnation)))
@@ -428,6 +434,85 @@
               (is (true? (:clean-session? (:session r))) "a clean session is known, for the takeover")
               (is (= {:subscriptions {} :queued []} (dissoc r :session)) "but nothing is resumed"))))
 
+        (testing "session expiry, on the cluster's clock"
+          (let [tick   (r/foreign-depot (:cluster conn) (:module-name conn) "*expiry-tick")
+                sweep! (fn [now] @(r/foreign-append-async! tick {:now now} :ack))
+                t0     1000000000000]
+            (testing "a version 5 session with an interval is forgotten when it passes"
+              (let [c (assoc (cluster/->connect (connect-map "expiring" :version 5 :clean? false :expiry 60))
+                             :at t0)]
+                (record! conn c)
+                (record! conn (cluster/->subscribe {:connect-id (:connect-id c) :client-id "expiring"
+                                                    :filter "exp/#" :entry (entry "exp/#" 1)}))
+                (record! conn (cluster/->enqueue "expiring" {:topic "exp/t" :payload (.getBytes "q") :qos 1}))
+                (record! conn (assoc (cluster/->disconnect c) :at t0))
+                (is (= (+ t0 60000) (:expires-at (cluster/session conn "expiring"))))
+                (is (tu/wait-until #(contains? (matches conn "exp/t") "expiring")))
+                (sweep! (+ t0 59000))
+                (is (some? (cluster/session conn "expiring")) "not yet")
+                (sweep! (+ t0 61000))
+                (is (nil? (cluster/session conn "expiring")) "gone: the record")
+                (is (empty? (cluster/queued conn "expiring")) "the queue")
+                (is (tu/wait-until #(not (contains? (matches conn "exp/t") "expiring"))) "and the subscriptions")
+                (is (nil? (cluster/resume conn "expiring")))))
+
+            (testing "coming back in time cancels it; going away again sets a new one"
+              (let [c1 (assoc (cluster/->connect (connect-map "returner" :version 5 :clean? false :expiry 60)) :at t0)
+                    _  (record! conn c1)
+                    _  (record! conn (assoc (cluster/->disconnect c1) :at t0))
+                    c2 (assoc (cluster/->connect (connect-map "returner" :version 5 :clean? false :expiry 60))
+                              :at (+ t0 30000))]
+                (record! conn c2)
+                (is (nil? (:expires-at (cluster/session conn "returner"))))
+                (sweep! (+ t0 61000))
+                (is (true? (cluster/connected? conn "returner")) "the first due time no longer counts")
+                (record! conn (assoc (cluster/->disconnect c2) :at (+ t0 40000)))
+                (is (= (+ t0 100000) (:expires-at (cluster/session conn "returner"))))
+                (sweep! (+ t0 61000))
+                (is (some? (cluster/session conn "returner")))
+                (sweep! (+ t0 100001))
+                (is (nil? (cluster/session conn "returner")))))
+
+            (testing "a DISCONNECT can shorten the interval on the way out"
+              (let [c (assoc (cluster/->connect (connect-map "shortener" :version 5 :clean? false :expiry 3600)) :at t0)]
+                (record! conn c)
+                (record! conn (assoc (cluster/->disconnect (assoc c :session-expiry-interval 5)) :at t0))
+                (is (= (+ t0 5000) (:expires-at (cluster/session conn "shortener"))))
+                (is (= 5 (:session-expiry-interval (cluster/session conn "shortener"))))
+                (sweep! (+ t0 5001))
+                (is (nil? (cluster/session conn "shortener")))))
+
+            (testing "a version 5 session with interval 0 ends with the connection, clean start or not"
+              (let [c (cluster/->connect (connect-map "brief" :version 5 :clean? false))]
+                (record! conn c)
+                (record! conn (cluster/->subscribe {:connect-id (:connect-id c) :client-id "brief"
+                                                    :filter "brief/#" :entry (entry "brief/#" 0)}))
+                (record! conn (cluster/->disconnect c))
+                (is (= {} (cluster/subscriptions conn "brief")))
+                (is (nil? (:expires-at (cluster/session conn "brief"))))
+                (is (tu/wait-until #(not (contains? (matches conn "brief/t") "brief"))))))
+
+            (testing "a version 5 clean start with an interval is kept all the same"
+              (let [c (cluster/->connect (connect-map "kept-clean" :version 5 :clean? true :expiry 60))]
+                (record! conn c)
+                (record! conn (cluster/->subscribe {:connect-id (:connect-id c) :client-id "kept-clean"
+                                                    :filter "kc/#" :entry (entry "kc/#" 0)}))
+                (record! conn (cluster/->disconnect c))
+                (is (= {"kc/#" (entry "kc/#" 0)} (cluster/subscriptions conn "kept-clean")))
+                (is (some? (:expires-at (cluster/session conn "kept-clean"))))))
+
+            (testing "a 3.1.1 persistent session never expires, and 0xFFFFFFFF means never too"
+              (let [v4 (assoc (cluster/->connect (connect-map "forever-4" :clean? false)) :at t0)
+                    v5 (assoc (cluster/->connect (connect-map "forever-5" :version 5 :clean? false :expiry 4294967295)) :at t0)]
+                (doseq [c [v4 v5]]
+                  (record! conn c)
+                  (record! conn (assoc (cluster/->disconnect c) :at t0)))
+                (is (nil? (:expires-at (cluster/session conn "forever-4"))))
+                (is (nil? (:expires-at (cluster/session conn "forever-5"))))
+                (sweep! (+ t0 1000000000000))
+                (is (some? (cluster/session conn "forever-4")))
+                (is (some? (cluster/session conn "forever-5")))))))
+
         (testing "a broker that starts later sees everything that is already there"
           (let [late (cluster/watch! (cluster/connect-to (:cluster conn)))]
             (try
@@ -527,10 +612,11 @@
               (let [{:keys [server port received]} (peer-broker)
                     of-type   (fn [t] (filterv #(= t (:packet-type %)) @received))
                     publishes #(of-type :PUBLISH)
-                    peer-addr {:host "127.0.0.1" :port port :at 0}]
+                    peer-addr {:host "127.0.0.1" :port port :at 0 :incarnation "peer-run"}]
                 (try
                   (testing "the peer announces itself and every broker sees it"
-                    (record! conn {:event :broker-up :broker-id "peer-x" :host "127.0.0.1" :port port :at 0})
+                    (record! conn {:event :broker-up :broker-id "peer-x" :incarnation "peer-run"
+                                   :host "127.0.0.1" :port port :at 0})
                     (is (tu/wait-until #(and (= peer-addr (get @(:brokers conn) "peer-x"))
                                              (= peer-addr (get @(:brokers peer) "peer-x")))))
                     (is (= peer-addr (get @(:brokers peer) "peer-x"))))
@@ -715,7 +801,7 @@
                           (is (= before (count (publishes))) "and nothing went to the peer: nobody there is present"))
 
                         (testing "the client comes back — here, though it was never here — and gets it"
-                          (let [c2 (tu/connect! "back" :id "parked-elsewhere" :clean-session? false)]
+                          (let [c2 (tu/connect! "back" :id "parked-elsewhere" :clean-session? false :ordered? true)]
                             (try
                               (is (true? (:session-present? (:connack c2))))
                               (let [got (tu/expect-eventually! (:ch c2) :PUBLISH)]
@@ -752,7 +838,7 @@
                         (client/send-message (:client pub) (publish-msg "leave/t" "while away" 1 41 :version 4))
                         (tu/expect-eventually! (:ch pub) :PUBACK)
                         (is (tu/wait-until #(= 1 (count (cluster/queued conn id)))))
-                        (let [c2 (tu/connect! "leaver" :id id :clean-session? false)]
+                        (let [c2 (tu/connect! "leaver" :id id :clean-session? false :ordered? true)]
                           (try
                             (is (true? (:session-present? (:connack c2))))
                             (let [got (tu/expect-eventually! (:ch c2) :PUBLISH)]
@@ -765,7 +851,7 @@
                               (tu/close! c2))))
 
                         (testing "delivered live but not acknowledged when it left: kept for it on the cluster"
-                          (let [c3 (tu/connect! "leaver" :id id :clean-session? false)]
+                          (let [c3 (tu/connect! "leaver" :id id :clean-session? false :ordered? true)]
                             (client/send-message (:client pub) (publish-msg "leave/t" "unacked" 1 42 :version 4))
                             (tu/expect-eventually! (:ch pub) :PUBACK)
                             (is (= "unacked" (tu/payload-str (tu/expect-eventually! (:ch c3) :PUBLISH))))
@@ -775,7 +861,7 @@
                             (is (tu/wait-until #(= 1 (count (cluster/queued conn id))))
                                 "handed over on the way out")
                             (is (= "unacked" (String. ^bytes (:payload (second (first (cluster/queued conn id)))))))
-                            (let [c4 (tu/connect! "leaver" :id id :clean-session? false)]
+                            (let [c4 (tu/connect! "leaver" :id id :clean-session? false :ordered? true)]
                               (try
                                 (let [got (tu/expect-eventually! (:ch c4) :PUBLISH)]
                                   (is (= "unacked" (tu/payload-str got)) "and sent again on resume")
@@ -829,6 +915,7 @@
                     (is (contains? (bridge/peers) "peer-x"))
                     (record! conn {:event :broker-down :broker-id "peer-x" :at 1})
                     (is (tu/wait-until #(and (nil? (get @(:brokers conn) "peer-x"))
+                                             (nil? (get @(:brokers peer) "peer-x"))
                                              (not (contains? (bridge/peers) "peer-x")))))
                     (is (nil? (get @(:brokers peer) "peer-x"))))
 
@@ -836,6 +923,30 @@
                     @(cluster/record! conn (cluster/->broker-up "here" 1883))
                     (is (tu/wait-until #(= "here" (:host (get @(:brokers peer) cluster/broker-id)))))
                     (is (= 1883 (:port (get @(:brokers peer) cluster/broker-id))))
+                    (is (= cluster/incarnation (:incarnation (get @(:brokers peer) cluster/broker-id))))
+
+                    (testing "and reports how it is doing, for every broker's console"
+                      (events/emit! {:event :broker-sample :stats {:clients 3 :in 10 :out 20 :version "v"}})
+                      (is (tu/wait-until #(= 3 (get-in @(:brokers peer) [cluster/broker-id :stats :clients]))))
+                      (is (number? (get-in @(:brokers peer) [cluster/broker-id :stats-at])))
+                      (let [rows (state/broker-rows)
+                            me   (first rows)]
+                        (is (true? (:self me)) "this broker first")
+                        (is (= cluster/broker-id (:id me)))
+                        (is (= "here:1883" (:address me)))
+                        (is (false? (:stale me)))
+                        (is (= {:clients 3 :in 10 :out 20 :version "v"} (:stats me)))
+                        (is (str/includes? (console/brokers-page) cluster/broker-id)
+                            "and the page shows it"))
+                      (testing "a report from a run that is not the announced one is ignored"
+                        (record! conn (assoc (cluster/->broker-stats {:clients 99}) :incarnation "old-run"))
+                        (Thread/sleep 200)
+                        (is (= 3 (get-in @(:brokers peer) [cluster/broker-id :stats :clients]))))
+                      (testing "a report from a broker that never announced conjures nothing"
+                        (record! conn (assoc (cluster/->broker-stats {:clients 5}) :broker-id "ghost"))
+                        (Thread/sleep 200)
+                        (is (nil? (get @(:brokers peer) "ghost")))))
+
                     @(cluster/record! conn (cluster/->broker-down))
                     (is (tu/wait-until #(nil? (get @(:brokers peer) cluster/broker-id)))))
                   (finally

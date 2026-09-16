@@ -39,6 +39,10 @@
   (icon [:circle {:cx 12 :cy 12 :r 3}]
         [:path {:d "M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"}]))
 
+(def icon-brokers
+  (icon [:rect {:x 3 :y 4 :width 18 :height 6}] [:rect {:x 3 :y 14 :width 18 :height 6}]
+        [:path {:d "M7 7h.01M7 17h.01"}]))
+
 (def icon-clients
   (icon [:circle {:cx 9 :cy 8 :r 3}] [:path {:d "M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"}]
         [:path {:d "M17 11h4M17 16h4"}]))
@@ -73,7 +77,8 @@
     (nav-item {:href "/topics"   :label "Topics"   :glyph icon-topics   :active? (= active :topics)})
     ;; Settings is not in the nav and is not routed. settings-page below still
     ;; builds it — see the note there.
-    (nav-item {:href "/clients"  :label "Clients"  :glyph icon-clients :active? (= active :clients)})]
+    (nav-item {:href "/clients"  :label "Clients"  :glyph icon-clients :active? (= active :clients)})
+    (nav-item {:href "/brokers"  :label "Brokers"  :glyph icon-brokers :active? (= active :brokers)})]
    [:div.side-foot foot]])
 
 (defn- page-head [{:keys [eyebrow title tools]}]
@@ -377,6 +382,69 @@
             [:tr {:id "client-list-empty"}
              [:td {:colspan 8} [:div.event-empty "No clients connected."]]]
             (map client-row rows))]]]]])))
+
+(defn- broker-row
+  "One broker as the cluster's registry has it. The same shape console.js
+   rebuilds from the websocket, so the two cannot disagree for long."
+  [{:keys [id self address up-ms stale age-ms stats]}]
+  (let [{:keys [clients parked subscriptions in out queued inflight heap heap-max cpu version]
+         :or   {clients 0 parked 0 subscriptions 0 in 0 out 0 queued 0 inflight 0}} stats]
+    [:tr
+     [:td.cell-topic {:title id} id (when self [:span.cell-dim " (this one)"])]
+     [:td [:span {:class (str "pill" (when stale " pill--dim"))} (if stale "stale" "up")]]
+     [:td.cell-dim address]
+     [:td.cell-dim (or version "—")]
+     [:td.cell-right.num.cell-dim (idle-str up-ms)]
+     [:td.cell-right.num (if stats (state/commas clients) "—")]
+     [:td.cell-right.num (if stats (str (state/commas parked) " / " (state/commas subscriptions)) "—")]
+     [:td.cell-right.num (if stats (str (state/commas in) " / " (state/commas out)) "—")]
+     [:td.cell-right.num (if stats (str (state/commas queued) " / " (state/commas inflight)) "—")]
+     [:td.cell-right.num (if (and stats heap heap-max)
+                           (str (state/bytes-str heap) " · " (if cpu (format "%.0f%%" (* 100.0 (double cpu))) "—"))
+                           "—")]
+     [:td.cell-right.num.cell-dim (idle-str age-ms)]]))
+
+(defn brokers-page []
+  (let [now    (state/current)
+        fields (state/fields now)
+        rows   (state/broker-rows)]
+    (layout
+     {:title "Brokers — MQTT Console"
+      :active :brokers
+      :sidebar-foot (broker-foot fields)}
+     [:div.main
+      (page-head
+       {:eyebrow "The cluster"
+        :title "Brokers"
+        :tools [:div.page-stamp.num {:id "stamp"} (fields "stamp")]})
+
+      [:div.stat-row
+       [:div.stat [:div.label "Brokers"] [:div.stat-value.num {:id "b-count"} (str (count rows))]]
+       [:div.stat [:div.label "Clients, all brokers"]
+        [:div.stat-value.num {:id "b-clients"} (state/commas (reduce + 0 (keep (comp :clients :stats) rows)))]]
+       [:div.stat [:div.label "Messages / s, all brokers"]
+        [:div.stat-value.num {:id "b-rate"}
+         (state/commas (reduce + 0 (keep #(some-> (:stats %) (as-> st (+ (:in st 0) (:out st 0)))) rows)))]]]
+
+      [:div.panel.panel--flush
+       [:div.panel-head
+        [:h2.panel-title "Brokers"]
+        [:div.chart-scale.num "as the cluster's registry has them · reported every 5 s"]]
+       [:div.table-wrap
+        [:table.table
+         [:thead
+          [:tr [:th {:style "width:22%"} "Broker"] [:th "State"] [:th "Address"] [:th "Version"]
+           [:th.cell-right "Up"] [:th.cell-right "Clients"] [:th.cell-right "Parked / subs"]
+           [:th.cell-right "In / out msg/s"] [:th.cell-right "Queued / in flight"]
+           [:th.cell-right "Heap · CPU"] [:th.cell-right "Reported"]]]
+         ;; Rebuilt by the browser each second — see console.js.
+         [:tbody {:id "broker-list"}
+          (if (empty? rows)
+            [:tr {:id "broker-list-empty"}
+             [:td {:colspan 11}
+              [:div.event-empty
+               "Not attached to a Rama cluster: start with -Dmqttkat.rama=in-process or external."]]]
+            (map broker-row rows))]]]]])))
 
 (defn topics-page []
   (let [now    (state/current)

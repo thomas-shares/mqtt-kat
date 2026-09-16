@@ -375,6 +375,58 @@
     body.innerHTML = html;
   }
 
+  // ── brokers ─────────────────────────────────────────────────────────
+
+  function brokerPill(stale) {
+    return '<span class="pill' + (stale ? ' pill--dim' : '') + '">' +
+           (stale ? "stale" : "up") + "</span>";
+  }
+
+  function bytesStr(n) {
+    if (n === null || n === undefined) return "—";
+    if (n < 1024) return n + " B";
+    if (n < 1048576) return (n / 1024).toFixed(1) + " KB";
+    if (n < 1073741824) return (n / 1048576).toFixed(1) + " MB";
+    return (n / 1073741824).toFixed(2) + " GB";
+  }
+
+  function setBrokers(brokers) {
+    var body = document.getElementById("broker-list");
+    if (!body || !brokers) return;
+    if (brokers.length === 0) {
+      if (!body.querySelector("#broker-list-empty")) {
+        body.innerHTML = '<tr id="broker-list-empty"><td colspan="11">' +
+                         '<div class="event-empty">Not attached to a Rama cluster.</div></td></tr>';
+      }
+      return;
+    }
+    var html = "", clients = 0, rate = 0;
+    for (var i = 0; i < brokers.length; i++) {
+      var b = brokers[i], s = b.stats;
+      if (s) { clients += s.clients || 0; rate += (s["in"] || 0) + (s.out || 0); }
+      // Broker ids come from the command line of whoever started them: untrusted text, escaped.
+      html += "<tr>" +
+        '<td class="cell-topic" title="' + escapeHtml(b.id) + '">' + escapeHtml(b.id) +
+          (b.self ? '<span class="cell-dim"> (this one)</span>' : "") + "</td>" +
+        "<td>" + brokerPill(b.stale) + "</td>" +
+        '<td class="cell-dim">' + escapeHtml(b.address || "") + "</td>" +
+        '<td class="cell-dim">' + escapeHtml((s && s.version) || "—") + "</td>" +
+        '<td class="cell-right num cell-dim">' + idle(b["up-ms"]) + "</td>" +
+        '<td class="cell-right num">' + (s ? commas(s.clients || 0) : "—") + "</td>" +
+        '<td class="cell-right num">' + (s ? commas(s.parked || 0) + " / " + commas(s.subscriptions || 0) : "—") + "</td>" +
+        '<td class="cell-right num">' + (s ? commas(s["in"] || 0) + " / " + commas(s.out || 0) : "—") + "</td>" +
+        '<td class="cell-right num">' + (s ? commas(s.queued || 0) + " / " + commas(s.inflight || 0) : "—") + "</td>" +
+        '<td class="cell-right num">' + (s && s.heap ? bytesStr(s.heap) + " · " +
+            (s.cpu !== null && s.cpu !== undefined ? Math.round(s.cpu * 100) + "%" : "—") : "—") + "</td>" +
+        '<td class="cell-right num cell-dim">' + idle(b["age-ms"]) + "</td></tr>";
+    }
+    body.innerHTML = html;
+    var el;
+    if ((el = document.getElementById("b-count"))) el.textContent = brokers.length;
+    if ((el = document.getElementById("b-clients"))) el.textContent = commas(clients);
+    if ((el = document.getElementById("b-rate"))) el.textContent = commas(rate);
+  }
+
   // ── how far back to chart ───────────────────────────────────────────
   //
   // Built from the retention the server reports rather than hard-coded, so the
@@ -640,6 +692,7 @@
       buildWindowPicker();
       setTopics(message.topics);
       setClients(message.clients);
+      setBrokers(message.brokers);
       setEvents(message.events);
       redraw();
       return;
@@ -647,6 +700,7 @@
     if (message.event === "tick") {
       setTopics(message.topics);
       setClients(message.clients);
+      setBrokers(message.brokers);
       if (message.sample) {
         samples.push(message.sample);
         // Trimmed to what the server itself keeps, so a tab left open all day
@@ -670,6 +724,7 @@
     // this page has somewhere to put rather than all of them to all of us.
     var page = location.pathname === "/topics" ? "topics"
              : location.pathname === "/clients" ? "clients"
+             : location.pathname === "/brokers" ? "brokers"
              : "overview";
     var socket = new WebSocket(scheme + "//" + location.host + "/ws?page=" + page);
 

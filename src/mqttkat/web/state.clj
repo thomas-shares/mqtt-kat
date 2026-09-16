@@ -19,6 +19,8 @@
    exists."
   (:require [clojure.string :as str]
             [mqttkat.handlers :as h]
+            [mqttkat.rama.cluster :as cluster]
+            [mqttkat.sys :as sys]
             [mqttkat.util :as util])
   (:import [java.lang.management ManagementFactory]
            [java.util.concurrent.atomic LongAdder]
@@ -441,6 +443,51 @@
                (cond-> [[(str "c-" id) (value reading)]]
                  (not= :none rate) (conj [(str "c-" id "-rate") (rate-of id)])))
              counter-rows))))
+
+(defn broker-stats
+  "What this broker tells the cluster about itself, for the other brokers'
+   consoles: a handful of figures, sent every few seconds and stored on the
+   registry entry every broker watches — so not the whole reading, and no
+   history."
+  [reading]
+  (let [r (:rates reading {})]
+    {:clients       (:clients reading)
+     :parked        (:parked reading)
+     :subscriptions (:subscriptions reading)
+     :retained      (:retained reading)
+     :in            (Math/round (double (get r "in" 0.0)))
+     :out           (Math/round (double (get r "out" 0.0)))
+     :queued        (:queued reading)
+     :inflight      (:inflight reading)
+     :dropped       (:dropped reading)
+     :heap          (:heap reading)
+     :heap-max      (:heap-max reading)
+     :cpu           (:cpu reading)
+     :uptime        (:uptime reading)
+     :version       sys/broker-version}))
+
+(def stale-after-ms
+  "A broker whose last report is older than this is shown as stale: three
+   reports missed. It may be gone without having said so, or only busy."
+  15000)
+
+(defn broker-rows
+  "Every broker in the cluster, as the registry every broker watches has it,
+   this one first. Empty when not attached to a cluster — the page says so."
+  []
+  (let [now (System/currentTimeMillis)]
+    (->> (cluster/brokers)
+         (map (fn [[id {:keys [host port at stats stats-at]}]]
+                (let [age (when stats-at (max 0 (- now (long stats-at))))]
+                  {:id       id
+                   :self     (= id cluster/broker-id)
+                   :address  (str host ":" port)
+                   :up-ms    (when at (max 0 (- now (long at))))
+                   :stale    (or (nil? age) (> age stale-after-ms))
+                   :age-ms   age
+                   :stats    stats})))
+         (sort-by (fn [{:keys [self id]}] [(if self 0 1) id]))
+         vec)))
 
 (defn sample-point
   "The raw numbers the charts and sparklines are drawn from — one field per
