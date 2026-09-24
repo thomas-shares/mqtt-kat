@@ -76,6 +76,8 @@ body { font-size: 14px; }
   overflow-y: auto;
 }
 .main--settings { grid-template-rows: auto minmax(min-content, 1fr) auto; }
+/* Head, stats, the redirect form, then the table takes the rest. */
+.main--brokers { grid-template-rows: auto auto auto minmax(min-content, 1fr); }
 
 /* ── page head ─────────────────────────────────────────────────────── */
 

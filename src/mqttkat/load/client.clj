@@ -68,9 +68,17 @@
 
 ;; ── receiving ─────────────────────────────────────────────────────────
 
+(defn- v5
+  "A packet map in the dialect of this client's connection: version 5 gets
+   a property block, which 3.1.1 must not have."
+  [client m]
+  (if (:mqtt5? client)
+    (assoc m :protocol-version 5 :properties {})
+    m))
+
 (defn- send! [client ^ByteBuffer buf]
   (try
-    (.sendMessage ^MqttClient (:mqtt client) buf)
+    (.sendMessage ^MqttClient @(:mqtt client) buf)
     true
     (catch Exception e
       (log/debug e "send failed on" (:client-id client))
@@ -113,9 +121,31 @@
                                           :packet-identifier (:packet-identifier msg)}))
       nil)))
 
+(declare reopen!)
+
+(def ^:private redirect-codes
+  "Use another server, Server moved (§4.13): the two CONNACK reason codes
+   that come with a Server Reference."
+  #{0x9C 0x9D})
+
+(defn- on-connack
+  "Connected — or sent elsewhere. A version 5 broker may answer a CONNECT
+   with a Server Reference; a client that follows redirects goes there and
+   asks again, and is only counted connected when a broker takes it. A few
+   hops at most: two brokers each pointing at the other would otherwise
+   have this bouncing for ever."
+  [client {:keys [reason-code properties]}]
+  (let [code (bit-and 0xFF (long (or reason-code 0)))
+        ref  (:server-reference properties)]
+    (if (and (:follow-redirects? client) (contains? redirect-codes code) ref
+             (< (.getAndIncrement ^AtomicInteger (:hops client)) 5))
+      (do (stats/bump! (:counters client) :redirected)
+          (reopen! client ref))
+      (.countDown ^CountDownLatch (:connack client)))))
+
 (defn- handle [client msg]
   (case (:packet-type msg)
-    :CONNACK  (.countDown ^CountDownLatch (:connack client))
+    :CONNACK  (on-connack client msg)
     ;; The latch is one-shot, for the subscribe at setup. The counter is what
     ;; the cycling pool reads, and it is bumped on every SUBACK. bump! is
     ;; nil-safe on a missing key, so an ordinary client — whose counters have
@@ -133,18 +163,47 @@
                                                 :packet-identifier (:packet-identifier msg)}))
     :PUBCOMP  (retire! client (:packet-identifier msg))
     :PINGRESP nil
+    ;; The other way a broker sends a client elsewhere (§4.13): accepted,
+    ;; then told to go. Followed like the CONNACK form, and what this client
+    ;; had asked for on the old connection is asked for again on the new.
+    :DISCONNECT (let [code (bit-and 0xFF (long (or (:reason-code msg) 0)))
+                      ref  (:server-reference (:properties msg))]
+                  (when (and (:follow-redirects? client) (contains? redirect-codes code) ref
+                             (< (.getAndIncrement ^AtomicInteger (:hops client)) 5))
+                    (stats/bump! (:counters client) :redirected)
+                    (reopen! client ref)))
     nil))
 
 ;; ── lifecycle ─────────────────────────────────────────────────────────
 
+(defn- connect-packet [{:keys [client-id mqtt5?]}]
+  (MqttConnect/encode (cond-> {:packet-type :CONNECT :protocol-name "MQTT"
+                               :protocol-version (if mqtt5? 5 4) :keep-alive 0
+                               :clean-session? true :client-id client-id}
+                        mqtt5? (assoc :properties {}))))
+
+(defn- open-socket!
+  "A connection to `host`:`port` whose packets go to `handler`."
+  [host port source-address handler]
+  (MqttClient. ^String host ^int (int port) ^int (int 1) handler nil ^String source-address))
+
 (defn open!
   "Connect a client and send its CONNECT. Does not wait for the CONNACK —
    `await-connack` does, so a caller can open a thousand of these and then wait
-   once, rather than paying a round trip per client."
-  [{:keys [host port client-id index window counters
+   once, rather than paying a round trip per client.
+
+   `mqtt5?` connects in version 5, which is what lets a broker send the
+   client elsewhere (§4.13); `follow-redirects?` has it go."
+  [{:keys [host port client-id index window counters mqtt5? follow-redirects?
            service-latency response-latency ack-latency source-address]}]
   (let [client {:client-id         client-id
                 :index             index
+                :mqtt5?            (boolean (or mqtt5? follow-redirects?))
+                :follow-redirects? (boolean follow-redirects?)
+                :source-address    source-address
+                :hops              (AtomicInteger. 0)
+                :landed            (atom (str host ":" port))
+                :subscribed        (atom nil)
                 :connack           (CountDownLatch. 1)
                 :suback            (CountDownLatch. 1)
                 :next-id           (AtomicInteger. 0)
@@ -156,31 +215,59 @@
                 :ack-latency       ack-latency}
         holder (promise)
         handler (MqttHandler. ^clojure.lang.IFn (fn [msg _] (handle @holder msg)) 1)
-        mqtt (MqttClient. ^String host ^int (int port) ^int (int 1) handler nil
-                          ^String source-address)
-        client (assoc client :mqtt mqtt)]
+        client (assoc client :handler handler
+                      :mqtt (atom (open-socket! host port source-address handler)))]
     (deliver holder client)
-    (send! client (MqttConnect/encode {:packet-type :CONNECT :protocol-name "MQTT"
-                                       :protocol-version 4 :keep-alive 0
-                                       :clean-session? true :client-id client-id}))
+    (send! client (connect-packet client))
     client))
+
+(defn- reopen!
+  "Go where the broker said: a fresh socket to `server-reference`, the same
+   handler, and the CONNECT again. The old socket is closed by the broker
+   that sent us on; closing it here as well is harmless."
+  [client ^String server-reference]
+  (let [[host port] (let [i (.lastIndexOf server-reference ":")]
+                      [(subs server-reference 0 i) (parse-long (subs server-reference (inc i)))])
+        old  @(:mqtt client)]
+    (log/debug (:client-id client) "sent on to" server-reference)
+    (try
+      (reset! (:mqtt client) (open-socket! host port (:source-address client) (:handler client)))
+      (reset! (:landed client) server-reference)
+      (send! client (connect-packet client))
+      ;; Sent on after subscribing — the DISCONNECT form of a redirect can
+      ;; arrive after the SUBSCRIBE went out on the old socket — so ask
+      ;; again here; the SUBACK latch is still waiting for the answer.
+      (when-let [[topic qos] @(:subscribed client)]
+        (send! client (MqttSubscribe/encode (v5 client {:packet-type :SUBSCRIBE
+                                                        :packet-identifier 1
+                                                        :topics [{:qos qos :topic-filter topic}]}))))
+      (catch Exception e
+        (log/warn e (:client-id client) "could not follow the redirect to" server-reference)
+        ;; Counted connected so the run does not hang on it; it will show up
+        ;; as a client that received nothing.
+        (.countDown ^CountDownLatch (:connack client))))
+    (try (.close ^MqttClient old) (catch Exception _ nil))))
 
 (defn await-connack [client ^long ms]
   (.await ^CountDownLatch (:connack client) ms TimeUnit/MILLISECONDS))
 
 (defn subscribe! [client topic ^long qos]
-  (send! client (MqttSubscribe/encode {:packet-type :SUBSCRIBE
-                                       :packet-identifier 1
-                                       :topics [{:qos qos :topic-filter topic}]})))
+  ;; Remembered, so a client sent to another broker after subscribing can
+  ;; subscribe there too.
+  (reset! (:subscribed client) [topic qos])
+  (send! client (MqttSubscribe/encode (v5 client {:packet-type :SUBSCRIBE
+                                                  :packet-identifier 1
+                                                  :topics [{:qos qos :topic-filter topic}]}))))
 
 (defn unsubscribe!
   "Drop `topic`. For the cycling pool, which subscribes and unsubscribes while
    the run is going so the broker is mutating its trie under the fan-out rather
    than only at setup."
   [client topic]
-  (send! client (MqttUnsubscribe/encode {:packet-type :UNSUBSCRIBE
-                                         :packet-identifier 2
-                                         :topics [topic]})))
+  (reset! (:subscribed client) nil)
+  (send! client (MqttUnsubscribe/encode (v5 client {:packet-type :UNSUBSCRIBE
+                                                    :packet-identifier 2
+                                                    :topics [topic]}))))
 
 (defn await-suback [client ^long ms]
   (.await ^CountDownLatch (:suback client) ms TimeUnit/MILLISECONDS))
@@ -215,9 +302,10 @@
     (when id
       (.put ^ConcurrentHashMap (:inflight client) id now))
     (let [ok (send! client (MqttPublish/encode
-                            (cond-> {:packet-type :PUBLISH :topic topic :qos qos
-                                     :payload payload :retain? false :duplicate? false}
-                              id (assoc :packet-identifier id))))]
+                            (v5 client
+                                (cond-> {:packet-type :PUBLISH :topic topic :qos qos
+                                         :payload payload :retain? false :duplicate? false}
+                                  id (assoc :packet-identifier id)))))]
       (if ok
         (stats/bump! (:counters client) :published)
         (do (stats/bump! (:counters client) :failed)
@@ -234,4 +322,10 @@
 
 (defn close! [client]
   (try (send! client (MqttDisconnect/encode)) (catch Exception _ nil))
-  (try (.close ^MqttClient (:mqtt client)) (catch Exception _ nil)))
+  (try (.close ^MqttClient @(:mqtt client)) (catch Exception _ nil)))
+
+(defn landed-on
+  "Where this client ended up connected, as \"host:port\" — the broker it
+   was pointed at, or the one it was sent on to."
+  [client]
+  @(:landed client))

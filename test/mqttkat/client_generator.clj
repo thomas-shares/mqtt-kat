@@ -162,9 +162,19 @@
 (deftest ^:performance multiple-clients
   (let [;;start-time (System/currentTimeMillis)
         clients (into [] (take 1 (repeatedly #(client/client tu/host tu/port handler))))]
-    (doseq [client clients]
-      (log/trace client)
-      (at/after 100 #(start-client client) my-pool))
-    (Thread/sleep 5000)
-    ;(at/show-schedule my-pool)
-    (log/info "done sleeping....")))
+    ;; Closed, and the schedule stopped, when the run is over. Both were left
+    ;; behind, and the rest of the suite shares this JVM's broker: a client
+    ;; still connected with its subscriptions, and a pool still holding
+    ;; work, were enough to make the broker late tidying up other tests'
+    ;; clients — long enough for the next test to publish to a socket that
+    ;; had already gone.
+    (try
+      (doseq [client clients]
+        (log/trace client)
+        (at/after 100 #(start-client client) my-pool))
+      (Thread/sleep 5000)
+      ;(at/show-schedule my-pool)
+      (log/info "done sleeping....")
+      (finally
+        (at/stop-and-reset-pool! my-pool :strategy :kill)
+        (apply tu/close! clients)))))

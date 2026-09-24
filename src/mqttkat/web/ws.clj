@@ -85,7 +85,8 @@
    `payload` is a function of the page, so a message is built once per distinct
    page rather than once per browser — three at most, and usually one."
   [payload]
-  (let [open @sockets
+  ;; Not to a socket still waiting for its snapshot: see handler.
+  (let [open    (into {} (remove (comp #{::pending} val)) @sockets)
         by-page (into {} (map (fn [page] [page (payload page)])) (distinct (vals open)))]
     (doseq [[ch page] open]
       (try
@@ -131,8 +132,20 @@
   (let [page (page-of request)]
     (http/as-channel request
                      {:on-open  (fn [ch]
-                                  (swap! sockets assoc ch page)
-                                  (http/send! ch (json/generate-string (snapshot page))))
+                                  ;; Registered at once, so it is counted, but
+                                  ;; as pending: broadcasts skip it until its
+                                  ;; snapshot has gone. Registered with its page
+                                  ;; straight away, a tick could land between
+                                  ;; the two and reach the page before the
+                                  ;; snapshot it is meant to follow. At worst a
+                                  ;; page misses the one sample taken while it
+                                  ;; was pending; every tick carries whole
+                                  ;; values, so only a chart point is lost.
+                                  (swap! sockets assoc ch ::pending)
+                                  (http/send! ch (json/generate-string (snapshot page)))
+                                  ;; Unless it closed meanwhile: on-close has
+                                  ;; removed it, and this must not put it back.
+                                  (swap! sockets (fn [m] (if (contains? m ch) (assoc m ch page) m))))
                       :on-close (fn [ch _status]
                                   (swap! sockets dissoc ch))})))
 

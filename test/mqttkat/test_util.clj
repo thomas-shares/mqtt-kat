@@ -14,6 +14,7 @@
             [mqttkat.server :as server])
   (:import [org.apache.logging.log4j Level LogManager]
            [org.apache.logging.log4j.core.config Configurator]
+           [java.nio.channels SelectionKey]
            [org.mqttkat MqttHandler]
            [org.mqttkat.client MqttClient]))
 
@@ -235,7 +236,7 @@
               properties (assoc :properties properties)
               will       (assoc :will will))]
     (client/send-message client msg)
-    (assoc c :protocol-version 5 :connack (expect! ch :CONNACK))))
+    (assoc c :protocol-version 5 :client-id (:client-id msg) :connack (expect! ch :CONNACK))))
 
 (defn connect!
   "Create a client and complete the CONNECT/CONNACK handshake.
@@ -251,10 +252,33 @@
                      :client-id        (or id (client-id prefix))}
               will (assoc :will will))]
     (client/send-message client msg)
-    (assoc c :connack (expect! ch :CONNACK))))
+    (assoc c :client-id (:client-id msg) :connack (expect! ch :CONNACK))))
+
+(defn- still-connected?
+  "Whether the broker still holds a live connection for `client-id` — a
+   SelectionKey entry in *clients*, which remove-client! takes out last,
+   after the client's subscriptions have left the trie."
+  [client-id]
+  (some (fn [[k v]] (and (instance? SelectionKey k) (= client-id (:client-id v))))
+        @handlers/*clients*))
 
 (defn close!
-  "Close clients, ignoring the usual noise from an already-dead socket."
+  "Close clients, ignoring the usual noise from an already-dead socket, and
+   wait for the broker to have let them go.
+
+   The wait is the point. Closing the socket returns at once; the broker
+   learns of it on its own reader thread a moment later. Until then the
+   client is still a subscriber, and the next test — publishing to a topic
+   nobody should be listening on, or counting who comes and goes — sees a
+   client from the test before it. A `#` subscriber left in that window was
+   enough to have a publish to a topic nobody subscribed to acknowledged as
+   delivered, whenever the suite ran a little slower than usual.
+
+   Only for clients made by connect! and connect-v5!, which know their id;
+   a bare client! has none to wait on. Bounded, and not asserted: a client
+   the broker already dropped is simply not there to wait for."
   [& clients]
   (doseq [c clients :when c]
-    (try (.close ^MqttClient (:client c c)) (catch Exception _ nil))))
+    (try (.close ^MqttClient (:client c c)) (catch Exception _ nil)))
+  (doseq [c clients :when (and (map? c) (:client-id c))]
+    (wait-until #(not (still-connected? (:client-id c))) 2000)))

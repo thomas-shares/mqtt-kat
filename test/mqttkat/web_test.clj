@@ -264,3 +264,20 @@
     (let [page (console/brokers-page)]
       (is (str/includes? page "Not attached to a Rama cluster"))
       (is (str/includes? page "id=\"broker-list\"")))))
+
+(deftest the-redirect-setting-is-posted-and-checked
+  (testing "the form on the brokers page"
+    (let [page (console/brokers-page)]
+      (is (str/includes? page "action=\"/brokers/redirect\""))
+      (doseq [v ["off" "round-robin" "load" "disconnect" "connack"]]
+        (is (str/includes? page (str "value=\"" v "\"")) v))))
+  (testing "a valid choice is applied and the page reloaded; a bad one refused"
+    (let [post (fn [body] (web/handler {:request-method :post :uri "/brokers/redirect" :body body}))]
+      (is (= 303 (:status (post "policy=round-robin"))))
+      (is (= 303 (:status (post "policy=round-robin&via=connack"))))
+      (is (= "/brokers" (get-in (post "policy=off&via=disconnect") [:headers "Location"])))
+      (is (= 400 (:status (post "policy=random"))))
+      (is (= 400 (:status (post "policy=off&via=carrier-pigeon"))))
+      (is (= 400 (:status (post ""))))
+      (is (= 405 (:status (web/handler {:request-method :post :uri "/brokers"})))
+          "and nothing else takes a post"))))

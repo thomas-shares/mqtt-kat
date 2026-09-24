@@ -752,6 +752,27 @@
   [client-id]
   (count (:pending (some-> (existing-outbound client-id) deref))))
 
+(defonce redirector
+  ;; (fn [client-id] -> {:server-reference :via :session-present?} or nil)
+  ;; or nil. Installed by mqttkat.rama.cluster
+  ;; when the broker is attached: where to send a version 5 client that has
+  ;; just connected, if the cluster's policy says somewhere else (§4.13,
+  ;; Use another server). nil, the broker on its own, takes every client.
+  (atom nil))
+
+(defn redirect-for
+  "Where this CONNECT should be sent instead of taken, or nil.
+
+   Only a version 5 client can be told — 3.1.1 has no reason code and no
+   Server Reference to carry it — and never another broker's bridge, which
+   came here because the cluster said this is where its client's
+   subscriptions are."
+  [{:keys [protocol-version client-id]}]
+  (when-let [f @redirector]
+    (when (and (>= (long (or protocol-version 0)) 5)
+               (not (bridge/bridge? client-id)))
+      (f client-id))))
+
 (defonce session-source
   ;; {:resume    (fn [client-id] -> {:session :subscriptions :queued} or nil)
   ;;  :enqueue!  (fn [client-id msg])
@@ -2108,9 +2129,22 @@
     2 false
     true))
 
+(defn- not-a-client?
+  "Whether `client-key` has no client behind it: a packet on a connection
+   the broker never accepted, or has already let go. A client sent to
+   another broker is accepted and dismissed in the same breath, and may
+   well have its SUBSCRIBE in flight already; acting on it would leave a
+   subscription pointing at a socket that is gone, and tell the cluster
+   about a client with no name."
+  [client-key]
+  (when-not (contains? @*clients* client-key)
+    (log/debug "ignoring a packet from a connection that is not a client:" client-key)
+    true))
+
 (defn subscribe [{:keys [client-key topics packet-identifier properties] :as msg}]
   #_(log/debug "SUBSCRIBE:" (dissoc msg :client-key))
   #_(log/trace "Subscribed PRE ADD:" @*subscriber-trie*)
+  (when-not (not-a-client? client-key)
   (let [version    (protocol-version-of client-key)
         ;; §3.8.2.1.2: at most one, and it applies to every filter in the packet.
         identifier (first (:subscription-identifiers properties))
@@ -2173,13 +2207,14 @@
                                                              refused)
                                                           parsed))}
                         (>= version 5) (assoc :protocol-version 5 :properties {}))))
-        (process-retained-messages client-key replay)))))
+        (process-retained-messages client-key replay))))))
 
 (defn unsubscribe
   [{:keys [topics client-key] :as msg}]
   #_(log/debug "UNSUBSCRIBE:" (dissoc msg :client-key))
   ;(swap! subscribers remove-subsciber (:topics msg) (:client-key msg))
   ;;TODO remove message from outbound messages.. but check if this is really the case.
+  (when-not (not-a-client? client-key)
   (let [version (protocol-version-of client-key)
         ;; One reason code per filter, in the order they were asked about
         ;; (§3.11.3). 0x00 if the subscription was there to remove, 0x11 if it
@@ -2220,7 +2255,7 @@
                                           :properties {}
                                           :response (vec codes)))))
     (log/trace "Unsubscribed trie:" @*subscriber-trie*)
-    (log/trace "Unsubscribed clients:" (get-in @*clients* [client-key]))))
+    (log/trace "Unsubscribed clients:" (get-in @*clients* [client-key])))))
 
 (defn pingreq [{:keys [client-key] :as msg}]
   (log/debug "PINGREQ:" (dissoc msg :client-key))

@@ -457,3 +457,119 @@ delete matches the whole entry. A resumed session lost its version 5
 options, and after its next disconnect its entry stayed in the live trie
 pointing at a socket that was gone, for the life of the broker. It inserts
 the whole entry now.
+
+Two more things, after running several brokers from `scripts/brokers.bb`:
+a broker killed without its shutdown hook stayed in the registry as stale
+for ever, so the expiry sweep now also drops any registry entry nobody has
+reported on for ten minutes (`module/broker-forgotten-after-millis`); and
+`handle-success` sent the CONNACK before `add-client!` had the resumed
+subscriptions in the live trie — a short window that asking the cluster on
+the way in made long enough for a publish to fall through. The session is
+established first now, then the CONNACK.
+
+## 14. What a load across three brokers found
+
+`scripts/brokers.bb start 3` and `lein run -m mqttkat.load.runner --config
+doc/load.edn` — clients spread round-robin, so most deliveries cross a
+bridge — delivered 0.9894 at first. Not the bridge: the loss was a fixed
+~0.15 s of traffic at the start of the run whatever the rate, which is the
+window between a broker acknowledging a SUBSCRIBE and the other brokers'
+copies of `$$subscriptions` having it. The listener that records a
+subscribe or unsubscribe now waits for the append's `:ack` — the handler
+emits before it sends the SUBACK, on the connection's own virtual thread —
+so the acknowledgement means the cluster has it, and the other brokers'
+proxies are being pushed the diff as it goes out. 1.0000 since, at 10,000
+messages a second over three brokers with subscribers cycling.
+
+And one the test suite found under load: a client reconnecting and being
+published to straight after its CONNACK, while this broker's own copy of
+the table still showed it parked — the diff for its connect not yet pushed
+back — was queued for in the cluster *and* delivered live, and got the
+message twice on its next resume. Two things now: a CONNECT is not
+acknowledged until the cluster has processed it, and `plan` never queues
+for a client that is live on this very broker, whatever the copy says.
+
+## 15. Redirecting connections, and a cleanup that has to be bounded
+
+**Redirect.** `$$settings` (one key, proxied like the registry) holds the
+cluster's redirect policy, set from any broker's Brokers page. On a version
+5 CONNECT, before anything about the session is touched, the broker asks
+the policy where the client should go (`cluster/redirect-target`):
+round robin rotates over the brokers the registry has heard from lately,
+this one included; load based takes the fewest clients as last reported
+plus what this broker has sent there since the report. A client sent
+elsewhere gets CONNACK 0x9C with the Server Reference and is closed; the
+sender first writes, and waits for, a `:redirected` note on the client's
+session record, and a broker whose CONNECT finds itself named there takes
+the client — without that, every broker applied the policy to every
+arrival and a client bounced until the load generator gave up on it.
+3.1.1 clients and bridges are never sent on. The load generator follows
+(`--mqtt 5 --follow-redirects 1`), all clients pointed at one broker, and
+reports where they landed: 40/40/40 over three brokers under round robin,
+and under load based with the entry broker busy, 30/30 over the other two.
+
+**The cleanup that wedged the cluster.** The first version of the
+dead-broker cleanup walked every client of the replaced run in the one
+`:broker-up` event. After a run with six thousand subscribers that event
+could not finish inside Rama's five seconds per event, was retried for
+ever, and everything behind it on the depot timed out with it: no
+announcement, no setting, no session could get through. Every event has to
+be small. `:broker-up` now only adds the replaced run to `$$dead-runs`;
+the tick sweep takes one dead run and sixty-four of its clients per tick,
+telling each `:lost` on its own partition, and forgets the run when it is
+empty. A run that held thousands is cleared in minutes, which nothing is
+waiting on. `$$broker->clients` is keyed by run — [broker-id incarnation]
+— so a new run's clients are never mixed with the old run's.
+
+## 16. Three brokers "cannot find the cluster"
+
+They could: they connected and got their handles, and then every append
+timed out. The worker log had the rest: a flood the evening before —
+tens of thousands of processing timeouts in a minute — had left a backlog
+on the depot, the daemons had died with their terminal, and the restarted
+worker was still retrying a handful of records from that backlog for ever,
+each one holding a task for five seconds, so nothing behind them got
+through. The brokers' single announcement at startup timed out too, and was
+never retried.
+
+Three things came out of it. A broker that finds itself missing from its
+own copy of the registry now announces itself again with its next report,
+so a lost announcement costs seconds, not the broker's life. The depot
+client gathers appends for a few milliseconds before sending them
+(`foreign.depot.flush.delay.millis`, `-Dmqttkat.rama.flushMillis`), which is
+what Rama recommends for throughput. And the dev cluster's module was
+destroyed and launched afresh — the code handled the same events in
+milliseconds on an in-process cluster, so the poison was the accumulated
+state, not the topology — after which 10,000 subscribers connected in six
+seconds and a 30-second churn run produced no timeouts at all.
+
+Still worth knowing: a burst of a few thousand connects briefly hits
+`topology.stream.max.executing.per.task` on a task ("Filtering streaming
+event from push path"); the events wait and go through, and the CONNACKs
+they hold up are the back-pressure. (A run at 175 publishes a second
+with ten thousand subscribers turned out to be a single broker doing all
+of it — the config had two of the three brokers commented out — not the
+cluster.)
+
+## 17. Telling the client by DISCONNECT, and two bugs it flushed out
+
+A second cluster setting, `redirect-via`: `:disconnect` (the default) accepts
+the client — CONNACK Success, Session Present from the cluster's record,
+since a persistent client told 0 discards its own state (§3.2.2.1.1) — and
+at once sends DISCONNECT 0x9C with the Server Reference; `:connack` keeps
+the earlier form. Nothing is created on the redirecting broker either way.
+The load client follows both, re-subscribing on the new connection if its
+SUBSCRIBE had gone out on the old one; 40/40/40 and 1.0000 over three real
+brokers, three runs running.
+
+Two things came out of it. Every version 5 CONNACK this broker ever sent
+carried Maximum QoS = 2, which §3.2.2.3.4 calls a Protocol Error — the
+property exists to say a broker does *less* than 2, and absent means 2.
+Paho's conformance suite let it pass; mosquitto's client answered every
+CONNACK with "a network protocol error occurred", which is also why the
+takeover demo with `mosquitto_sub -V 5` failed days ago. The property is
+gone. And a client that has just been accepted-and-dismissed may have its
+SUBSCRIBE in flight already; the handler acted on it — a subscription for a
+socket that was gone, and a subscribe event for a client with no name.
+SUBSCRIBE and UNSUBSCRIBE from a connection with no client behind it are
+ignored now.

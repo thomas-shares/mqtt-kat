@@ -101,7 +101,72 @@
     (let [usage (runner/usage)]
       (doseq [k (keys runner/defaults)]
         (is (str/includes? usage (str "--" (name k)))
-            (str "--" (name k) " should be documented"))))))
+            (str "--" (name k) " should be documented")))))
+
+  (testing "several brokers, from the command line"
+    (let [o (runner/parse-args ["--brokers" "a:1885, b:1886,c:1887"])]
+      (is (= [{:host "a" :port 1885} {:host "b" :port 1886} {:host "c" :port 1887}] (:brokers o)))
+      (is (= {:host "b" :port 1886} (runner/broker-for o 4)) "client 4 of three brokers goes to the second")
+      (is (= "a:1885, b:1886, c:1887" (runner/brokers-str o))))
+    (is (= [{:host "localhost" :port 1883}] (runner/brokers-of runner/defaults))
+        "without --brokers, the one at --host and --port")
+    (is (thrown? clojure.lang.ExceptionInfo (runner/parse-args ["--brokers" "a:x"]))))
+
+  (testing "a config file, with the command line over it"
+    (let [f (java.io.File/createTempFile "load" ".edn")]
+      (try
+        (spit f (pr-str {:brokers [{:host "h" :port 1} {:host "h" :port 2}]
+                         :publishers 40 :qos 2 :host "ignored-by-brokers"}))
+        (let [o (runner/parse-args ["--config" (str f) "--qos" "1"])]
+          (is (= 40 (:publishers o)) "from the file")
+          (is (= 1 (:qos o)) "the flag wins over the file")
+          (is (= (:topics runner/defaults) (:topics o)) "the defaults fill the rest")
+          (is (= 2 (count (runner/brokers-of o)))))
+        (spit f (pr-str {:publisher 40}))
+        (is (thrown? clojure.lang.ExceptionInfo (runner/parse-args ["--config" (str f)]))
+            "a misspelt key in the file is refused, like a misspelt flag")
+        (spit f (pr-str {:publishers "forty"}))
+        (is (thrown? clojure.lang.ExceptionInfo (runner/parse-args ["--config" (str f)]))
+            "and so is a value of the wrong type")
+        (spit f "[1 2 3]")
+        (is (thrown? clojure.lang.ExceptionInfo (runner/parse-args ["--config" (str f)])))
+        (finally
+          (.delete f)))))
+
+  (testing "the shipped example parses"
+    ;; Only that it parses: it is a file to edit, and it gets edited.
+    (let [o (runner/parse-args ["--config" "doc/load.edn"])]
+      (is (pos? (count (runner/brokers-of o))))
+      (is (pos? (:publishers o))))))
+
+(deftest a-run-in-mqtt-5-delivers-too
+  (testing "version 5 clients, following redirects that a broker on its own never sends"
+    (let [r (runner/execute (merge runner/defaults
+                                   {:host tu/host :port tu/port
+                                    :mqtt 5 :follow-redirects 1
+                                    :publishers 2 :subscribers 4 :topics 2
+                                    :messages 200 :rate 500 :qos 1
+                                    :size 64 :progress-ms 0 :drain-ms 1500
+                                    :churn 0 :resubscribe 0}))]
+      (is (= 200 (:published (:counts r))))
+      (is (= 1.0 (:delivery-ratio r)))
+      (is (= 0 (:redirected (:counts r))) "nobody was sent anywhere")
+      (is (= {(str tu/host ":" tu/port) 6} (:landed r)) "and everyone landed where they were pointed"))))
+
+(deftest a-run-over-several-brokers-spreads-its-clients
+  (testing "the same broker twice is two brokers as far as placement goes"
+    ;; Only one broker in the test JVM, so it is named twice: what this checks
+    ;; is that a run addressed to a list connects, spreads and delivers, not
+    ;; that two brokers forward to each other — mqttkat.rama-test does that.
+    (let [r (runner/execute (merge runner/defaults
+                                   {:brokers [{:host tu/host :port tu/port}
+                                              {:host tu/host :port tu/port}]
+                                    :publishers 2 :subscribers 4 :topics 2
+                                    :messages 200 :rate 500 :qos 1
+                                    :size 64 :progress-ms 0 :drain-ms 1500
+                                    :churn 0 :resubscribe 0}))]
+      (is (= 200 (:published (:counts r))))
+      (is (= 1.0 (:delivery-ratio r))))))
 
 (deftest source-addresses-spread-only-where-they-may
   (testing "a loopback broker gets as many addresses as the count needs"

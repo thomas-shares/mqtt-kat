@@ -57,6 +57,30 @@
    :min     (AtomicLong. Long/MAX_VALUE)
    :max     (AtomicLong. Long/MIN_VALUE)})
 
+;; Compare-and-set loops rather than accumulateAndGet with a reified
+;; LongBinaryOperator, which is the same loop inside. Under cloverage's
+;; instrumentation the reify's primitive applyAsLong(long, long) was handed
+;; the accumulator truncated to an int: min(Long/MAX_VALUE, 5) came back -1,
+;; which is (int) Long/MAX_VALUE, and became the smallest sample for ever.
+;; (max survived by luck: (int) Long/MIN_VALUE is 0.) Plain Clojure has no
+;; primitive interface method to get wrong.
+
+(defn- lower-to!
+  "Set `a` to `v` if `v` is smaller."
+  [^AtomicLong a ^long v]
+  (loop []
+    (let [cur (.get a)]
+      (when (and (< v cur) (not (.compareAndSet a cur v)))
+        (recur)))))
+
+(defn- raise-to!
+  "Set `a` to `v` if `v` is larger."
+  [^AtomicLong a ^long v]
+  (loop []
+    (let [cur (.get a)]
+      (when (and (> v cur) (not (.compareAndSet a cur v)))
+        (recur)))))
+
 (defn record!
   "Add one sample, in microseconds. Negative samples are dropped rather than
    clamped: they mean the two clocks being subtracted are not the same clock,
@@ -68,10 +92,8 @@
     (.increment ^LongAdder (:n h))
     (.add ^LongAdder (:sum h) v)
     (.add ^DoubleAdder (:sumsq h) (* (double v) (double v)))
-    (.accumulateAndGet ^AtomicLong (:min h) v (reify java.util.function.LongBinaryOperator
-                                                (applyAsLong [_ a b] (Math/min a b))))
-    (.accumulateAndGet ^AtomicLong (:max h) v (reify java.util.function.LongBinaryOperator
-                                                (applyAsLong [_ a b] (Math/max a b))))))
+    (lower-to! (:min h) v)
+    (raise-to! (:max h) v)))
 
 (defn- percentiles
   "Walks the buckets once for the whole set of quantiles, rather than once
@@ -119,7 +141,9 @@
    a reason. A generator that reports only the last one it managed cannot tell
    you it was the bottleneck."
   [:attempted :published :failed :acked
-   :received :received-dup :received-unparseable])
+   :received :received-dup :received-unparseable
+   ;; Clients a broker sent on to another (§4.13), when the run follows.
+   :redirected])
 
 (defn counters []
   (into {} (map (fn [k] [k (LongAdder.)])) counter-names))

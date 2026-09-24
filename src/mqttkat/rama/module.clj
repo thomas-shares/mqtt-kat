@@ -32,8 +32,16 @@
    seconds, and since every broker watches the registry, every broker's
    console can show every broker.
 
-   `$$broker->clients` — which clients are connected on each broker: what a
-   broker coming back needs to know about the one it replaced.
+   `$$broker->clients` — which clients are connected on each run of each
+   broker, keyed by [broker-id incarnation]: what a broker coming back needs
+   to know about the run it replaced. `$$dead-runs` is the runs that have
+   been replaced and not yet cleared; the sweep lets their clients go a few
+   hundred at a time, because a run that held thousands cannot be let go in
+   one event — Rama gives an event five seconds, and one that overruns is
+   retried until it does not, which it never would.
+
+   `$$settings` — what the operator has set for the whole cluster, under
+   one key so one proxy watches it: for now the connection redirect policy.
 
    `$$expiring` — when each parked session is due to be forgotten
    (§3.1.2.11.2), kept on the session's own task and swept by a tick, so a
@@ -66,6 +74,8 @@
      {:event :broker-up    :broker-id :incarnation :host :port :at}
      {:event :broker-stats :broker-id :incarnation :stats :at}
      {:event :broker-down  :broker-id :at}
+     {:event :setting      :key :value :at}
+     {:event :redirected   :client-id :to :at}
      {:event :lost         :client-id :broker-id :incarnation :at}
 
    `:filter` is the filter as the client sent it — `$share/g/a/#` for a
@@ -115,6 +125,14 @@
    allows the server to do."
   5000)
 
+(def broker-forgotten-after-millis
+  "How long a broker may go without reporting before the registry drops it:
+   ten minutes, against reports every few seconds. A broker that stops
+   without its shutdown hook — killed, crashed, unplugged — never withdraws,
+   and would otherwise be listed as stale for ever. One that is merely busy
+   for a moment is a hundred reports short of this."
+  600000)
+
 (def never-expires
   "0xFFFFFFFF — §3.1.2.11.2's \"do not expire\", not a very long timer."
   4294967295)
@@ -153,6 +171,19 @@
                (not= interval never-expires))
       (+ (long at) (* 1000 interval)))))
 
+(def lost-per-sweep
+  "How many of a dead run's clients one sweep lets go — and one run per
+   sweep. Each is a depot append acknowledged in turn, and Rama gives an
+   event five seconds: sixty-four keeps well inside that on a slow disk. A
+   run that held six thousand takes some minutes to clear, which is fine —
+   nothing waits on it but the sessions' own expiry."
+  64)
+
+(defn run-key
+  "How `$$broker->clients` is keyed: one set per run of a broker."
+  [broker-id incarnation]
+  [broker-id (or incarnation "")])
+
 (def queue-limit
   "How many messages are kept for one session that is away before more are
    refused. The broker's own pending-limit, for the same reason: something
@@ -178,13 +209,18 @@
                       :disconnected-at         Long
                       :connections             Long
                       :expires-at              Long
+                      :sent-to                 String
                       :subscriptions           (map-schema String Object)}))
 
 (defn partition-key
   "What a session event is partitioned by: the client it is about; for the
    events about a broker, the broker; for a retained message, its topic."
-  [{:keys [client-id broker-id topic]}]
-  (or client-id broker-id topic))
+  [{:keys [client-id broker-id topic key]}]
+  (or client-id broker-id topic key))
+
+(def settings-key
+  "The one key `$$settings` uses: name -> value, for the cluster."
+  "settings")
 
 (def registry-key
   "The one key `$$brokers` uses. A proxy watches a key, so the registry is
@@ -220,7 +256,9 @@
     (declare-pstate s $$subscriptions {Long (map-schema String (map-schema String Object))})
     (declare-pstate s $$retained {Long (map-schema String Object)})
     (declare-pstate s $$brokers {String (map-schema String Object)})
-    (declare-pstate s $$broker->clients {String (set-schema String {:subindex? true})})
+    (declare-pstate s $$settings {String (map-schema String Object)})
+    (declare-pstate s $$broker->clients {Object (set-schema String {:subindex? true})})
+    (declare-pstate s $$dead-runs {String (set-schema Object {:subindex? true})})
     ;; Subindexed, so a message is one write, a resume is one seek and a
     ;; walk, and the count is free. Keyed by the name the broker gave the
     ;; message — its time and a random suffix — so they come back in the
@@ -240,6 +278,44 @@
         (get *tick :now :> *now)
         (else>)
         (System/currentTimeMillis :> *now))
+      ;; Two jobs off one tick. The first, on the registry's own partition:
+      ;; forget a broker that has said nothing for long enough. A branch, so
+      ;; that the second job below — which is per task, and per due session
+      ;; — attaches to the tick rather than to whatever this emits.
+      (anchor> <tick>)
+      (<<branch <tick>
+        (identity registry-key :> *registry)
+        (|hash *registry)
+        (anchor> <registry>)
+        (local-select> [(keypath *registry) ALL] $$brokers :> [*b *entry])
+        (max (get *entry :at 0) (get *entry :stats-at 0) :> *heard)
+        (<<if (< *heard (- *now broker-forgotten-after-millis))
+          (local-transform> [(keypath *registry *b) NONE>] $$brokers))
+        ;; And the runs that were replaced: a slice of each run's clients is
+        ;; told :lost, on the client's own partition, which ends the
+        ;; connection there unless the record already shows the client back
+        ;; on a newer run. A run with nobody left is forgotten.
+        (hook> <registry>)
+        (local-select> [(keypath *registry) (sorted-set-range-from "" 1) ALL] $$dead-runs :> *run)
+        (|hash *run)
+        (local-select> [(keypath *run) (view count)] $$broker->clients :> *left)
+        (<<if (zero? *left)
+          (local-transform> [(keypath *run) NONE>] $$broker->clients)
+          (|hash *registry)
+          (local-transform> [(keypath *registry) (set-elem *run) NONE>] $$dead-runs)
+          (else>)
+          (local-select> [(keypath *run) (sorted-set-range-from "" lost-per-sweep) ALL]
+                         $$broker->clients :> *lost-id)
+          (local-transform> [(keypath *run) (set-elem *lost-id) NONE>] $$broker->clients)
+          (|hash *lost-id)
+          (depot-partition-append! *session-events
+                                   {:event       :lost
+                                    :client-id   *lost-id
+                                    :broker-id   (first *run)
+                                    :incarnation (second *run)
+                                    :at          *now}
+                                   :append-ack)))
+      (hook> <tick>)
       (|all)
       (ops/current-task-id :> *task)
       (expiry-key *now "" :> *upto)
@@ -270,27 +346,20 @@
         (get *record :broker-id :> *b)
         (identity registry-key :> *registry)
         (|hash *registry)
+        (local-select> [(keypath *registry *b)] $$brokers :> *entry)
         (local-transform> [(keypath *registry *b)
                            (termval {:host        (get *record :host)
                                      :port        (get *record :port)
                                      :incarnation (get *record :incarnation)
                                      :at          *at})]
                           $$brokers)
-        ;; Whatever the broker this one replaces was holding is not held any
-        ;; more: every client it had connected is told to the client's own
-        ;; partition as a :lost, which ends the connection there unless the
-        ;; record already shows the client back on this incarnation — a
-        ;; client that reconnected before the announcement got through.
-        (|hash *b)
-        (local-select> [(keypath *b) ALL] $$broker->clients {:allow-yield? true} :> *lost-id)
-        (|hash *lost-id)
-        (depot-partition-append! *session-events
-                                 {:event       :lost
-                                  :client-id   *lost-id
-                                  :broker-id   *b
-                                  :incarnation (get *record :incarnation)
-                                  :at          *at}
-                                 :append-ack)
+        ;; Whatever the run this one replaces was holding is not held any
+        ;; more. Noted here, not walked here: the sweep lets its clients go a
+        ;; few hundred at a time, each told to its own partition as a :lost.
+        (<<if (and> *entry (not= (get *entry :incarnation) (get *record :incarnation)))
+          (local-transform> [(keypath *registry) NONE-ELEM
+                             (termval (run-key *b (get *entry :incarnation)))]
+                            $$dead-runs))
 
         ;; Only onto an entry that is there: a report from a broker that has
         ;; withdrawn, or has not announced yet, must not conjure one up
@@ -312,6 +381,12 @@
         (identity registry-key :> *registry)
         (|hash *registry)
         (local-transform> [(keypath *registry (get *record :broker-id)) NONE>] $$brokers)
+
+        ;; ── the settings ───────────────────────────────────────────────
+        (case> :setting)
+        (identity settings-key :> *settings)
+        (|hash *settings)
+        (local-transform> [(keypath *settings (get *record :key)) (termval (get *record :value))] $$settings)
 
         ;; ── the retained messages ──────────────────────────────────────
         ;; A replace and a delete; nothing to check first. Two brokers
@@ -381,8 +456,9 @@
               (ops/current-task-id :> *task)
               (local-transform> [(keypath *task (expiry-key (get *current :expires-at) *client-id)) NONE>]
                                 $$expiring))
-            (|hash *b)
-            (local-transform> [(keypath *b) NONE-ELEM (termval *client-id)] $$broker->clients)
+            (run-key *b (get *record :incarnation) :> *run)
+            (|hash *run)
+            (local-transform> [(keypath *run) NONE-ELEM (termval *client-id)] $$broker->clients)
             (ops/explode (vec (keys *subs)) :> *filter)
             (shard-of *filter :> *shard)
             (|hash *shard)
@@ -404,9 +480,11 @@
           (<<if (= *event :disconnect)
             (= *connect-id *last-id :> *ends?)
             (else>)
+            ;; :lost names the run that is gone: it ends the connection only
+            ;; if the record still shows the client on exactly that run.
             (and> (get *current :connected?)
                   (= (get *record :broker-id) (get *current :broker-id))
-                  (not= (get *record :incarnation) (get *current :incarnation))
+                  (= (get *record :incarnation) (get *current :incarnation))
                   :> *ends?))
           (<<if *ends?
             (get *current :broker-id :> *b)
@@ -439,8 +517,9 @@
                 (ops/current-task-id :> *task)
                 (local-transform> [(keypath *task (expiry-key *expires *client-id)) (termval *connect-id)]
                                   $$expiring)))
-            (|hash *b)
-            (local-transform> [(keypath *b) (set-elem *client-id) NONE>] $$broker->clients)
+            (run-key *b (get *current :incarnation) :> *run)
+            (|hash *run)
+            (local-transform> [(keypath *run) (set-elem *client-id) NONE>] $$broker->clients)
             (ops/explode (vec (keys *subs)) :> *filter)
             (shard-of *filter :> *shard)
             (|hash *shard)
@@ -452,6 +531,12 @@
               ;; the queue, not the wire.
               (local-transform> [(keypath *shard *filter *client-id :connected?) (termval false)]
                                 $$subscriptions)))
+
+          ;; Sent to another broker (§4.13): noted on the record so that
+          ;; broker takes the client rather than sending it on again. The
+          ;; connect that follows replaces the record, note and all.
+          (case> (= *event :redirected))
+          (local-transform> [(keypath *client-id) :sent-to (termval (get *record :to))] $$sessions)
 
           (case> (= *event :subscribe))
           (<<if (= *connect-id *last-id)

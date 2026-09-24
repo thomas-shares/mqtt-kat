@@ -20,6 +20,7 @@
             [mqttkat.client :as client]
             [mqttkat.events :as events]
             [mqttkat.handlers :as h]
+            [mqttkat.load.runner :as runner]
             [mqttkat.rama.cluster :as cluster]
             [mqttkat.rama.module :as module]
             [mqttkat.retained :as retained]
@@ -126,6 +127,10 @@
           ;; Another broker, as far as Rama can tell: its own handles on the
           ;; same cluster, watching the same subscriptions, recording nothing.
           peer (cluster/watch! (cluster/connect-to (:cluster conn)))
+          ;; The tick, driven by hand: the module was launched with the tick
+          ;; depot replaced by one a test appends to.
+          tick   (r/foreign-depot (:cluster conn) (:module-name conn) "*expiry-tick")
+          sweep! (fn [now] @(r/foreign-append-async! tick {:now now} :ack))
           both-see (fn [topic expected & [why]]
                      ;; The proxies are asynchronous, so first wait for it,
                      ;; then say what it should be — the wait alone would
@@ -373,8 +378,15 @@
             (is (tu/wait-until #(= 3 (count (matches peer "lost/t")))))
             (is (every? #(present-in-trie? peer "lost/t" %) ["victim-1" "victim-2" "survivor"]))
 
+            (record! conn {:event :broker-up :broker-id "peer-x" :incarnation "run-1"
+                           :host "127.0.0.1" :port 1 :at 4})
             (record! conn {:event :broker-up :broker-id "peer-x" :incarnation "run-2"
                            :host "127.0.0.1" :port 1 :at 5})
+            ;; Not on the announcement itself, which only notes the run that
+            ;; is gone: on the sweep, a slice at a time.
+            (Thread/sleep 200)
+            (is (true? (cluster/connected? conn "victim-1")) "nothing until the sweep")
+            (sweep! (System/currentTimeMillis))
             (is (tu/wait-until #(and (false? (cluster/connected? conn "victim-1"))
                                      (false? (cluster/connected? conn "victim-2")))))
             (testing "a persistent session is parked, subscriptions and all"
@@ -391,13 +403,37 @@
             (testing "a client already back on the new run is left alone"
               (is (true? (cluster/connected? conn "survivor")))
               (is (present-in-trie? peer "lost/t" "survivor")))
-            (testing "and the announcement again changes nothing more"
+            (testing "and the announcement again, and more sweeps, change nothing more"
               (record! conn {:event :broker-up :broker-id "peer-x" :incarnation "run-2"
                              :host "127.0.0.1" :port 1 :at 6})
+              (sweep! (System/currentTimeMillis))
+              (sweep! (System/currentTimeMillis))
               (Thread/sleep 300)
               (is (true? (cluster/connected? conn "survivor")))
               (is (false? (cluster/connected? conn "victim-1"))))
-            (record! conn {:event :broker-down :broker-id "peer-x" :at 7})))
+            (record! conn {:event :broker-down :broker-id "peer-x" :at 7})
+
+            (testing "a run that held many clients is let go a slice per sweep, never in one event"
+              (let [slice module/lost-per-sweep
+                    n     (+ (* 2 slice) 10)
+                    ids   (mapv #(str "crowd-" %) (range n))]
+                (doseq [id ids]
+                  (record! conn (on-broker (cluster/->connect (connect-map id :clean? false)) "peer-y" "y1")))
+                (record! conn {:event :broker-up :broker-id "peer-y" :incarnation "y1" :host "h" :port 1 :at 1})
+                (record! conn {:event :broker-up :broker-id "peer-y" :incarnation "y2" :host "h" :port 1 :at 2})
+                (let [connected #(count (filter (fn [id] (cluster/connected? conn id)) ids))]
+                  (is (= n (connected)))
+                  (sweep! (System/currentTimeMillis))
+                  (is (tu/wait-until #(= (- n slice) (connected)) 10000) "one slice gone after one sweep")
+                  (is (= (- n slice) (connected)))
+                  (sweep! (System/currentTimeMillis))
+                  (is (tu/wait-until #(= 10 (connected)) 10000) "another after the next")
+                  (sweep! (System/currentTimeMillis))
+                  (is (tu/wait-until #(= 0 (connected)) 10000) "and the rest")
+                  (sweep! (System/currentTimeMillis))
+                  (Thread/sleep 300)
+                  (is (= 0 (connected))))
+                (record! conn {:event :broker-down :broker-id "peer-y" :at 3})))))
 
         (testing "a session that is away: its subscriptions say so, and publishes are queued"
           (let [c (cluster/->connect (connect-map "away-1" :clean? false))]
@@ -435,9 +471,7 @@
               (is (= {:subscriptions {} :queued []} (dissoc r :session)) "but nothing is resumed"))))
 
         (testing "session expiry, on the cluster's clock"
-          (let [tick   (r/foreign-depot (:cluster conn) (:module-name conn) "*expiry-tick")
-                sweep! (fn [now] @(r/foreign-append-async! tick {:now now} :ack))
-                t0     1000000000000]
+          (let [t0 1000000000000]
             (testing "a version 5 session with an interval is forgotten when it passes"
               (let [c (assoc (cluster/->connect (connect-map "expiring" :version 5 :clean? false :expiry 60))
                              :at t0)]
@@ -500,6 +534,24 @@
                 (record! conn (cluster/->disconnect c))
                 (is (= {"kc/#" (entry "kc/#" 0)} (cluster/subscriptions conn "kept-clean")))
                 (is (some? (:expires-at (cluster/session conn "kept-clean"))))))
+
+            (testing "a broker that has said nothing for ten minutes is dropped from the registry"
+              (record! conn {:event :broker-up :broker-id "silent" :incarnation "s1"
+                             :host "h" :port 1 :at t0})
+              (record! conn {:event :broker-up :broker-id "talking" :incarnation "t1"
+                             :host "h" :port 2 :at t0})
+              (is (tu/wait-until #(and (get @(:brokers peer) "silent") (get @(:brokers peer) "talking"))))
+              (record! conn {:event :broker-stats :broker-id "talking" :incarnation "t1"
+                             :stats {:clients 1} :at (+ t0 590000)})
+              (is (tu/wait-until #(= 1 (get-in @(:brokers peer) ["talking" :stats :clients]))))
+              (sweep! (+ t0 599000))
+              (Thread/sleep 300)
+              (is (some? (get @(:brokers peer) "silent")) "not yet")
+              (sweep! (+ t0 601000))
+              (is (tu/wait-until #(nil? (get @(:brokers peer) "silent"))))
+              (is (some? (get @(:brokers peer) "talking")) "heard from four minutes ago: kept")
+              (record! conn {:event :broker-down :broker-id "talking" :at 0})
+              (is (tu/wait-until #(nil? (get @(:brokers peer) "talking")))))
 
             (testing "a 3.1.1 persistent session never expires, and 0xFFFFFFFF means never too"
               (let [v4 (assoc (cluster/->connect (connect-map "forever-4" :clean? false)) :at t0)
@@ -854,7 +906,8 @@
                           (let [c3 (tu/connect! "leaver" :id id :clean-session? false :ordered? true)]
                             (client/send-message (:client pub) (publish-msg "leave/t" "unacked" 1 42 :version 4))
                             (tu/expect-eventually! (:ch pub) :PUBACK)
-                            (is (= "unacked" (tu/payload-str (tu/expect-eventually! (:ch c3) :PUBLISH))))
+                            (is (= "unacked" (tu/payload-str (tu/expect-eventually! (:ch c3) :PUBLISH)))
+                                "live, straight after the CONNACK: the session is in place before it")
                             (is (empty? (cluster/queued conn id)) "delivered live: not queued")
                             ;; Gone without a PUBACK: the socket, not a DISCONNECT.
                             (tu/close! c3)
@@ -910,6 +963,178 @@
                         (is (tu/wait-until #(false? (cluster/connected? conn "victim-here"))))
                         (finally
                           (tu/close! b victim)))))
+
+                  (testing "redirecting connections"
+                    ;; This broker announces itself, and a second broker that is in
+                    ;; fact this one again: a client sent there reconnects here, which
+                    ;; is what lets the whole round trip be watched with one broker.
+                    (let [here   (str "127.0.0.1:" tu/port)
+                          now    (System/currentTimeMillis)
+                          policy (fn [p] (cluster/setting! cluster/redirect-setting (name p))
+                                   (is (tu/wait-until #(= p (cluster/redirect-policy)))))
+                          via    (fn [v] (cluster/setting! cluster/redirect-via-setting (name v))
+                                   (is (tu/wait-until #(= v (cluster/redirect-via)))))
+                          connack (fn [version]
+                                    (let [c (if (= 5 version) (tu/connect-v5! "rd") (tu/connect! "rd"))]
+                                      (tu/close! c)
+                                      (:connack c)))
+                          code    (fn [ack] (bit-and 0xFF (long (or (:reason-code ack) 0))))]
+                      (cluster/register! tu/port)
+                      (record! conn {:event :broker-up :broker-id "peer-r" :incarnation "r1"
+                                     :host "127.0.0.1" :port tu/port :at now})
+                      (is (tu/wait-until #(and (get @(:brokers conn) "peer-r")
+                                               (get @(:brokers conn) cluster/broker-id))))
+                      (try
+                        (testing "off: everyone is taken"
+                          (is (= :off (cluster/redirect-policy)))
+                          (is (nil? (cluster/redirect-target "probe")))
+                          (is (= 0 (code (connack 5)))))
+
+                        (testing "told the default way: accepted, then DISCONNECT with the reference"
+                          (policy :round-robin)
+                          (is (= :disconnect (cluster/redirect-via)) "the default, nothing set")
+                          (let [answers (repeatedly 6 (fn []
+                                                        (let [c (tu/connect-v5! "rd")
+                                                              d (tu/take! (:ch c) 500)]
+                                                          (tu/close! c)
+                                                          [(:connack c) d])))
+                                sent    (filter (fn [[_ d]] (= :DISCONNECT (:packet-type d))) answers)]
+                            (is (= 3 (count sent)) "half, over six")
+                            (is (every? (fn [[ack _]] (= 0 (code ack))) sent) "each accepted first")
+                            (is (every? (fn [[_ d]] (and (= 0x9C (code d))
+                                                         (= here (get-in d [:properties :server-reference]))))
+                                        sent)
+                                "then told where to go")
+                            (is (every? (fn [[_ d]] (nil? d)) (remove (set sent) answers))
+                                "the others are simply taken")))
+
+                        (testing "a SUBSCRIBE that races the DISCONNECT is not acted on"
+                          ;; The client saw CONNACK Success and subscribed at once; the
+                          ;; broker had already let the connection go.
+                          (let [id (tu/client-id "racer")]
+                            (loop [tries 0]
+                              (let [c (tu/connect-v5! "racer" :id id)]
+                                (client/send-message (:client c) (subscribe-msg "race/#" 1 1 :version 5))
+                                (let [d (tu/take! (:ch c) 500)]
+                                  (tu/close! c)
+                                  (cond
+                                    (= :DISCONNECT (:packet-type d))
+                                    (do (Thread/sleep 300)
+                                        (is (= {} (cluster/subscriptions conn id))
+                                            "no subscription for a client that was never here")
+                                        (is (not (contains? (matches conn "race/t") id)))
+                                        (is (nil? (get (matches conn "race/t") nil)) "and none for nobody"))
+                                    (< tries 4) (recur (inc tries))
+                                    :else (is false "never sent on")))))))
+
+                        (testing "Session Present on the accepting CONNACK is the cluster's answer"
+                          (let [kept (str (tu/client-id "kept"))]
+                            ;; A persistent session parked on the other broker, as far as
+                            ;; the cluster knows; and a client that has never been seen.
+                            (let [c (on-broker (cluster/->connect (connect-map kept :version 5 :clean? false :expiry 600)) "peer-r" "r1")]
+                              (record! conn c)
+                              (record! conn (cluster/->disconnect c)))
+                            (loop [tries 0]
+                              ;; With the interval: an attempt that is taken connects for
+                              ;; real, and a version 5 session is kept by its interval, not
+                              ;; by Clean Start.
+                              (let [c (tu/connect-v5! "kept" :id kept :clean-session? false
+                                                      :properties {:session-expiry-interval 600})
+                                    d (tu/take! (:ch c) 500)]
+                                (tu/close! c)
+                                (cond
+                                  (= :DISCONNECT (:packet-type d))
+                                  (is (true? (:session-present? (:connack c))) "sent on, and told its session is kept")
+                                  (< tries 4) (recur (inc tries))
+                                  :else (is false "never sent on"))))))
+
+                        (testing "or by the CONNACK reason code"
+                          (via :connack)
+                          (let [acks (repeatedly 6 #(connack 5))
+                                sent (filter #(= 0x9C (code %)) acks)]
+                            (is (= 3 (count sent)) "half, over six")
+                            (is (every? #(= here (get-in % [:properties :server-reference])) sent)
+                                "with the other broker's address")
+                            (is (every? #(false? (:session-present? %)) sent)))
+                          (is (= 0 (code (connack 4))) "a 3.1.1 client cannot be told, and is taken")
+                          (via :disconnect)
+                          (testing "the client sent on is noted, so the other broker takes it"
+                            ;; Six connects under six different ids above, half sent on;
+                            ;; one named client, sent on for certain by asking until it is.
+                            (let [id (tu/client-id "noted")]
+                              (loop [tries 0]
+                                (let [c (tu/connect-v5! "noted" :id id)
+                                      d (tu/take! (:ch c) 500)]
+                                  (tu/close! c)
+                                  (when (and (< tries 4) (not= :DISCONNECT (:packet-type d)))
+                                    (recur (inc tries)))))
+                              (is (tu/wait-until #(= "peer-r" (:sent-to (cluster/session conn id)))))
+                              ;; And a client the record says was sent here is taken, whatever
+                              ;; the rotation would have said.
+                              (record! conn (cluster/->redirected id cluster/broker-id))
+                              (is (= 0 (code (let [c (tu/connect-v5! "noted" :id id)] (tu/close! c) (:connack c)))))
+                              (is (= 0 (code (let [c (tu/connect-v5! "noted" :id id)] (tu/close! c) (:connack c))))
+                                  "and its connect replaced the note, so the next one is judged afresh — still here, as it is now the record's broker")
+                              (is (nil? (:sent-to (cluster/session conn id)))))))
+
+                        (testing "a bridge is never sent on"
+                          (let [b (tu/connect-v5! "b" :id (str bridge/client-id-prefix "peer-q"))]
+                            (is (= 0 (code (:connack b))))
+                            (tu/close! b)))
+
+                        (testing "load based: to the emptier broker, or nowhere when that is this one"
+                          (policy :load)
+                          (record! conn {:event :broker-stats :broker-id "peer-r" :incarnation "r1"
+                                         :stats {:clients 0} :at now})
+                          (events/emit! {:event :broker-sample :stats {:clients 50}})
+                          (is (tu/wait-until #(and (= 0 (get-in @(:brokers conn) ["peer-r" :stats :clients]))
+                                                   (= 50 (get-in @(:brokers conn) [cluster/broker-id :stats :clients])))))
+                          (is (= here (:server-reference (cluster/redirect-target "probe"))))
+                          (is (= :DISCONNECT (:packet-type (let [c (tu/connect-v5! "rd") d (tu/take! (:ch c) 500)] (tu/close! c) d))))
+                          (record! conn {:event :broker-stats :broker-id "peer-r" :incarnation "r1"
+                                         :stats {:clients 500} :at now})
+                          (is (tu/wait-until #(= 500 (get-in @(:brokers conn) ["peer-r" :stats :clients]))))
+                          (is (nil? (cluster/redirect-target "probe")))
+                          (is (= 0 (code (connack 5)))))
+
+                        (testing "the load generator follows the DISCONNECT form: pointed at this broker, sent round, all delivered"
+                          (policy :round-robin)
+                          (via :disconnect)
+                          (let [r (runner/execute (merge runner/defaults
+                                                         {:host tu/host :port tu/port
+                                                          :mqtt 5 :follow-redirects 1
+                                                          :publishers 2 :subscribers 6 :topics 2
+                                                          :messages 100 :rate 500 :qos 1
+                                                          :size 64 :progress-ms 0 :drain-ms 1500
+                                                          :churn 0 :resubscribe 0}))]
+                            (is (= 1.0 (:delivery-ratio r)))
+                            (is (pos? (:redirected (:counts r))) "some were sent on")
+                            (is (contains? (:landed r) here))))
+
+                        (testing "and the CONNACK form: pointed at this broker, sent round, all delivered"
+                          (policy :round-robin)
+                          (via :connack)
+                          (let [r (runner/execute (merge runner/defaults
+                                                         {:host tu/host :port tu/port
+                                                          :mqtt 5 :follow-redirects 1
+                                                          :publishers 2 :subscribers 6 :topics 2
+                                                          :messages 100 :rate 500 :qos 1
+                                                          :size 64 :progress-ms 0 :drain-ms 1500
+                                                          :churn 0 :resubscribe 0}))]
+                            (is (= 1.0 (:delivery-ratio r)))
+                            (is (pos? (:redirected (:counts r))) "some were sent on")
+                            (is (= 8 (reduce + (vals (:landed r)))))
+                            (is (contains? (:landed r) here) "and landed at the address they were given")))
+
+                        (testing "a cluster of one takes everything, whatever the policy"
+                          (record! conn {:event :broker-down :broker-id "peer-r" :at now})
+                          (is (tu/wait-until #(nil? (get @(:brokers conn) "peer-r"))))
+                          (is (nil? (cluster/redirect-target "probe")))
+                          (is (= 0 (code (connack 5)))))
+                        (finally
+                          (policy :off)
+                          (via :disconnect)
+                          @(cluster/record! conn (cluster/->broker-down))))))
 
                   (testing "the peer withdraws: forgotten, and its connection dropped"
                     (is (contains? (bridge/peers) "peer-x"))

@@ -16,6 +16,7 @@
             [hiccup2.core :as h]
             [hiccup.page :refer [doctype]]
             [mqttkat.handlers :as handlers]
+            [mqttkat.rama.cluster :as cluster]
             [mqttkat.s :as s]
             [mqttkat.sys :as sys]
             [mqttkat.web.state :as state]))
@@ -404,6 +405,40 @@
                            "—")]
      [:td.cell-right.num.cell-dim (idle-str age-ms)]]))
 
+(def ^:private redirect-choices
+  [[:off "Off" "every broker takes the clients that come to it"]
+   [:round-robin "Round robin" "each broker takes its turn and sends the rest on, one to each other broker in turn"]
+   [:load "Load based" "a client is sent to the broker with the fewest clients, as last reported"]])
+
+(def ^:private via-choices
+  [[:disconnect "Accept, then DISCONNECT" "CONNACK Success, then DISCONNECT Use another server with the Server Reference — what most client libraries follow"]
+   [:connack "CONNACK reason code" "CONNACK Use another server with the Server Reference, and the close the spec requires after it"]])
+
+(defn- redirect-form
+  "The one thing the console configures: how the brokers share the clients
+   that connect, and how a client sent elsewhere is told. For the whole
+   cluster, from any broker's page; version 5 clients only, since only
+   they can be told (§4.13)."
+  [attached? policy via]
+  (let [radios (fn [field chosen choices]
+                 (for [[value label help] choices]
+                   [:label.radio {:title help}
+                    [:input {:type "radio" :name field :value (name value)
+                             :checked (= value chosen) :disabled (not attached?)}]
+                    [:span.dot] label]))]
+    [:form.panel {:method "post" :action "/brokers/redirect"}
+     [:div.panel-head
+      [:h2.panel-title "Connection redirect"]
+      [:div.chart-scale.num (if attached? "for the whole cluster · MQTT 5 clients only" "needs a cluster")]]
+     [:div {:style "padding: 16px 20px; display: flex; flex-direction: column; gap: 14px"}
+      [:div.choice-row {:style "flex-wrap: wrap; align-items: center"}
+       [:span.choice-label {:style "min-width: 9rem"} "Policy"]
+       (radios "policy" policy redirect-choices)]
+      [:div.choice-row {:style "flex-wrap: wrap; align-items: center"}
+       [:span.choice-label {:style "min-width: 9rem"} "Tell the client by"]
+       (radios "via" via via-choices)]
+      [:div [:button.btn.btn-primary {:type "submit" :disabled (not attached?)} "Apply"]]]]))
+
 (defn brokers-page []
   (let [now    (state/current)
         fields (state/fields now)
@@ -412,7 +447,7 @@
      {:title "Brokers — MQTT Console"
       :active :brokers
       :sidebar-foot (broker-foot fields)}
-     [:div.main
+     [:div.main.main--brokers
       (page-head
        {:eyebrow "The cluster"
         :title "Brokers"
@@ -425,6 +460,8 @@
        [:div.stat [:div.label "Messages / s, all brokers"]
         [:div.stat-value.num {:id "b-rate"}
          (state/commas (reduce + 0 (keep #(some-> (:stats %) (as-> st (+ (:in st 0) (:out st 0)))) rows)))]]]
+
+      (redirect-form (cluster/attached?) (cluster/redirect-policy) (cluster/redirect-via))
 
       [:div.panel.panel--flush
        [:div.panel-head

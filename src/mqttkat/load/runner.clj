@@ -6,7 +6,13 @@
 
    Points at any broker, not just this one: --host and --port are all it knows
    about the far end, so the same run can be pointed at mosquitto for a
-   comparison that means something.
+   comparison that means something. Or at several: --brokers a:1885,b:1886
+   spreads the clients over them round-robin, which is how a cluster of
+   brokers in front of one Rama gets a load that crosses them.
+
+   Every option can also come from an EDN file, --config load.edn, a map of
+   the same keys: {:brokers [{:host \"127.0.0.1\" :port 1885} ...] :publishers
+   200 ...}. The command line wins over the file, the file over the defaults.
 
    Two things it tries hard to be honest about.
 
@@ -20,7 +26,8 @@
    It reports two latencies, service and response. See the comment on
    mqttkat.load.client/on-publish: the gap between them is how much of the
    delay was the generator's own lateness."
-  (:require [clojure.string :as str]
+  (:require [clojure.edn :as edn]
+            [clojure.string :as str]
             [mqttkat.load.client :as lc]
             [mqttkat.load.stats :as stats])
   (:import [java.util.concurrent CountDownLatch TimeUnit]
@@ -35,6 +42,10 @@
 (def defaults
   {:host "localhost" 
    :port 1883
+   ;; [{:host :port} ...]; nil means the one at :host and :port. Set from
+   ;; --brokers or the config file, and what every connection is opened on.
+   :brokers nil
+   :config nil
    :publishers 10 
    :subscribers 10 
    :topics 5
@@ -49,11 +60,18 @@
    :max-drain-ms 300000
    :source-ips 0
    :churn 1
-   :resubscribe 1})
+   :resubscribe 1
+   ;; 4 or 5. 5 is what a broker needs to send a client elsewhere.
+   :mqtt 4
+   ;; 1: every client goes to the first broker and follows wherever it is
+   ;; sent — the brokers do the balancing, by their redirect policy.
+   :follow-redirects 0})
 
 (def ^:private option-doc
-  [["--host HOST"          "broker host (localhost)"]
+  [["--config FILE"        "an EDN map of these options, keywords for keys; the command line wins"]
+   ["--host HOST"          "broker host (localhost)"]
    ["--port PORT"          "broker port (1883)"]
+   ["--brokers H:P,H:P"    "several brokers; clients are spread over them round-robin"]
    ["--publishers N"       "publishing clients (10)"]
    ["--subscribers N"      "subscribing clients (10)"]
    ["--topics N"           "topics, shared between both pools (5)"]
@@ -68,22 +86,98 @@
    ["--max-drain-ms N"     "cap on the whole drain, however much is still arriving (300000)"]
    ["--source-ips N"       "spread clients over N source addresses; 0 to choose automatically"]
    ["--churn N"            "subscribers reconnected per second, 0 to disable (1)"]
-   ["--resubscribe N"      "subscription cycles per second, 0 to disable (1)"]])
+   ["--resubscribe N"      "subscription cycles per second, 0 to disable (1)"]
+   ["--mqtt 4|5"           "protocol version the clients speak (4)"]
+   ["--follow-redirects 1" "connect everything to the first broker and go where it sends you (0)"]])
+
+(defn parse-brokers
+  "\"host:port,host:port\" to [{:host :port} ...]."
+  [s]
+  (mapv (fn [hp]
+          (let [[h p] (str/split (str/trim hp) #":")]
+            (when-not (and (seq h) p (parse-long p))
+              (throw (ex-info (str "not a host:port: " hp) {:arg hp})))
+            {:host h :port (parse-long p)}))
+        (str/split s #",")))
+
+(defn- coerce
+  "A command-line value into the option's type, which the default says."
+  [k v]
+  (case k
+    :brokers (parse-brokers v)
+    :config  v
+    (if (string? (defaults k)) v (parse-long v))))
+
+(defn read-config
+  "The options in an EDN file: a map keyed by the same keywords as the
+   command line's flags. Anything else in it is an error rather than a
+   silently ignored typo."
+  [path]
+  (let [m (edn/read-string (slurp path))]
+    (when-not (map? m)
+      (throw (ex-info (str path " should hold a map of options") {:config path})))
+    (doseq [k (keys m)]
+      (when-not (contains? (dissoc defaults :config) k)
+        (throw (ex-info (str "unknown option in " path ": " k) {:config path :key k}))))
+    (doseq [[k v] m]
+      (let [expected (defaults k)]
+        (cond
+          (= k :brokers) (when-not (and (sequential? v) (every? #(and (map? %) (:host %) (:port %)) v))
+                           (throw (ex-info (str ":brokers in " path " should be [{:host \"h\" :port 1883} ...]")
+                                           {:config path})))
+          (string? expected) (when-not (string? v)
+                               (throw (ex-info (str k " in " path " should be a string") {:config path :key k})))
+          :else (when-not (integer? v)
+                  (throw (ex-info (str k " in " path " should be a number") {:config path :key k}))))))
+    m))
 
 (defn parse-args
   "`--key value` pairs. Hand-rolled rather than pulling in tools.cli for a
-   dozen numeric options, all of which are --key value."
+   dozen numeric options, all of which are --key value.
+
+   The defaults, then the config file if there is one, then the command
+   line, each over the last: a file sets up the run, a flag adjusts it."
   [args]
-  (loop [[a v & more] args, opts defaults]
-    (cond
-      (nil? a) opts
-      (not (str/starts-with? a "--")) (throw (ex-info (str "unexpected argument: " a) {:arg a}))
-      (nil? v) (throw (ex-info (str "no value for " a) {:arg a}))
-      :else
-      (let [k (keyword (subs a 2))]
-        (when-not (contains? defaults k)
-          (throw (ex-info (str "unknown option: " a) {:arg a})))
-        (recur more (assoc opts k (if (string? (defaults k)) v (parse-long v))))))))
+  (let [given (loop [[a v & more] args, opts {}]
+                (cond
+                  (nil? a) opts
+                  (not (str/starts-with? a "--")) (throw (ex-info (str "unexpected argument: " a) {:arg a}))
+                  (nil? v) (throw (ex-info (str "no value for " a) {:arg a}))
+                  :else
+                  (let [k (keyword (subs a 2))]
+                    (when-not (contains? defaults k)
+                      (throw (ex-info (str "unknown option: " a) {:arg a})))
+                    (recur more (assoc opts k (coerce k v))))))
+        from-file (some-> (:config given) read-config)]
+    (merge defaults from-file given)))
+
+(defn brokers-of
+  "Where the clients connect: :brokers, or the one broker at :host and
+   :port."
+  [{:keys [brokers host port]}]
+  (or (seq brokers) [{:host host :port port}]))
+
+(defn follow-redirects? [opts]
+  (pos? (long (or (:follow-redirects opts) 0))))
+
+(defn broker-for
+  "Which broker client `i` goes to: round-robin, so every broker gets the
+   same share of publishers and of subscribers, and every topic has
+   subscribers on every broker. Following redirects, every client goes to
+   the first and the brokers decide — that is the point of that mode."
+  [opts i]
+  (let [bs (vec (brokers-of opts))]
+    (if (follow-redirects? opts)
+      (first bs)
+      (nth bs (mod (long i) (count bs))))))
+
+(defn landing-tally
+  "How many of `clients` ended up on each broker, as \"host:port\" -> n."
+  [clients]
+  (into (sorted-map) (frequencies (map lc/landed-on clients))))
+
+(defn brokers-str [opts]
+  (str/join ", " (map (fn [{:keys [host port]}] (str host ":" port)) (brokers-of opts))))
 
 (defn usage []
   (str "mqtt-kat load generator\n\n"
@@ -139,15 +233,16 @@
 (defn- open-pool!
   "Open `n` clients and wait for all their CONNACKs at once, rather than a
    round trip each."
-  [{:keys [host port qos] :as opts} prefix n shared]
-  (let [addrs (source-addresses host n (:source-ips opts))
+  [opts prefix n shared]
+  (let [addrs (source-addresses (:host (first (brokers-of opts))) n (:source-ips opts))
         clients (mapv (fn [i]
-                        (lc/open! (assoc shared
-                                         :host host :port port
-                                         :client-id (str prefix "-" i)
-                                         :index i
-                                         :window (:window opts)
-                                         :source-address (nth addrs (mod i (count addrs))))))
+                        (let [{:keys [host port]} (broker-for opts i)]
+                          (lc/open! (assoc shared
+                                           :host host :port port
+                                           :client-id (str prefix "-" i)
+                                           :index i
+                                           :window (:window opts)
+                                           :source-address (nth addrs (mod i (count addrs)))))))
                       (range n))]
     (doseq [c clients]
       (when-not (lc/await-connack c 30000)
@@ -289,7 +384,7 @@
   "Everything the run measured. Returns the map as well as printing it, so a
    test can assert on it."
   [{:keys [opts counts service response ack elapsed-ms expected outstanding churn
-           lateness-us blocked-us burst ended setup-ms total-ms drain]}]
+           lateness-us blocked-us burst ended setup-ms total-ms drain landed]}]
   (let [attempted (:attempted counts 0)
         published (:published counts 0)
         received  (:received counts 0)
@@ -301,7 +396,7 @@
         all-secs  (max 0.001 (/ (double (or total-ms elapsed-ms)) 1000.0))
         payload   (max (long (:size opts)) lc/header-bytes)
         result {:opts opts :counts counts :expected expected :outstanding outstanding
-                :churn churn
+                :churn churn :landed landed
                 :elapsed-ms elapsed-ms :ended (or ended :finished) :setup-ms setup-ms
                 :publish-rate (/ (double published) secs)
                 :deliver-rate (/ (double received) all-secs)
@@ -319,15 +414,19 @@
     (println "  ────────────────────────────────────────────────────────────────")
     (println)
     (println "  run")
-    (println (format "    broker      %s:%d" (:host opts) (:port opts)))
+    (println (format "    %-11s %s" (if (next (brokers-of opts)) "brokers" "broker") (brokers-str opts)))
     (println (format "    clients     %d publishers, %d subscribers over %d topics%s"
                      (:publishers opts) (:subscribers opts) (:topics opts)
                      (if churn
                        (format ", plus %d cycling (%s/s reconnect, %s/s resubscribe)"
                                (:pool-size churn) (:churn opts) (:resubscribe opts))
                        "")))
-    (println (format "    messages    QoS %d, %d byte payloads, window %d"
-                     (:qos opts) (:size opts) (:window opts)))
+    (when (follow-redirects? opts)
+      (println (format "    redirects   %d clients sent on; landed on %s"
+                       (:redirected counts 0)
+                       (str/join ", " (map (fn [[b n]] (str b " " n)) landed)))))
+    (println (format "    messages    MQTT %d, QoS %d, %d byte payloads, window %d"
+                     (:mqtt opts) (:qos opts) (:size opts) (:window opts)))
     (println (format "    target      %s%s"
                      (if (pos? (long (:rate opts))) (str (:rate opts) "/s") "unlimited")
                      (if (> (long (or burst 1)) 1)
@@ -496,8 +595,9 @@
         open-one  (fn []
                     (let [i (.getAndIncrement next-id)
                           t (mod i topics)
+                          {:keys [host port]} (broker-for opts i)
                           c (lc/open! (assoc shared
-                                             :host (:host opts) :port (:port opts)
+                                             :host host :port port
                                              :client-id (str "load-churn-" i)
                                              :index (int t)
                                              :window (:window opts)))]
@@ -580,7 +680,9 @@
         response (stats/histogram)
         ack      (stats/histogram)
         shared   {:counters counters :service-latency service
-                  :response-latency response :ack-latency ack}
+                  :response-latency response :ack-latency ack
+                  :mqtt5? (= 5 (long (or (:mqtt opts) 4)))
+                  :follow-redirects? (follow-redirects? opts)}
         topic-names (mapv topic-name (range topics))
         ^"[Ljava.util.concurrent.atomic.LongAdder;" published-per-topic
         (into-array LongAdder (repeatedly topics #(LongAdder.)))
@@ -593,8 +695,8 @@
         printing    (AtomicBoolean. true)
         ;; Held by the shutdown hook until the report has been printed.
         done        (CountDownLatch. 1)]
-    (println (format "  connecting %d subscribers and %d publishers to %s:%d"
-                     subscribers publishers (:host opts) (:port opts)))
+    (println (format "  connecting %d subscribers and %d publishers to %s"
+                     subscribers publishers (brokers-str opts)))
     ;; Timed and printed as they happen. A run that looks hung is nearly
     ;; always still in one of these, and without the phases there is no way to
     ;; tell setting up ten thousand clients apart from a broker that has
@@ -686,6 +788,7 @@
                                         :subacks (:subacks cs)
                                         :unsubacks (:unsubacks cs)}))]
                   (report {:opts opts
+                           :landed (landing-tally (concat pubs subs))
                            :counts (stats/read-counters counters)
                            :service (stats/snapshot service)
                            :response (stats/snapshot response)

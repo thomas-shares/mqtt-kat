@@ -140,6 +140,19 @@ subscriptions, message rates, queue depth, heap and CPU, and how long ago it
 last reported. A broker three reports behind is shown as stale. Live over the
 websocket like the other pages; on a broker running without Rama it says so.
 
+The same page sets the **connection redirect** policy, for the whole cluster
+(§4.13, CONNACK `0x9C Use another server` with a Server Reference — MQTT 5
+clients only, since 3.1.1 has no way to be told): *off*, *round robin* — each
+broker takes its turn and sends the rest on, one to each other broker in turn —
+or *load based* — to the broker with the fewest clients as last reported, plus
+what has been sent there since. And how the client is told: *accept, then
+DISCONNECT* (the default — CONNACK Success, with Session Present as the cluster
+knows it, then `DISCONNECT 0x9C` with the Server Reference, which is what most
+client libraries act on) or the *CONNACK reason code* (`CONNACK 0x9C` with the
+reference, then the close the spec requires). A broker sent a client takes it: the
+sender notes it on the client's session record first, so a client is never passed
+on twice. Bridges are never redirected.
+
 Each broker needs a name and an address the others can reach:
 `-Dmqttkat.brokerId` (default: the host name) and `-Dmqttkat.advertise`
 (default: the host name; the port is the one it listens on).
@@ -179,7 +192,20 @@ lein jar
     --module mqttkat.rama.module/MqttKatModule --tasks 4 --threads 2 --workers 1
 ```
 
-Then the brokers connect to it as clients — here two on one machine:
+Then the brokers connect to it as clients. `scripts/brokers.bb` starts as many as
+you like on one machine, each with its own ports, all on the local cluster:
+
+```
+lein uberjar
+bb scripts/brokers.bb start 3        # broker-1 1885/8085, broker-2 1886/8086, broker-3 1887/8087
+bb scripts/brokers.bb status
+bb scripts/brokers.bb kill 2         # SIGKILL, to watch the others cope
+bb scripts/brokers.bb logs 2
+bb scripts/brokers.bb stop           # SIGTERM: each withdraws itself from the cluster
+```
+
+`--port`, `--http`, `--conductor`, `--advertise` and `--heap` change the defaults;
+logs and pid files are under `logs/brokers/`. By hand, two brokers look like this:
 
 ```
 java -Dmqttkat.rama=external -Dmqttkat.rama.conductor=localhost \
@@ -203,12 +229,31 @@ mosquitto_pub -p 1886 -t roam/x -m "while away" -q 1  # queued in Rama by B
 mosquitto_sub -p 1886 -i roamer -c -q 1 -t 'roam/#' -C 1 # back on B: gets it
 ```
 
-Without `-Dmqttkat.rama.conductor` it reads a `rama.yaml` from the classpath. The
-Cluster UI is on port 8888 of the Conductor. `./rama deploy --action update` with
+`-Dmqttkat.rama.conductor` defaults to `localhost`, so on one machine it can be
+left out. The Cluster UI is on port 8888 of the Conductor. `./rama deploy --action update` with
 a new jar updates the running module; see `./rama help` for the rest. If
 something else on the machine has port 3000, the Supervisor will not start:
 give it `supervisor.port.range: [3100, 4200]` in `rama.yaml` (the range must be
 at least a thousand wide).
+
+Two things about a development cluster that will bite. The daemons started from a
+terminal die with it, and the module's data lives on under `local-rama-data`: a
+cluster restarted with a large backlog of unprocessed events can spend a long
+time — or, after enough kill/restart cycles, forever — retrying them, and every
+broker append then times out (`could not record the connect of …` in the broker
+log; `Stream processing timeout` in `logs/worker-*.log`; the Brokers page empty).
+The brokers are not lost, the cluster is stuck. A fresh module is the cure for a
+dev cluster:
+
+```
+echo mqttkat.rama.module/MqttKatModule | ./rama destroy mqttkat.rama.module/MqttKatModule
+./rama deploy --action launch --jar /path/to/mqtt-kat/target/mqtt-kat-0.0.1.jar \
+    --module mqttkat.rama.module/MqttKatModule --tasks 4 --threads 2 --workers 1
+```
+
+(the destroy asks for the module name as confirmation, which is what the echo
+answers). And `lein jar` removes the uberjar from `target/`, so build the uberjar
+again before starting brokers.
 
 Without `-Dmqttkat.rama` at all the broker runs as it always has.
 
@@ -246,9 +291,26 @@ Run the test client with
 
 `lein run -m mqttkat.load.runner --publishers 2000 --subscribers 20000 --topics 1000 --messages 2000000 --rate 10000 --qos 1 --drain-ms 5000 --source-ips 1`
 
+or from a config file — `doc/load.edn` is one that drives three brokers from
+`bb scripts/brokers.bb start 3`, spreading the clients over them round-robin so the
+traffic crosses the bridges:
+
+`lein run -m mqttkat.load.runner --config doc/load.edn --rate 20000`
+
+The file is an EDN map of the same options as the flags, keywords for keys;
+a flag on the command line wins over the file. `--brokers a:1885,b:1886` does the
+same from the command line. `--mqtt 5 --follow-redirects 1` is the other way of
+spreading a load: every client goes to the first broker and follows wherever it
+is sent, so the brokers do the balancing by their redirect policy, and the
+report says how many were sent on and where they landed.
+
 and here are the other options:
 
 ```
+  --config FILE      an EDN map of these options, keywords for keys; the command line wins
+  --brokers H:P,H:P  several brokers; clients are spread over them round-robin
+  --mqtt 4|5         protocol version the clients speak (4)
+  --follow-redirects 1  connect everything to the first broker and go where it sends you (0)
   --host HOST        broker host (localhost)
   --port PORT        broker port (1883)
   --publishers N     publishing clients (10)

@@ -45,9 +45,12 @@
       (try
         (let [props (:properties (:connack c))]
           (is (contains? props :retain-available))
-          (is (contains? props :maximum-qos))
           (is (contains? props :wildcard-subscription-available))
-          (is (= 2 (:maximum-qos props)) "this broker does QoS 2"))
+          ;; §3.2.2.3.4: the property says a broker does *less* than QoS 2 and
+          ;; may only be 0 or 1; a broker that does QoS 2 leaves it out. Sent
+          ;; as 2 it is a Protocol Error, and mosquitto's client refused every
+          ;; CONNACK this broker ever sent it.
+          (is (not (contains? props :maximum-qos)) "this broker does QoS 2, which is said by silence"))
         (finally (tu/close! c))))))
 
 (deftest a-version-5-client-can-send-its-properties

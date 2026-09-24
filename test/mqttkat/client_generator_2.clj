@@ -252,8 +252,14 @@
         client (client)]
          ;clients (take client-numbers (repeatedly (client)))
          ;streams (take client-numbers (repeatedly (es/event-stream model [{:rtime 0, :state :connect}])))]
-    (doseq [{state :state} (take events (es/event-stream model [{:rtime 0, :state :connect}]))]
-      (log/trace "State:" state)
-      ;;(Thread/sleep 10)
-      (({:connect connect, :publish publish, :disconnect disconnect, :connack connack :subscribe subscribe} state) client))
-    (report! events (- (System/currentTimeMillis) start-time) before)))
+    ;; Closed when the run is over, for the same reason as in
+    ;; client-generator: this JVM's broker is shared with the rest of the
+    ;; suite, and a client left connected to it is somebody else's problem.
+    (try
+      (doseq [{state :state} (take events (es/event-stream model [{:rtime 0, :state :connect}]))]
+        (log/trace "State:" state)
+        ;;(Thread/sleep 10)
+        (({:connect connect, :publish publish, :disconnect disconnect, :connack connack :subscribe subscribe} state) client))
+      (report! events (- (System/currentTimeMillis) start-time) before)
+      (finally
+        (tu/close! client)))))

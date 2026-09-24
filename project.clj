@@ -65,6 +65,16 @@
   :test-selectors {:default     (complement :performance)
                    :performance :performance
                    :all         (constantly true)}
+  ;; mqttkat.rama.module is not instrumented. `defmodule` expands its whole
+  ;; body — every depot, PState and dataflow form of the topology — into one
+  ;; `reify` method, and cloverage's instrumentation wraps each form in
+  ;; tracking code: together they overflow the JVM's 64 KB limit on a single
+  ;; method, and the run dies with "Method code too large!" before any test
+  ;; has run. Nothing is lost by leaving it out: the forms in a topology are
+  ;; not executed as Clojure — Rama compiles them into a dataflow graph — so
+  ;; a line count over them would measure nothing. The namespace is still
+  ;; loaded and still exercised by mqttkat.rama-test.
+  :cloverage {:ns-exclude-regex [#"mqttkat\.rama\.module"]}
   :plugins [[lein-ancient "0.6.15"]
             [lein-auto "0.1.3"]
             [lein-cloverage "1.2.4"]]

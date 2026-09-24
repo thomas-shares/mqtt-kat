@@ -16,11 +16,10 @@
                                  reconnect, not across a broker restart.
      -Dmqttkat.rama=external     a foreign client of a real cluster, which
                                  must already be running with the module
-                                 deployed to it (see the README). Reads
-                                 rama.yaml from the classpath, or the
-                                 Conductor from -Dmqttkat.rama.conductor.
-                                 This is the one whose data survives a
-                                 broker restart.
+                                 deployed to it (see the README). The
+                                 Conductor is -Dmqttkat.rama.conductor, or
+                                 localhost. This is the one whose data
+                                 survives a broker restart.
 
    `connect` returns the same map of handles in both modes, and every read or
    append below goes through those handles, so code above this line cannot
@@ -90,10 +89,27 @@
     (rtest/launch-module! ipc module/MqttKatModule in-process-config)
     ipc))
 
+(def conductor-host
+  "Where the Conductor of an external cluster is: -Dmqttkat.rama.conductor,
+   or localhost. Always given to Rama explicitly: left to itself it looks for
+   a rama.yaml on the classpath, and the uberjar has none, which it reports
+   as an invalid config rather than a missing file."
+  (or (System/getProperty "mqttkat.rama.conductor") "localhost"))
+
+(def append-flush-millis
+  "How long the depot client gathers appends before sending them as one.
+   Zero sends each on its own, and each is a durable write on the depot's
+   task before the next: a few hundred a second, which two thousand
+   subscribers connecting at once turn into a backlog the topology never
+   catches up with. A few milliseconds of gathering costs each append a
+   few milliseconds and buys an order of magnitude in throughput.
+   -Dmqttkat.rama.flushMillis to change it."
+  (parse-long (or (System/getProperty "mqttkat.rama.flushMillis") "5")))
+
 (defn- external []
-  (if-let [host (System/getProperty "mqttkat.rama.conductor")]
-    (r/open-cluster-manager {"conductor.host" host})
-    (r/open-cluster-manager)))
+  (log/info "connecting to the Rama conductor at" conductor-host)
+  (r/open-cluster-manager {"conductor.host" conductor-host
+                           "foreign.depot.flush.delay.millis" append-flush-millis}))
 
 (declare connect-to)
 
@@ -113,6 +129,7 @@
                      cluster; empty until watch!
      :brokers        atom, the in-memory copy of the registry:
                      broker-id -> {:host :port :at}; empty until watch!
+     :settings       atom, the cluster's settings: name -> value
      :proxies        atom, the proxies feeding both
 
    Blocks until the module is reachable. In-process that means launching it,
@@ -136,10 +153,12 @@
      :sessions      (r/foreign-pstate cluster module-name "$$sessions")
      :subscriptions (r/foreign-pstate cluster module-name "$$subscriptions")
      :brokers-state (r/foreign-pstate cluster module-name "$$brokers")
+     :settings-state (r/foreign-pstate cluster module-name "$$settings")
      :retained-state (r/foreign-pstate cluster module-name "$$retained")
      :queued-state  (r/foreign-pstate cluster module-name "$$queued")
      :trie          (atom (trie/make-trie))
      :brokers       (atom {})
+     :settings      (atom {})
      :proxies       (atom [])}))
 
 (defn unwatch!
@@ -252,6 +271,16 @@
    :incarnation incarnation
    :stats       stats
    :at          (System/currentTimeMillis)})
+
+(defn ->setting
+  "The record of an operator's choice for the whole cluster."
+  [key value]
+  {:event :setting :key (name key) :value value :at (System/currentTimeMillis)})
+
+(defn ->redirected
+  "The record that `client-id` was sent to broker `to`."
+  [client-id to]
+  {:event :redirected :client-id client-id :to to :at (System/currentTimeMillis)})
 
 (defn ->broker-down
   "The record withdrawing this broker."
@@ -413,7 +442,7 @@
    each carries the value as it stands, so this is also how both are built
    on start: no scan, no separate load, the same code path as any later
    change. Idempotent."
-  [{:keys [subscriptions brokers-state retained-state trie brokers proxies] :as conn}]
+  [{:keys [subscriptions brokers-state retained-state settings-state trie brokers settings proxies] :as conn}]
   (when (empty? @proxies)
     (reset! proxies
             (doall
@@ -421,7 +450,11 @@
               [(r/foreign-proxy (keypath module/registry-key) brokers-state
                                 {:callback-fn (guarded "the registry"
                                                        (fn [new _diff old]
-                                                         (registry-changed! brokers old new)))})]
+                                                         (registry-changed! brokers old new)))})
+               (r/foreign-proxy (keypath module/settings-key) settings-state
+                                {:callback-fn (guarded "the settings"
+                                                       (fn [new _diff _old]
+                                                         (reset! settings (or new {}))))})]
               (for [shard (range module/shard-count)]
                 (r/foreign-proxy (keypath shard) subscriptions
                                  {:callback-fn (guarded (str "subscriptions shard " shard)
@@ -481,8 +514,14 @@
   [{:keys [trie]} topic]
   (let [matches (trie/sieve-dollar topic (trie/trie-matching-vals @trie topic))
         ;; A subscription whose client is away is nobody's to deliver: it is
-        ;; queued, here, whichever broker parked it — see :queue below.
-        {parked true present false} (group-by #(false? (:connected? %)) matches)
+        ;; queued, here, whichever broker parked it — see :queue below. Unless
+        ;; the client is live on this very broker: the local trie delivers to
+        ;; it, and this copy of the table saying otherwise is a diff that has
+        ;; not arrived yet. Queuing as well would deliver twice on its next
+        ;; resume.
+        {parked true present false} (group-by #(and (false? (:connected? %))
+                                                    (nil? (handlers/live-connection (:client-id %))))
+                                              matches)
         {shared true ordinary false} (group-by #(some? (:share-group %)) present)
         remote  (into #{} (comp (map :broker-id) (remove #(= broker-id %))) ordinary)
         chosen  (for [[gk members] (group-by (juxt :share-group :topic-filter) shared)]
@@ -534,6 +573,21 @@
                  is not off. One per JVM, like the server itself."}
   *connection* (atom nil))
 
+(def ack-wait-millis
+  "How long a SUBSCRIBE or UNSUBSCRIBE waits for the cluster to have it
+   before being acknowledged anyway. Long enough for a busy cluster, short
+   enough that a client is not left hanging by one that is down."
+  5000)
+
+(defn- awaited
+  "Wait for `future`, and no longer than ack-wait-millis: the acknowledgement
+   still goes out if the cluster is slow, and the failure is logged where
+   record! logs it."
+  [future]
+  (try
+    (deref future ack-wait-millis nil)
+    (catch Exception _ nil)))
+
 (defn brokers
   "Every broker in the cluster as the registry has it, this one included:
    broker-id -> {:host :port :at :incarnation :stats :stats-at}. Empty when
@@ -543,6 +597,147 @@
     @(:brokers c)
     {}))
 
+(defn attached?
+  "Whether the running broker has a cluster."
+  []
+  (some? @*connection*))
+
+;; ── redirecting connections ──────────────────────────────────────────────
+
+(def redirect-policies
+  "How a broker answers a version 5 CONNECT (§4.13, reason 0x9C Use another
+   server, with a Server Reference):
+
+     :off          it takes every client itself
+     :round-robin  it takes its turn and sends the rest on, one to each
+                   other broker in turn — every broker does, so together
+                   they spread arrivals evenly wherever they came in
+     :load         it sends the client to whichever broker has the fewest
+                   clients, as they last reported, itself included
+
+   A setting for the whole cluster, kept in $$settings; 3.1.1 clients, which
+   have no way to be told, are always taken."
+  [:off :round-robin :load])
+
+(def redirect-setting "redirect")
+
+(def redirect-via-setting "redirect-via")
+
+(def redirect-vias
+  "How a client sent elsewhere is told (§4.13):
+
+     :disconnect  it is accepted — CONNACK Success, with Session Present as
+                  the cluster knows it — and at once sent DISCONNECT Use
+                  another server with the Server Reference. The default:
+                  a DISCONNECT with a reference is what most client
+                  libraries act on.
+     :connack     CONNACK Use another server with the Server Reference,
+                  and the close §3.2.2.2 requires after it."
+  [:disconnect :connack])
+
+(defn redirect-via
+  "The way in force, :disconnect when none is set or there is no cluster."
+  []
+  (if-let [c @*connection*]
+    (let [v (get @(:settings c) redirect-via-setting)]
+      (or (some #{(keyword (str v))} redirect-vias) :disconnect))
+    :disconnect))
+
+(defn redirect-policy
+  "The policy in force, :off when none is set or there is no cluster."
+  []
+  (if-let [c @*connection*]
+    (let [v (get @(:settings c) redirect-setting)]
+      (or (some #{(keyword (str v))} redirect-policies) :off))
+    :off))
+
+(defn setting!
+  "Set `key` to `value` for the whole cluster, and wait for the cluster to
+   have it, so the page that asked shows it on its next load."
+  [key value]
+  (when-let [c @*connection*]
+    (awaited (record! c (->setting key value)))))
+
+(defonce ^:private redirect-cursor (atom -1))
+
+(defonce ^:private sent-since-report
+  ;; broker-id -> {:stats-at t :sent n}: how many clients this broker has
+  ;; sent to each other broker since that broker last reported. Reports
+  ;; come every few seconds and sixty clients can arrive in one; judged on
+  ;; the report alone they would all go to the same, briefly emptiest,
+  ;; broker.
+  (atom {}))
+
+(defn- estimated-clients
+  "A broker's client count as last reported, plus what has been sent there
+   since."
+  [id {:keys [stats stats-at]}]
+  (let [{:keys [sent] :as seen} (get @sent-since-report id)]
+    (+ (long (or (:clients stats) 0))
+       (if (and seen (= stats-at (:stats-at seen))) (long sent) 0))))
+
+(defn- note-sent! [id stats-at]
+  (swap! sent-since-report update id
+         (fn [{:keys [sent] :as seen}]
+           (if (and seen (= stats-at (:stats-at seen)))
+             {:stats-at stats-at :sent (inc (long sent))}
+             {:stats-at stats-at :sent 1}))))
+
+(defn- candidates
+  "The brokers a client could be sent to: those the registry has an address
+   for and has heard from lately, this one included, in a fixed order."
+  []
+  (let [now (System/currentTimeMillis)]
+    (->> (brokers)
+         (filter (fn [[id {:keys [host port stats-at at]}]]
+                   (and host port
+                        (or (= id broker-id)
+                            (< (- now (long (max (or stats-at 0) (or at 0))))
+                               (* 3 60000))))))
+         (sort-by key)
+         vec)))
+
+(defn redirect-target
+  "Where to send `client-id`, connecting in version 5 — {:server-reference
+   \"host:port\" :via :disconnect|:connack :session-present? bool} — or nil
+   to take it here. Never the broker itself, never anywhere when there is
+   nowhere else (a cluster of one takes everything), and never a client
+   that was sent here: the broker that sent it noted so on its session
+   record, and a client passed on from one broker to the next would
+   otherwise never land. The note is written, and waited for, before the
+   client is answered, so it is there when the client arrives.
+
+   Session Present travels with the answer for the CONNACK that accepts the
+   client before it is sent on: a persistent client told 0 discards its own
+   session state (§3.2.2.1.1), and that is the cluster's to say, not this
+   broker's parked copies'."
+  [client-id]
+  (let [policy (redirect-policy)
+        cs     (when (not= :off policy) (candidates))
+        record (when (next cs) (some-> @*connection* (session client-id)))
+        chosen (when (and (next cs) (not= (:sent-to record) broker-id))
+                 (case policy
+                   :round-robin (nth cs (mod (swap! redirect-cursor inc) (count cs)))
+                   :load        (first (sort-by (fn [[id entry]] [(estimated-clients id entry) id])
+                                                cs))))]
+    (when-let [[id {:keys [host port stats-at]}] chosen]
+      (when (not= id broker-id)
+        (note-sent! id stats-at)
+        (awaited (record! @*connection* (->redirected client-id id)))
+        {:server-reference (str host ":" port)
+         :via              (redirect-via)
+         :session-present? (boolean (and record
+                                         (module/kept? (:protocol-version record)
+                                                       (:clean-session? record)
+                                                       (:session-expiry-interval record))))}))))
+
+(defonce ^:private announced-port
+  ;; The port this broker announced itself on, so it can announce itself
+  ;; again: an announcement lost to a timeout — a cluster still digesting a
+  ;; backlog, say — would otherwise leave the broker unregistered for the
+  ;; rest of its life, forwarding to everyone and reached by nobody.
+  (atom nil))
+
 (defn- on-broker-event
   "What the broker tells its listeners, turned into a session event. The
    four about a session, and the console's sample of this broker's figures;
@@ -550,11 +745,33 @@
   [{:keys [event connect] :as broker-event}]
   (when-let [c @*connection*]
     (case event
-      :client-connected    (record! c (->connect connect))
+      ;; Waited for too, for the same reason as the subscribe below: it is
+      ;; emitted before the CONNACK goes out, so the client cannot act — nor
+      ;; another broker's copy be consulted about it — until the cluster has
+      ;; it connected.
+      :client-connected    (awaited (record! c (->connect connect)))
       :client-disconnected (record! c (->disconnect broker-event))
-      :client-subscribed   (record! c (->subscribe broker-event))
-      :client-unsubscribed (record! c (->unsubscribe broker-event))
-      :broker-sample       (record! c (->broker-stats (:stats broker-event)))
+      ;; Waited for, these two: the handler emits them before it sends the
+      ;; SUBACK or UNSUBACK, so waiting here is what makes the acknowledgement
+      ;; mean the cluster has the change — with :ack, the topology has
+      ;; written it, and every other broker's copy is being pushed the diff
+      ;; as this returns. Unwaited, a subscriber could be acknowledged and a
+      ;; publish on another broker miss it for the next hundred milliseconds
+      ;; or so, which a load test sees as lost messages. The thread this runs
+      ;; on is the connection's own, and is virtual; a few milliseconds
+      ;; blocked cost it nothing.
+      :client-subscribed   (awaited (record! c (->subscribe broker-event)))
+      :client-unsubscribed (awaited (record! c (->unsubscribe broker-event)))
+      :broker-sample       (do
+                             ;; Not in the registry, as far as this broker
+                             ;; can see, though it announced itself: say so
+                             ;; again. Harmless when it merely has not been
+                             ;; pushed back yet — the same announcement twice
+                             ;; is one entry.
+                             (when-let [port @announced-port]
+                               (when-not (get @(:brokers c) broker-id)
+                                 (record! c (->broker-up advertised-host port))))
+                             (record! c (->broker-stats (:stats broker-event))))
       nil)))
 
 (defn attach!
@@ -568,6 +785,7 @@
   (reset! bridge/planner (fn [topic] (plan conn topic)))
   (reset! bridge/forwarder (fn [plan topic msg] (forward-publish! conn plan topic msg)))
   (reset! retained/sink (fn [topic message] (record! conn (->retain topic message))))
+  (reset! handlers/redirector (fn [client-id] (redirect-target client-id)))
   (reset! handlers/session-source
           {:my-broker-id broker-id
            :resume       (fn [client-id] (resume conn client-id))
@@ -587,6 +805,7 @@
   (reset! bridge/planner nil)
   (reset! bridge/forwarder nil)
   (reset! retained/sink nil)
+  (reset! handlers/redirector nil)
   (reset! handlers/session-source nil)
   (bridge/close-all!)
   (events/forget! ::rama)
@@ -594,8 +813,10 @@
 
 (defn register!
   "Announce this broker at `port` to the others. Called once the broker is
-   listening, and so after connect!."
+   listening, and so after connect!; and again by every report, for as
+   long as this broker's own copy of the registry does not show it."
   [port]
+  (reset! announced-port port)
   (when-let [c @*connection*]
     (record! c (->broker-up advertised-host port))))
 

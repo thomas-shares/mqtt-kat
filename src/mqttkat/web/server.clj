@@ -4,7 +4,9 @@
    http-kit runs its own event loop, so run-server returns as soon as it is
    listening and nothing here blocks the caller — the broker's own start! and
    the stats loop are unaffected."
-  (:require [clojure.tools.logging :as log]
+  (:require [clojure.string :as str]
+            [clojure.tools.logging :as log]
+            [mqttkat.rama.cluster :as cluster]
             [mqttkat.web.console :as console]
             [mqttkat.web.page :as page]
             [mqttkat.web.ws :as ws]
@@ -26,6 +28,22 @@
    :headers {"Content-Type" "text/html; charset=utf-8"}
    :body    body})
 
+(defn- form-fields
+  "The fields of a urlencoded form post, as a map. Hand-rolled: the console
+   has one form, and ring's params middleware would be the only thing that
+   wanted the body read for it."
+  [{:keys [body]}]
+  (if-not body
+    {}
+    (let [text (if (string? body) body (slurp body))]
+      (into {}
+            (keep (fn [pair]
+                    (when (seq pair)
+                      (let [[k v] (str/split pair #"=" 2)]
+                        [(java.net.URLDecoder/decode (or k "") "UTF-8")
+                         (java.net.URLDecoder/decode (or v "") "UTF-8")]))))
+            (str/split text #"&")))))
+
 (defn handler
   "Routing, such as it is. A function of a request map, so it can be called
    directly in a test without going near a socket.
@@ -33,9 +51,31 @@
    /status is the raw $SYS table. It stays alongside the console now that the
    console shows live figures too, because it shows every $SYS topic rather
    than the ones the design had room for, and it needs no JavaScript."
-  [{:keys [uri request-method]}]
-  (if (not= :get request-method)
+  [{:keys [uri request-method] :as request}]
+  (cond
+    ;; The one thing the console changes rather than shows. A form post,
+    ;; answered with a redirect back to the page, so a refresh does not
+    ;; apply it again.
+    (and (= :post request-method) (= "/brokers/redirect" uri))
+    (let [fields (form-fields request)
+          policy (some-> (get fields "policy") keyword)
+          via    (some-> (get fields "via") keyword)]
+      (cond
+        (not (some #{policy} cluster/redirect-policies))
+        {:status 400 :headers {"Content-Type" "text/plain"} :body "policy should be one of off, round-robin, load"}
+
+        (and via (not (some #{via} cluster/redirect-vias)))
+        {:status 400 :headers {"Content-Type" "text/plain"} :body "via should be one of disconnect, connack"}
+
+        :else
+        (do (cluster/setting! cluster/redirect-setting (name policy))
+            (when via (cluster/setting! cluster/redirect-via-setting (name via)))
+            {:status 303 :headers {"Location" "/brokers"} :body ""})))
+
+    (not= :get request-method)
     {:status 405 :headers {"Allow" "GET"} :body "method not allowed"}
+
+    :else
     (case uri
       "/"         (html (console/overview-page))
       "/topics"   (html (console/topics-page))

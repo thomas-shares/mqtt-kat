@@ -1,0 +1,29 @@
+;; A load run against three brokers started with `bb scripts/brokers.bb start 3`.
+;;
+;;   lein run -m mqttkat.load.runner --config doc/load.edn
+;;   lein run -m mqttkat.load.runner --config doc/load.edn --qos 1 --rate 20000
+;;
+;; The keys are the command-line flags as keywords; a flag given on the
+;; command line wins over the file. Clients are spread over :brokers
+;; round-robin — publisher i and subscriber i go to broker (i mod 3) — so
+;; every topic has subscribers on every broker and most deliveries cross
+;; the bridge between two of them.
+{:brokers     [{:host "127.0.0.1" :port 1885}
+               {:host "127.0.0.1" :port 1886}
+               {:host "127.0.0.1" :port 1887}]
+ :publishers  1000
+ :subscribers 10000
+ :topics      100
+ ;;:messages    200000
+ :rate        200
+ :qos         1
+ :size        128
+ :window      100
+ :duration    60
+ :progress-ms 1000
+ :drain-ms    5000
+ :max-drain-ms 600000
+ :source-ips  0
+ :churn       0
+ :resubscribe 0
+ :mqtt        5}
