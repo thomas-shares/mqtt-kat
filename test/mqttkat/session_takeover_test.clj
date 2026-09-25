@@ -13,6 +13,7 @@
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [mqttkat.client :as client]
             [mqttkat.handlers :as h]
+            [mqttkat.trie :as trie]
             [mqttkat.test-util :as tu])
   (:import [java.nio.channels SelectionKey]
            [org.mqttkat MqttStat]))
@@ -171,4 +172,35 @@
         (MqttStat/clientConnected)
         (h/remove-client! :only-conn)
         (is (not (contains? @h/*outbound* id)))
-        (is (not (contains? @h/*inflight* [id 1])))))))
+        (is (not (contains? @h/*inflight* [id 1]))))))
+
+  (testing "a persistent session is not parked over the replacement"
+    ;; Parking would put the old connection's copy of the session back under
+    ;; the client id, list its subscriptions as offline while the client is
+    ;; connected, and start an expiry that discards the session — the
+    ;; replacement's window with it — once the timer fires.
+    (let [id  "late-teardown-persistent"
+          sub {:topic-filter "late/t" :qos 1}
+          old {:client-id id :protocol-version 5 :clean-session? false
+               :properties {:session-expiry-interval 60}
+               :subscribed-topics #{sub}}]
+      (binding [h/*clients*         (atom {:old-conn old
+                                           :new-conn (assoc old :subscribed-topics #{})})
+                h/*live-clients*    (atom {id :new-conn})
+                h/*outbound*        (atom {id (atom {:next-id 2 :inflight {1 {}}})})
+                h/*inflight*        (atom {[id 1] {:msg {} :topic "t"}})
+                h/*subscriber-trie* (atom (trie/make-trie))
+                h/*offline-trie*    (atom (trie/make-trie))]
+        (MqttStat/clientConnected)
+        (try
+          (h/remove-client! :old-conn)
+          (is (not (contains? @h/*clients* :old-conn)) "the old connection is gone")
+          (is (not (contains? @h/*clients* id))
+              "and has not parked a session under the id the new one holds")
+          (is (empty? (trie/trie-matching-vals @h/*offline-trie* "late/t"))
+              "nor listed its subscriptions as offline")
+          (is (contains? @h/*outbound* id) "the new connection keeps its window")
+          (is (contains? @h/*inflight* [id 1]) "and what it has in flight")
+          ;; Not bound like the rest: if one was scheduled it would fire on
+          ;; the shared broker's state, so it goes either way.
+          (finally (h/cancel-session-expiry! id)))))))

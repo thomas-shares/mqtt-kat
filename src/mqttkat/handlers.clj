@@ -630,23 +630,31 @@
       ;; carries more than those two.
       (swap! *subscriber-trie* trie-delete (:topic-filter topic)
              (assoc topic :client-key key)))
-    (if-not (keep-session? client)
+    (cond
+      ;; The id already belongs to another connection: the session is that
+      ;; connection's now, so this one leaves it alone. The records are keyed
+      ;; by client-id, not by connection, and a displaced connection's teardown
+      ;; can run after its replacement has connected and started sending.
+      ;; Clearing them would empty the new connection's window; parking would
+      ;; hand its in-flight messages over, put its subscriptions in the offline
+      ;; trie alongside the live ones, and start an expiry that discards the
+      ;; session out from under it. forget-live! above has taken this key out
+      ;; of the index, so whatever is still there is someone else.
+      (and client-id (some? (live-connection client-id)))
+      (swap! *clients* dissoc key)
+
+      (not (keep-session? client))
       (do
         ;; A session that is not kept keeps nothing. Its in-flight records would
         ;; otherwise sit in *outbound* and *inflight* for the life of the
         ;; process, since only a reconnect under the same client-id ever reads
         ;; them again.
-        ;;
-        ;; Unless the id already belongs to another connection. The records are
-        ;; keyed by client-id, not by connection, and a displaced connection's
-        ;; teardown can run after its replacement has connected and started
-        ;; sending: this would then empty the new connection's window and drop
-        ;; what it has in flight. forget-live! above has taken this key out of
-        ;; the index, so whatever is still there is someone else.
-        (when (and client-id (nil? (live-connection client-id)))
+        (when client-id
           (swap! *outbound* dissoc client-id)
           (swap! *inflight* #(into {} (remove (fn [[[id _] _]] (= id client-id))) %)))
         (swap! *clients* dissoc key))
+
+      :else
       (do
         ;; While attached, what it leaves unacknowledged goes to the cluster,
         ;; so it can come back anywhere; a broker on its own keeps it here.
