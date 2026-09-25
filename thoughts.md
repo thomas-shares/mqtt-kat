@@ -45,6 +45,54 @@ connection's own teardown runs after its replacement has started delivering, it
 throws away the new connection's in-flight window, and the next delivery
 starts numbering packet identifiers again from 1.
 
+*Later:* fixed for a clean session. `remove-client!` now leaves `*outbound*` and
+`*inflight*` alone when another connection is already registered under the
+client-id, and `session_takeover_test` covers the late teardown. A persistent
+session takes a different path when it is parked, and whether a late expiry
+there can empty a reconnected client's queue is still open.
+
+### What was fixed today, and what is still open
+
+Fixed, each with a test:
+
+* **A will could go out twice.** Several paths reach `handle-will-if-present`
+  for one connection (the keep-alive reaper, the socket closing, a takeover),
+  and the will stayed on the client after it fired, so a persistent session
+  reaped by keep alive was parked with it. It is taken off in the same atomic
+  step that reads it now, so it goes out at most once. The `TODO` in
+  `check-timer` asking for exactly this is gone.
+* **QoS 2 spent two shared-group turns per message.** The PUBREC ran
+  `subscribers-for` only to pick its reason code, which advanced the rotation,
+  and the PUBREL picked again. A two-member group sent every QoS 2 message to
+  the same member. The PUBREC now asks whether anyone matches without choosing
+  who. The No Local and coalescing gap under 20260908 was already closed;
+  `v5_qos2_delivery_test` now pins all three rules on the QoS 2 path.
+* **A keep-alive timer could outlive its client.** See the struck entry under
+  "Found on the way, not fixed".
+* **UNSUBSCRIBE left queued messages to be delivered.** §3.10.4 allows either;
+  the broker now drops pending, not yet sent, messages that only the removed
+  subscriptions matched. Anything another subscription still matches, or that
+  was already picked for a shared subscription, stays, and in-flight QoS 1 and
+  2 still complete. Cluster-queued ones are settled so a resume does not
+  resend them.
+* **The late-teardown race** above, for clean sessions.
+* **`lein test` runs in GitHub Actions** on every push and PR, Java 21, with the
+  `^:performance` simulations left out. The cloud sessions I work from cannot
+  reach the Rama repository, so a PR's CI run is now the only way they can
+  test anything.
+
+Still open:
+
+* The same late-teardown guard for persistent sessions.
+* `test_unsubscribe` in the Paho v5 suite, flaky in the run and unexplained.
+* The Paho conformance suites are not in CI, so a conformance regression only
+  shows when someone runs them by hand.
+* `test_subscribe_failure`, by decision (see 20260909), and the two races in
+  the suite itself, which are upstream's to fix.
+* From older lists, not chased: the 53 of 150 subscriber sockets with an empty
+  Send-Q, the regex split in triennium's `split-topic` on the publish path, and
+  the median latency MQTT 5 cost.
+
 ## 20260909
 
 Carried on with version 5, working down the conformance failures. **23-26 of 27
@@ -595,6 +643,8 @@ change — and it is the same shape as the lead recorded on 20260903, where a
 a handful of messages then and is thousands now at 2,000 subscribers, which
 makes it far easier to chase. Still not chased.
 
+*Later:* chased and fixed, in the next section.
+
 ### The stall: a publisher paused for ever
 
 The 400,000 message run wedged every time. Around 0.6% of publishes never
@@ -960,6 +1010,9 @@ early and producing an error about `did` not being a parameter vector.
   pass in isolation and fail in the run. The suite clears retained messages
   once, at startup, so anything a later test leaves behind is somebody else's
   problem. Worth remembering before treating a suite failure as a broker bug.
+  *Later:* the retained-state explanation does not hold for either; see
+  20260925. `request_response` is the same race as `subscribe_options`, and
+  `unsubscribe` is still unexplained.
 * **`test_subscribe_options` races, and the race is in the test.** After
   subscribing *bclient* it waits on `callback.subscribeds` — aclient's callback,
   not `callback2` — and `waitfor` loops `while len(queue) < depth`, so with
@@ -1217,6 +1270,9 @@ Still failing: `maximum_packet_size`, `publication_expiry` (Message Expiry),
 `redelivery_on_reconnect`, `server_keep_alive`, `subscribe_failure`,
 `subscribe_identifiers`, `subscribe_options`, `assigned_clientid`,
 `retained_message`, `request_response`.
+
+*Later:* all ten fixed on 20260909, apart from `subscribe_failure` (left by
+decision) and the flaky ones; see 20260925 for the list as it stands.
 
 One thing found and deliberately not fixed, since it is a behavioural change
 well beyond aliases: `pubrel` calls `qos-2-send` with raw
