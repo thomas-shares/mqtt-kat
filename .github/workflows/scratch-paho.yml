@@ -1,0 +1,39 @@
+name: scratch-paho
+on:
+  push:
+    branches: ['claude/**']
+jobs:
+  paho:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: {distribution: temurin, java-version: "21"}
+      - uses: DeLaGuardo/setup-clojure@13.2
+        with: {lein: 2.11.2}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.lein
+          key: m2-${{ runner.os }}-${{ hashFiles('project.clj') }}
+          restore-keys: m2-${{ runner.os }}-
+      - run: lein uberjar
+      - name: start broker
+        run: |
+          nohup java -jar target/mqtt-kat-0.0.1-standalone.jar 1883 8081 > broker.log 2>&1 &
+          for i in $(seq 60); do grep -q "Server starting" broker.log && break; sleep 1; done
+          ss -ltnp | grep 1883; head -20 broker.log
+      - run: git clone -q --depth 1 https://github.com/eclipse/paho.mqtt.testing /tmp/paho
+      - name: repro unsubscribe
+        working-directory: /tmp/paho/interoperability
+        run: python3 $GITHUB_WORKSPACE/scratch-ci/repro_unsubscribe.py 25 2>&1 | grep -v "^\['" | tail -60
+      - name: full v5 suite x5
+        working-directory: /tmp/paho/interoperability
+        run: |
+          for i in 1 2 3 4 5; do
+            echo "=== run $i"; timeout 600 python3 client_test5.py 2>&1 | grep -E "^(FAIL|ERROR):|^Ran|^OK|^FAILED" || true
+          done
+      - if: always()
+        run: grep -v "DEBUG\|TRACE" broker.log | grep -E "WARN|ERROR|taken over|Exception" | head -80
