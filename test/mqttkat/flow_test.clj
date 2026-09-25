@@ -334,7 +334,8 @@
           (tu/close! sub)
           (tu/close! pub))))))
 
-(deftest ^:portable dollar-topics-match-filters-that-name-the-dollar-level
+;; Not ^:portable: pins mqtt-kat's choice. a client publishing to $SYS, which §4.7.2 reserves for the server; Mosquitto drops it.
+(deftest dollar-topics-match-filters-that-name-the-dollar-level
   (testing "$SYS/# still matches $SYS topics"
     ;; The other half of §4.7.2, and the half a blunt "drop anything starting
     ;; with $" would break.

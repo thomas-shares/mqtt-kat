@@ -149,7 +149,9 @@
               "protocol error"))
         (finally (tu/close! c))))))
 
-(deftest ^:portable a-malformed-share-filter-is-refused
+(deftest ^{:portable true
+           :diverges-on-mosquitto "Mosquitto disconnects over a bad share name instead of a SUBACK, and grants $share//topic outright (§4.8.2)"}
+  a-malformed-share-filter-is-refused
   (testing "the group name may not be empty or contain wildcards or a slash"
     ;; §4.8.2. Reported per filter on the SUBACK rather than by closing the
     ;; connection: the client asked for something impossible, but the rest of
@@ -169,5 +171,6 @@
   (testing "the CONNACK no longer denies them"
     (let [c (tu/connect-v5! "shared-advert")]
       (try
-        (is (true? (:shared-subscription-available (:properties (:connack c)))))
+        ;; §3.2.2.3.15: absent means supported, so only a false denies them.
+        (is (not (false? (:shared-subscription-available (:properties (:connack c))))))
         (finally (tu/close! c))))))

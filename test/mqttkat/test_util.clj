@@ -73,7 +73,7 @@
   []
   (when-not external? @broker))
 
-(def ^:private external-settle-ms
+(def ^:private ^:const external-settle-ms
   "How long the helpers that watch this broker's own state wait instead, when
    the broker is somewhere else and its state cannot be seen. A pause is the
    weaker guarantee, but the assertion that follows each of them still goes

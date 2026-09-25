@@ -44,8 +44,10 @@
     (let [c (connect-v5! (tu/client-id "v5-limits"))]
       (try
         (let [props (:properties (:connack c))]
-          (is (contains? props :retain-available))
-          (is (contains? props :wildcard-subscription-available))
+          ;; Absent means available (§3.2.2.3.11, §3.2.2.3.12), so what must
+          ;; not happen is a false; Mosquitto says it by leaving them out.
+          (is (not (false? (:retain-available props))))
+          (is (not (false? (:wildcard-subscription-available props))))
           ;; §3.2.2.3.4: the property says a broker does *less* than QoS 2 and
           ;; may only be 0 or 1; a broker that does QoS 2 leaves it out. Sent
           ;; as 2 it is a Protocol Error, and mosquitto's client refused every
@@ -67,7 +69,8 @@
         (is (= :CONNACK (:packet-type (:connack c))))
         (finally (tu/close! c))))))
 
-(deftest ^:portable an-unsupported-version-is-refused-with-a-version-5-reason-code
+;; Not ^:portable: pins mqtt-kat's choice. §3.1.2.2 makes the 0x84 CONNACK a MAY; Mosquitto answers in 3.1.1 form.
+(deftest an-unsupported-version-is-refused-with-a-version-5-reason-code
   (testing "version 6 gets 0x84, not 3.1.1's 0x01"
     ;; §3.2.2.2. The client asked in a dialect the broker does not speak, and
     ;; the answer has to be in one it does — which for anything above 5 is the

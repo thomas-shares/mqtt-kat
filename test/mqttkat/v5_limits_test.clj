@@ -55,7 +55,9 @@
         (is (= :PUBACK (:packet-type (tu/expect-eventually! (:ch pub) :PUBACK 3000))))
         (finally (tu/close! sub pub))))))
 
-(deftest ^:portable discarding-does-not-consume-the-window
+(deftest ^{:portable true
+           :diverges-on-mosquitto "Mosquitto stops delivering after oversized messages it discarded (§3.1.2.11.4)"}
+  discarding-does-not-consume-the-window
   (testing "the packet identifier comes back"
     ;; The identifier is reserved before the packet is built. Dropping the send
     ;; without releasing it would leak one per oversized message, and after
@@ -92,7 +94,8 @@
 
 ;; ── Server Keep Alive ────────────────────────────────────────────────────
 
-(deftest ^:portable a-long-keep-alive-is-brought-down
+;; Not ^:portable: pins mqtt-kat's choice. 60 is mqtt-kat's limit; stock Mosquitto has none.
+(deftest a-long-keep-alive-is-brought-down
   (testing "§3.2.2.3.5: the server's number wins, and it says so"
     (let [c (tu/connect-v5! "ka-long" :keep-alive 120)]
       (try

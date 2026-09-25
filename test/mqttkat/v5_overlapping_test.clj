@@ -23,7 +23,8 @@
                           :retain? false :duplicate? false}
                    (pos? qos) (assoc :packet-identifier 1))))
 
-(deftest ^:portable two-matching-subscriptions-deliver-once
+;; Not ^:portable: pins mqtt-kat's choice. §3.3.4 allows a copy per subscription, which is what Mosquitto sends.
+(deftest two-matching-subscriptions-deliver-once
   (testing "§3.3.4: one copy carrying every matching Subscription Identifier"
     ;; `a/#` matches `a` as well as `a/b` (§4.7.1.2), so these two filters both
     ;; match the parent topic. The broker used to send one delivery per
@@ -46,7 +47,8 @@
         (is (nil? (tu/take! (:ch sub) 700)) "exactly one delivery")
         (finally (tu/close! sub pub))))))
 
-(deftest ^:portable the-delivery-takes-the-highest-matching-qos
+;; Not ^:portable: pins mqtt-kat's choice. §3.3.4 allows a copy per subscription, which is what Mosquitto sends.
+(deftest the-delivery-takes-the-highest-matching-qos
   (testing "§3.3.5-1: the maximum QoS of the matching subscriptions"
     ;; One copy has to pick a QoS, and dropping to the lower of the two would
     ;; quietly downgrade a subscription the client asked for at QoS 1.
@@ -76,7 +78,8 @@
           (is (= [456789] (mapv long (:subscription-identifiers (:properties m))))))
         (finally (tu/close! sub pub))))))
 
-(deftest ^:portable a-subscription-without-an-identifier-adds-none
+;; Not ^:portable: pins mqtt-kat's choice. §3.3.4 allows a copy per subscription, which is what Mosquitto sends.
+(deftest a-subscription-without-an-identifier-adds-none
   (testing "a filter subscribed without one contributes nothing to the list"
     ;; §3.3.4: only subscriptions that *have* an identifier put one on the
     ;; delivery. A client mixing the two must not see a phantom.

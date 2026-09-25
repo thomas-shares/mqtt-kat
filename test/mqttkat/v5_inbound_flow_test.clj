@@ -42,7 +42,8 @@
           (= :DISCONNECT (:packet-type msg)) msg
           :else (recur (inc n)))))))
 
-(deftest ^:portable exceeding-the-brokers-receive-maximum-is-refused
+;; Not ^:portable: pins mqtt-kat's choice. §3.3.4 says the server uses 0x93, not that it MUST; Mosquitto carries on.
+(deftest exceeding-the-brokers-receive-maximum-is-refused
   (testing "one QoS 2 publish too many gets a DISCONNECT with 0x93"
     ;; §4.9: the receiver's Receive Maximum is a promise the sender must keep,
     ;; and a sender that breaks it is disconnected rather than quietly served.

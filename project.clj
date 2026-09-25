@@ -70,6 +70,10 @@
   :test-selectors {:default     (complement :performance)
                    :performance :performance
                    :portable    :portable
+                   ;; What CI runs against Mosquitto: the portable tests less
+                   ;; the ones Mosquitto is known to fail, each of which says
+                   ;; why in its :diverges-on-mosquitto.
+                   :mosquitto   (fn [m] (and (:portable m) (not (:diverges-on-mosquitto m))))
                    :all         (constantly true)}
   ;; mqttkat.rama.module is not instrumented. `defmodule` expands its whole
   ;; body — every depot, PState and dataflow form of the topology — into one

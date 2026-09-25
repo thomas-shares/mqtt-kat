@@ -116,7 +116,8 @@
           (is (seq got-b)))
         (finally (tu/close! a b pub))))))
 
-(deftest ^:portable overlapping-subscriptions-deliver-once-at-qos-2
+;; Not ^:portable: pins mqtt-kat's choice. §3.3.4 allows a copy per subscription, which is what Mosquitto sends.
+(deftest overlapping-subscriptions-deliver-once-at-qos-2
   (testing "§3.3.4: one copy carrying both Subscription Identifiers"
     ;; The same coalescing v5-overlapping-test pins at QoS 1, through the
     ;; PUBREL path. Two copies would be legal but is not what this broker does

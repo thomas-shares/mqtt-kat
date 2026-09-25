@@ -86,7 +86,7 @@ jobs:
         env:
           MQTT_BROKER_HOST: 127.0.0.1
           MQTT_BROKER_PORT: "1883"
-        run: lein test :portable
+        run: lein test :mosquitto
 
       - if: always()
         run: docker logs mosquitto > "$RUNNER_TEMP/mosquitto.log" 2>&1 || true

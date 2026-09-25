@@ -144,7 +144,8 @@
 
 ;; ── the server saying why ─────────────────────────────────────────────
 
-(deftest ^:portable an-undeclared-topic-alias-is-answered-with-a-reason-code
+;; Not ^:portable: pins mqtt-kat's choice. 0x94 where 0x82 Protocol Error is as good; Mosquitto sends 0x82.
+(deftest an-undeclared-topic-alias-is-answered-with-a-reason-code
   (testing "0x94, rather than the message being dropped in silence"
     ;; §3.3.2.3.4. This was left open when topic aliases landed: an alias
     ;; nobody declared was logged and discarded, so the publisher had no way

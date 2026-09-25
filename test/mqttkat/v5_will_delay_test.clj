@@ -54,7 +54,9 @@
                 (str "the will should arrive around the delay, took " elapsed "ms"))))
         (finally (tu/close! sub))))))
 
-(deftest ^:portable the-session-ending-cuts-the-delay-short
+(deftest ^{:portable true
+           :diverges-on-mosquitto "Mosquitto holds the will for the full delay although the session ended (§3.1.3.2.2)"}
+  the-session-ending-cuts-the-delay-short
   (testing "delay 5, session expiry 0: the will is immediate"
     ;; §3.1.3.2.2 — the delay is an upper bound, not a promise to wait. With a
     ;; session that ends at once there is nothing left to come back to, so
