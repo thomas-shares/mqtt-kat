@@ -2,6 +2,49 @@
 
 In this file will go my thoughts and ramblings about this project and what I have done and what I might do next.
 
+## 20260925
+
+### The v5 failure list, refreshed
+
+Read against the Paho suite as it stands upstream (eclipse/paho.mqtt.testing
+at 9d7bb80, `interoperability/client_test5.py`), not measured: the broker could not be built
+where this was written. The failure list under 20260908 is stale — every one of
+the ten it names was fixed on 20260909 — and the "range, not a number" notes
+under 20260909 get one cause wrong. What is left:
+
+* **`test_subscribe_failure` — fails every run, by decision.** Needs a deny
+  policy for `test/nosubscribe`; see 20260909. It also exits without
+  disconnecting `aclient`, so the next test (`subscribe_identifiers`) always
+  starts with a takeover of a socket the client has already closed.
+* **`test_subscribe_options` — flaky, the test's race.** Line 554 waits on
+  `callback.subscribeds` after subscribing *bclient*; it should be
+  `callback2.subscribeds`. As written it never waits, and aclient's PUBLISH can
+  reach the broker before bclient's SUBSCRIBE. Still unfixed upstream.
+* **`test_request_response` — flaky, the same race, not retained state.**
+  Line 682 is the identical `callback.subscribeds` wait after `bclient.subscribe`.
+  The retained-message explanation cannot be right: tests run alphabetically,
+  and the only two that publish retained messages (`retained_message`,
+  `subscribe_options`) both run *after* it, and `setUpClass` clears retained
+  messages first.
+* **`test_unsubscribe` — flaky in the run, passes alone.** It runs straight
+  after `subscribe_options`, and when that one loses its race it does so at the
+  No Local step, before it publishes anything retained — so not retained state
+  either. What it does leave behind is
+  both clients still connected, with bclient subscribed to TopicA, so
+  `unsubscribe` opens with two takeovers of sockets the client closed without a
+  DISCONNECT. Cause not pinned down; the takeover is the lead.
+
+With the two waits corrected in a local copy of the suite, the expected result
+is 26 of 27 every run. If `unsubscribe` still fails after that, it is the
+broker's, and the broker log for that test is the next thing to read.
+
+One latent race found on the way, which is not known to cause any of these:
+`remove-client!` drops `*outbound*` and `*inflight*` by client-id for a session
+that is not kept, without the check `forget-live!` makes first. If a displaced
+connection's own teardown runs after its replacement has started delivering, it
+throws away the new connection's in-flight window, and the next delivery
+starts numbering packet identifiers again from 1.
+
 ## 20260909
 
 Carried on with version 5, working down the conformance failures. **23-26 of 27
