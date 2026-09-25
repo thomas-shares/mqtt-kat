@@ -112,6 +112,48 @@
               (is (not (contains? @h/*clients* k))
                   "a client silent for 60s must be reaped by a 1.5s timeout"))))))))
 
+(def ^:private a-will
+  {:will-topic "ka/will" :will-message "gone" :will-qos 0 :will-retain false})
+
+(deftest a-will-is-sent-once-and-then-cleared
+  (testing "handle-will-if-present takes the will off the client as it sends it"
+    ;; The reaper, the socket closing and a takeover can all reach this for the
+    ;; same connection; only the first may publish.
+    (let [sent (atom [])]
+      (with-redefs [h/publish-will #(swap! sent conj %)]
+        (binding [h/*clients* (atom {"k" {:client-id "ka-will-once" :will a-will}})]
+          (h/handle-will-if-present "k")
+          (h/handle-will-if-present "k")
+          (is (= 1 (count @sent)) "the will must go out exactly once")
+          (is (= "gone" (:payload (first @sent))))
+          (is (not (contains? (get @h/*clients* "k") :will))
+              "the will must be removed from the client once sent"))))))
+
+(deftest check-timer-clears-the-will-and-the-timer-of-a-parked-session
+  (testing "a persistent session reaped by keep alive is parked without its will"
+    (with-selection-key
+      (fn [k]
+        (let [sent     (atom [])
+              time-out (* 1500 keep-alive-secs)
+              id       "ka-will-parked"
+              entry    {:client-id id :clean-session? false :will a-will
+                        :last-active (volatile! (- (System/currentTimeMillis) 60000))}]
+          (with-redefs [h/publish-will #(swap! sent conj %)]
+            (binding [h/*clients* (atom {k entry})]
+              (h/add-timer! k keep-alive-secs)
+              ;; add-timer! stamps the client as active now; put it back in the past.
+              (swap! h/*clients* assoc-in [k :last-active]
+                     (volatile! (- (System/currentTimeMillis) 60000)))
+              (h/check-timer k time-out)
+              (is (= 1 (count @sent)) "the will is published when the client is reaped")
+              (is (not (contains? @h/*clients* k)) "the connection is forgotten")
+              (let [parked (get @h/*clients* id)]
+                (is (some? parked) "the persistent session is parked under its client id")
+                (is (not (contains? parked :will))
+                    "a will that has fired must not be carried into the parked session")
+                (is (nil? (:timer parked)) "the parked session holds no keep-alive timer"))
+              (h/discard-session! id))))))))
+
 (deftest update-timestamps-tolerates-a-vanishing-client
   (testing "marking liveness never throws when the client is already gone"
     ;; The broker handles a packet on one thread while another disconnects the

@@ -218,12 +218,29 @@
     (swap! delayed-wills dissoc client-id)
     (try (at/kill job) (catch Exception _ nil))))
 
+(defn- take-will!
+  "Remove the will from `key`'s entry and return the entry as it was, will
+   included — or nil if there was no will to take.
+
+   One atomic step, so a will goes out at most once. Several paths reach
+   handle-will-if-present for the same connection (the keep-alive reaper, the
+   socket closing, a takeover), and a will left in place after firing was also
+   carried into the parked session of a persistent client."
+  [key]
+  (let [[old _] (swap-vals! *clients*
+                            (fn [clients]
+                              (if (contains? (get clients key) :will)
+                                (update clients key dissoc :will)
+                                clients)))
+        client  (get old key)]
+    (when (contains? client :will)
+      client)))
+
 (defn handle-will-if-present [key]
-  (when (contains? (get @*clients* key) :will)
-    (let [client (get @*clients* key)
-          ;; Captured now, not read when the job fires: by then this client's
-          ;; entry has been removed and there would be no will left to send.
-          will   {:topic      (get-in client [:will :will-topic])
+  (when-let [client (take-will! key)]
+    ;; Captured now, not read when the job fires: by then this client's
+    ;; entry has been removed and there would be no will left to send.
+    (let [will   {:topic      (get-in client [:will :will-topic])
                   :qos        (get-in client [:will :will-qos])
                   :payload    (get-in client [:will :will-message])
                   :retain     (get-in client [:will :will-retain])
@@ -256,12 +273,9 @@
       (log/debug "timer fired:" time-out idle)
       (when (<= time-out idle)
         (log/debug "Timer fired for client:" key)
+        ;; handle-will-if-present takes the will off the client as it sends
+        ;; it, and remove-client! kills this timer.
         (handle-will-if-present key)
-        ;; TODO 
-        ;; Remove Timer!!!
-        ;; once we have sent the will message remove the will from the client,
-        ;; so that it won't get send again.
-        #_(swap! *clients* assoc-in [key] dissoc :will)
         (remove-client! key)
         (log/debug "about to close")
         ;; *server* holds the stop-server closure; the MqttServer itself lives
