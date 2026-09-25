@@ -1667,7 +1667,7 @@
 ;    (swap! outbound assoc (:client-key k) (:packet-identifier msg))))))
 
 (defn- qos-2-accept
-  [keys topic {:keys [client-key packet-identifier] :as recv-msg}]
+  [delivered? topic {:keys [client-key packet-identifier] :as recv-msg}]
   ;; Keyed by client-id, not by the SelectionKey. A client that disconnects
   ;; between PUBREC and PUBREL comes back on a different key, and the broker
   ;; could then never find the message it had already taken responsibility for:
@@ -1691,7 +1691,7 @@
   ;; publisher can act on, and it is the one version 5 asks for here.
   (send-buffer [client-key]
                (MqttPubRec/encode
-                (ack-for :PUBREC client-key packet-identifier (seq keys)))))
+                (ack-for :PUBREC client-key packet-identifier delivered?))))
 
 (defn inbound-inflight
   "QoS 2 messages this client has sent that are still in flight — a PUBREC has
@@ -1725,10 +1725,9 @@
        (>= (inbound-inflight client-key) (inbound-window client-key))))
 
 (defn qos-2
-  ;; `keys`, not `_keys`: the subscriber list is used now, to tell the
-  ;; publisher whether anything matched. Left underscored it resolved to
-  ;; clojure.core/keys — which compiles, and fails at run time.
-  [keys topic {:keys [client-key packet-identifier] :as recv-msg}]
+  ;; Whether anything matched, not who: the PUBREC reports that much, and the
+  ;; recipients are chosen on the PUBREL (§4.3.3) — see anyone-to-deliver-to?.
+  [delivered? topic {:keys [client-key packet-identifier] :as recv-msg}]
   #_(log/trace "QOS 2")
   (if (over-receive-maximum? client-key)
     ;; §4.9. Without this the broker accepts everything and answers nothing —
@@ -1740,7 +1739,7 @@
       (disconnect-with-reason! client-key
                                MqttReasonCode/RECEIVE_MAXIMUM_EXCEEDED
                                (str "more than " (inbound-window client-key) " QoS 2 messages in flight")))
-    (qos-2-accept keys topic recv-msg)))
+    (qos-2-accept delivered? topic recv-msg)))
 
 (defn subscribers-for
   "Who this publish is actually delivered to, in one place.
@@ -1757,6 +1756,20 @@
     (select-shared
      (deliverable-subscribers (matching-subscribers topic) publisher-key)
      serve-group?))))
+
+(defn- anyone-to-deliver-to?
+  "Whether subscribers-for would find anyone, without choosing who.
+
+   For the PUBREC of a QoS 2 publish, which only reports whether anything
+   matched. subscribers-for cannot answer that for it: picking a shared-group
+   member moves the group's rotation on, so asking at PUBLISH and asking again
+   at PUBREL spent two turns per message, and with two members every QoS 2
+   message went to the same one."
+  [topic publisher-key serve-group?]
+  (boolean
+   (some #(or (nil? (:share-group %))
+              (serve-group? [(:share-group %) (:topic-filter %)]))
+         (deliverable-subscribers (matching-subscribers topic) publisher-key))))
 
 (defn- route
   "Where a publish on `topic` goes, when there are other brokers.
@@ -1826,7 +1839,9 @@
   ;; being subscribers. A `matching-vals` that returned nil for no match would
   ;; otherwise have left a QoS 1 publisher retrying for ever.
   (let [{:keys [plan serve-group?]} (route topic msg)
-        keys (subscribers-for topic (:client-key msg) serve-group?)]
+        ;; Not chosen at all for QoS 2 — see anyone-to-deliver-to?.
+        keys (when-not (= 2 (long qos))
+               (subscribers-for topic (:client-key msg) serve-group?))]
     (case (long qos)
       0 (do (qos-0 keys topic msg false)
             (forward-to-brokers! plan topic msg))
@@ -1837,7 +1852,7 @@
       ;; arrives (§4.3.3), so it is kept for offline sessions there — and
       ;; routed there, for the same reason: the subscribers are whoever
       ;; matches then.
-      2 (qos-2 keys topic msg))))
+      2 (qos-2 (anyone-to-deliver-to? topic (:client-key msg) serve-group?) topic msg))))
 
 (defn resolve-topic-alias
   "Turn a topic alias back into the topic it stands for (§3.3.2.3.4).
