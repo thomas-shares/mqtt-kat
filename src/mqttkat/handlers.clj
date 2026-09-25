@@ -605,7 +605,14 @@
         ;; otherwise sit in *outbound* and *inflight* for the life of the
         ;; process, since only a reconnect under the same client-id ever reads
         ;; them again.
-        (when client-id
+        ;;
+        ;; Unless the id already belongs to another connection. The records are
+        ;; keyed by client-id, not by connection, and a displaced connection's
+        ;; teardown can run after its replacement has connected and started
+        ;; sending: this would then empty the new connection's window and drop
+        ;; what it has in flight. forget-live! above has taken this key out of
+        ;; the index, so whatever is still there is someone else.
+        (when (and client-id (nil? (live-connection client-id)))
           (swap! *outbound* dissoc client-id)
           (swap! *inflight* #(into {} (remove (fn [[[id _] _]] (= id client-id))) %)))
         (swap! *clients* dissoc key))
