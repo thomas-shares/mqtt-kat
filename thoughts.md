@@ -2494,10 +2494,13 @@ case pass and the other three fail, which is the check worth having.
 
 ### Found on the way, not fixed
 
-* **A keep-alive timer fires against a parked session.** `keep-alive-test` logs
-  a `ClassCastException: String cannot be cast to SelectionKey` out of
-  `check-timer` — a timer outliving the re-keying in `remove-client!`. Caught
-  and logged, so harmless today.
+* ~~**A keep-alive timer fires against a parked session.**~~ Fixed on 20260925.
+  The `ClassCastException` itself came from tests handing `check-timer` a
+  String for a key, gone since they use a real `SelectionKey`. What it pointed
+  at was real: a timer is stopped only by `remove-timer!` finding it in the
+  entry, so one whose entry went without it fired forever. Each tick now checks
+  it is still the timer filed under its key and cancels itself if not, and
+  `add-timer!` stops any timer already there.
 * ~~**`writeFully` still polls.**~~ Fixed on 20260904, and the suspicion that
   prompted it was wrong: a counter on that branch measured **zero** stalls
   under every load tried, up to 806,000 deliveries a second. It was not the
