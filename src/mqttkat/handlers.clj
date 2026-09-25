@@ -2396,6 +2396,18 @@
                    (do
                      (log/trace "No such subscription to remove:" topic)
                      (long MqttReasonCode/NO_SUBSCRIPTION_EXISTED)))))]
+    ;; What was queued for the subscriptions just removed, and nothing still
+    ;; subscribed wants, is not sent after all (§3.10.4 allows either); what
+    ;; is in flight still completes. A shorter queue may also be the one a
+    ;; throttled publisher is waiting on.
+    ;; Before the UNSUBACK, not after: once the client has its answer, nothing
+    ;; it just unsubscribed from should still be on its way to it.
+    (let [{:keys [client-id] :as client} (get @*clients* client-key)]
+      (when (and client-id
+                 (pos? (long (drop-unsubscribed-pending! client-id removed
+                                                         (:subscribed-topics client))))
+                 (<= (pending-count client-id) resume-threshold))
+        (some-> (connection-of client-key) .ackDrained)))
     (send-buffer [client-key]
                  (MqttUnSubAck/encode
                   (cond-> {:packet-type       :UNSUBACK
@@ -2403,16 +2415,6 @@
                     (>= version 5) (assoc :protocol-version 5
                                           :properties {}
                                           :response (vec codes)))))
-    ;; What was queued for the subscriptions just removed, and nothing still
-    ;; subscribed wants, is not sent after all (§3.10.4 allows either); what
-    ;; is in flight still completes. A shorter queue may also be the one a
-    ;; throttled publisher is waiting on.
-    (let [{:keys [client-id] :as client} (get @*clients* client-key)]
-      (when (and client-id
-                 (pos? (long (drop-unsubscribed-pending! client-id removed
-                                                         (:subscribed-topics client))))
-                 (<= (pending-count client-id) resume-threshold))
-        (some-> (connection-of client-key) .ackDrained)))
     (log/trace "Unsubscribed trie:" @*subscriber-trie*)
     (log/trace "Unsubscribed clients:" (get-in @*clients* [client-key])))))
 
