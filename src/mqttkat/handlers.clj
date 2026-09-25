@@ -1482,6 +1482,8 @@
       (when (>= (pending-count client-id) pause-threshold)
         (throttle-publisher! key publisher-key client-id)))))
 
+(declare flush-pending!)
+
 (defn queue-for-offline-sessions!
   "Keep a publish for persistent sessions that are subscribed but not connected.
 
@@ -1502,10 +1504,15 @@
         ;; topic and user properties that an identical message delivered live
         ;; kept — and with no Message Expiry Interval, there was nothing to
         ;; expire it by either.
-        (queue-pending! client-id {:topic      topic
-                                   :payload    payload
-                                   :properties (forwardable-properties properties)
-                                   :qos        (min (long qos) (long sub-qos))})))))
+        (when (queue-pending! client-id {:topic      topic
+                                         :payload    payload
+                                         :properties (forwardable-properties properties)
+                                         :qos        (min (long qos) (long sub-qos))})
+          ;; Back already: it resumed between the match above and the queue,
+          ;; and its connect flushed a queue this was not in yet. Nothing
+          ;; else would send it until the client acknowledged something.
+          (when-let [key (live-connection client-id)]
+            (flush-pending! key client-id)))))))
 
 (defn flush-pending!
   "Send what was queued for `client-id` while it was away.
@@ -1938,8 +1945,12 @@
     (case (long qos)
       0 (do (qos-0 keys topic msg false)
             (forward-to-brokers! plan topic msg))
-      1 (do (qos-1 keys topic msg)
-            (queue-for-offline-sessions! topic msg)
+      ;; Queued for the sessions that are away before the PUBACK, which
+      ;; qos-1 sends: the acknowledgement says the broker has the message
+      ;; (§4.3.2), and a subscriber reconnecting the moment it arrives found
+      ;; its queue flushed with this message not yet in it.
+      1 (do (queue-for-offline-sessions! topic msg)
+            (qos-1 keys topic msg)
             (forward-to-brokers! plan topic msg))
       ;; Not for QoS 2: that message is not published until its PUBREL
       ;; arrives (§4.3.3), so it is kept for offline sessions there — and
@@ -2168,9 +2179,6 @@
 (defn pubrel
   [{:keys [packet-identifier client-key]}]
   #_(log/debug "received (PUBREL:" packet-identifier)
-  (send-buffer [client-key]
-               (MqttPubComp/encode {:packet-type       :PUBCOMP
-                                    :packet-identifier packet-identifier}))
   (let [client-id (:client-id (get @*clients* client-key))
         {:keys [topic msg]} (get @*inflight* [client-id packet-identifier])]
     (when topic
@@ -2185,7 +2193,15 @@
       ;; limit on messages in flight rather than on messages ever sent.
       (swap! *clients* update-in [client-key :inbound-inflight]
              (fn [n] (max 0 (dec (or n 0))))))
-    (swap! *inflight* dissoc [client-id packet-identifier])))
+    (swap! *inflight* dissoc [client-id packet-identifier]))
+  ;; Last, not first: the PUBCOMP tells the publisher it is done with this
+  ;; identifier. Sent before the message was queued for the sessions that
+  ;; are away, a subscriber reconnecting on it could miss it; sent before
+  ;; the entry was removed, a new publish reusing the identifier at once
+  ;; had its own entry removed by the dissoc above.
+  (send-buffer [client-key]
+               (MqttPubComp/encode {:packet-type       :PUBCOMP
+                                    :packet-identifier packet-identifier})))
 
 (defn pubcomp [{:keys [packet-identifier client-key] :as msg}]
   #_(log/debug "received PUBCOMP:" (dissoc msg :client-key))

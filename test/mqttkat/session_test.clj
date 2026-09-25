@@ -243,3 +243,53 @@
           "every reset connection should have been cleaned up")
       (is (empty? (h/matching-subscribers topic))
           "and its subscriptions should have gone with it"))))
+
+;; ── reconnecting while a message is being queued ─────────────────────────
+
+(defn- slow-queue
+  "queue-pending!, taking 300 ms first: long enough that a subscriber
+   reconnecting the moment its publisher is acknowledged lands inside it."
+  [original]
+  (fn [client-id msg]
+    (Thread/sleep 300)
+    (original client-id msg)))
+
+(defn- park-subscriber! [id topic]
+  (let [a (tu/connect-v5! nil :id id :clean-session? false
+                          :properties {:session-expiry-interval 300})]
+    (tu/send-v5! a {:packet-type :SUBSCRIBE :packet-identifier 1
+                    :topics [{:qos 2 :topic-filter topic}]})
+    (tu/expect! (:ch a) :SUBACK)
+    (tu/send-v5! a {:packet-type :DISCONNECT})
+    (tu/close! a)
+    (tu/wait-for-parked-session! id)))
+
+(deftest a-subscriber-back-at-once-still-gets-what-was-queued-for-it
+  ;; The PUBACK went before the message was queued for the sessions that are
+  ;; away, and the PUBCOMP likewise. A subscriber reconnecting on it had its
+  ;; queue flushed with the message not in it yet; queued a moment later, it
+  ;; sat there, since nothing flushes a queue but a connect or an
+  ;; acknowledgement. Seen as an occasional failure of
+  ;; a-queued-message-keeps-its-other-properties.
+  (doseq [qos [1 2]]
+    (testing (str "QoS " qos)
+      (let [id    (tu/client-id (str "back-at-once-" qos))
+            topic (tu/topic (str "back-at-once-" qos))
+            _     (park-subscriber! id topic)
+            pub   (tu/connect-v5! "back-at-once-pub")]
+        (try
+          (with-redefs [h/queue-pending! (slow-queue h/queue-pending!)]
+            (tu/send-v5! pub {:packet-type :PUBLISH :topic topic :qos qos :packet-identifier 7
+                              :payload (.getBytes "kept" "UTF-8") :retain? false :duplicate? false})
+            (if (= 1 qos)
+              (tu/expect-eventually! (:ch pub) :PUBACK 2000)
+              (do (tu/expect-eventually! (:ch pub) :PUBREC 2000)
+                  (tu/send-v5! pub {:packet-type :PUBREL :packet-identifier 7})
+                  (tu/expect-eventually! (:ch pub) :PUBCOMP 2000)))
+            (let [b (tu/connect-v5! nil :id id :clean-session? false
+                                    :properties {:session-expiry-interval 300})]
+              (try
+                (let [m (tu/expect-eventually! (:ch b) :PUBLISH 3000)]
+                  (is (= "kept" (tu/payload-str m))))
+                (finally (tu/close! b)))))
+          (finally (tu/close! pub)))))))
