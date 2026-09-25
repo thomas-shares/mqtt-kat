@@ -1224,6 +1224,10 @@ well beyond aliases: `pubrel` calls `qos-2-send` with raw
 `select-shared`. So No Local and shared-subscription round-robin do not apply to
 QoS 2 messages at all. That probably bears on `subscribe_options`.
 
+*Later:* fixed since. `pubrel` now delivers through `subscribers-for`, the same
+No Local, shared-group and coalescing steps every other publish takes, and
+`v5_qos2_delivery_test.clj` pins all three on the QoS 2 path.
+
 Enhanced authentication (the AUTH packet) is also still absent, and I am
 inclined to leave it: the broker has no authentication mechanism of any kind
 for it to enhance.
