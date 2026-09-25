@@ -1,0 +1,55 @@
+name: scratch-paho
+on:
+  push:
+    branches: ['claude/**']
+jobs:
+  paho:
+    strategy:
+      fail-fast: false
+      matrix:
+        ref: [head, a436737]
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - if: matrix.ref != 'head'
+        run: git checkout -q ${{ matrix.ref }}
+      - uses: actions/setup-java@v4
+        with: {distribution: temurin, java-version: "21"}
+      - uses: DeLaGuardo/setup-clojure@13.2
+        with: {lein: 2.11.2}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.lein
+          key: m2-${{ runner.os }}-${{ hashFiles('project.clj') }}
+          restore-keys: m2-${{ runner.os }}-
+      - run: lein uberjar
+      - name: start broker
+        run: |
+          nohup java -jar target/mqtt-kat-0.0.1-standalone.jar 1883 8081 > $RUNNER_TEMP/broker.log 2>&1 &
+          for i in $(seq 60); do grep -q "Server starting" $RUNNER_TEMP/broker.log && break; sleep 1; done
+          ss -ltnp | grep 1883
+      - run: git clone -q --depth 1 https://github.com/eclipse/paho.mqtt.testing /tmp/paho
+      - name: two tests alone, details
+        if: matrix.ref == 'head'
+        working-directory: /tmp/paho/interoperability
+        run: |
+          for t in test_subscribe_options test_request_response; do for i in 1 2 3; do
+            echo "=== $t $i"; timeout 120 python3 client_test5.py Test.$t 2>&1 | grep -v "^\['" | grep -A25 -E "^(FAIL|ERROR):|^Traceback" | head -40; done; done
+      - name: full suite x5, details
+        working-directory: /tmp/paho/interoperability
+        run: |
+          for i in 1 2 3 4 5; do
+            echo "=== run $i"; timeout 600 python3 client_test5.py 2>&1 | grep -v "^\['" | grep -A12 -E "^(FAIL|ERROR):|^Ran|^OK|^FAILED" | grep -v "^  File\|^-----" | head -80 || true
+          done
+      - name: suite x3 with the two waits corrected
+        if: matrix.ref == 'head'
+        working-directory: /tmp/paho/interoperability
+        run: |
+          cp client_test5.py fixed5.py
+          sed -i '554s/callback\.subscribeds/callback2.subscribeds/; 682s/callback\.subscribeds/callback2.subscribeds/' fixed5.py
+          sed -n '554p;682p' fixed5.py
+          for i in 1 2 3; do echo "=== fixed $i"; timeout 600 python3 fixed5.py 2>&1 | grep -E "^(FAIL|ERROR):|^Ran|^OK|^FAILED" || true; done
