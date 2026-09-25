@@ -28,7 +28,8 @@
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [mqttkat.client :as client]
             [mqttkat.handlers :as h]
-            [mqttkat.test-util :as tu])
+            [mqttkat.test-util :as tu]
+            [overtone.at-at :as at])
   (:import [java.nio.channels Selector SocketChannel]))
 
 ;; lein auto test :only mqttkat.keep-alive-test
@@ -153,6 +154,51 @@
                     "a will that has fired must not be carried into the parked session")
                 (is (nil? (:timer parked)) "the parked session holds no keep-alive timer"))
               (h/discard-session! id))))))))
+
+;; Killed through at/kill, so recording what it is handed shows which timers
+;; were stopped without reaching into at-at's job records.
+(defn- recording-kills [killed]
+  (let [kill at/kill]
+    (fn [job] (swap! killed conj job) (kill job))))
+
+(deftest a-timer-whose-client-is-gone-stops-itself
+  (testing "a keep-alive timer left behind by its client cancels itself on its next tick"
+    ;; The root atom, not a binding: the tick runs on the timer pool, where a
+    ;; binding made on this thread is not seen.
+    (let [k      (Object.)
+          killed (atom [])]
+      (with-redefs [at/kill (recording-kills killed)]
+        (try
+          (swap! h/*clients* assoc k {:client-id "ka-orphan"})
+          (h/add-timer! k keep-alive-secs)
+          (let [timer (get-in @h/*clients* [k :timer])]
+            (is (some? timer) "add-timer! files the timer under the key")
+            ;; Gone without remove-timer!, which is what used to leave the
+            ;; timer firing for the life of the broker.
+            (swap! h/*clients* dissoc k)
+            (is (tu/wait-until #(some (fn [j] (identical? j timer)) @killed)
+                               past-the-limit-ms)
+                "the timer must cancel itself once its client is gone")
+            (is (not (contains? @h/*clients* k))
+                "stopping the timer must not bring the client's entry back"))
+          (finally
+            (h/remove-timer! k)
+            (swap! h/*clients* dissoc k)))))))
+
+(deftest a-second-timer-replaces-the-first
+  (testing "add-timer! stops the timer already filed under the key"
+    (let [k      (Object.)
+          killed (atom [])]
+      (with-redefs [at/kill (recording-kills killed)]
+        (binding [h/*clients* (atom {k {:client-id "ka-twice"}})]
+          (h/add-timer! k keep-alive-secs)
+          (let [first-timer (get-in @h/*clients* [k :timer])]
+            (h/add-timer! k keep-alive-secs)
+            (is (some #(identical? first-timer %) @killed)
+                "the first timer must be stopped, not orphaned")
+            (is (not (identical? first-timer (get-in @h/*clients* [k :timer])))
+                "the entry holds the new timer")
+            (h/remove-timer! k)))))))
 
 (deftest update-timestamps-tolerates-a-vanishing-client
   (testing "marking liveness never throws when the client is already gone"
