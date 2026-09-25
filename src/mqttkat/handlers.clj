@@ -934,6 +934,53 @@
      (when (< (count (:pending after)) (count (:pending before)))
        [(:next-id after) (peek (:pending before))]))))
 
+(defn drop-unsubscribed-pending!
+  "Take off `client-id`'s pending queue what only `removed` subscriptions
+   wanted, now that the client has unsubscribed from them.
+
+   §3.10.4 in both 3.1.1 and 5.0: the server MUST stop adding messages and
+   MUST complete the QoS 1 and 2 deliveries it has started, and MAY go on
+   delivering what is buffered. So :inflight is left alone — those have
+   identifiers and the client is owed their acknowledgement flow — and only
+   :pending, which the client has never seen, is trimmed.
+
+   A queued message records the topic it was published to, not the
+   subscription that matched it, so it is kept whenever `remaining` still
+   matches that topic: overlapping filters are ordinary, and unsubscribing
+   from one must not cost a message another still asks for. A message a
+   removed shared subscription matches is kept as well: it was picked for
+   this member on the group's behalf, no other member will be sent it, and
+   dropping it would lose it for the whole group.
+
+   Returns the number dropped."
+  [client-id removed remaining]
+  (let [trie-of     (fn [subs]
+                      (reduce #(trie-insert %1 (:topic-filter %2) %2) (tr/make-trie) subs))
+        wanted      (fn [trie topic]
+                      (seq (sieve-dollar topic (trie-matching-vals trie topic))))
+        {shared true ordinary false} (group-by #(some? (:share-group %)) removed)
+        ordinary    (trie-of ordinary)
+        keep-anyway (trie-of (concat remaining shared))
+        drop?       (fn [{:keys [topic]}]
+                      (and topic
+                           (wanted ordinary topic)
+                           (not (wanted keep-anyway topic))))]
+    (if-let [a (when (seq ordinary) (existing-outbound client-id))]
+      (let [[before after]
+            (swap-vals! a (fn [state]
+                            (if (some drop? (:pending state))
+                              (update state :pending
+                                      #(into clojure.lang.PersistentQueue/EMPTY
+                                             (remove drop?) %))
+                              state)))
+            dropped (when-not (identical? before after)
+                      (filter drop? (:pending before)))]
+        ;; One from the cluster's queue would otherwise be sent again on the
+        ;; client's next resume, to a subscription it no longer has.
+        (doseq [msg dropped] (settled! client-id msg))
+        (count dropped))
+      0)))
+
 (declare send-buffer)
 
 (defn receive-maximum-of
@@ -2269,9 +2316,9 @@
   [{:keys [topics client-key] :as msg}]
   #_(log/debug "UNSUBSCRIBE:" (dissoc msg :client-key))
   ;(swap! subscribers remove-subsciber (:topics msg) (:client-key msg))
-  ;;TODO remove message from outbound messages.. but check if this is really the case.
   (when-not (not-a-client? client-key)
   (let [version (protocol-version-of client-key)
+        removed (doall (keep #(existing-subscription client-key %) topics))
         ;; One reason code per filter, in the order they were asked about
         ;; (§3.11.3). 0x00 if the subscription was there to remove, 0x11 if it
         ;; never existed — which in 3.1.1 was indistinguishable from success,
@@ -2310,6 +2357,16 @@
                     (>= version 5) (assoc :protocol-version 5
                                           :properties {}
                                           :response (vec codes)))))
+    ;; What was queued for the subscriptions just removed, and nothing still
+    ;; subscribed wants, is not sent after all (§3.10.4 allows either); what
+    ;; is in flight still completes. A shorter queue may also be the one a
+    ;; throttled publisher is waiting on.
+    (let [{:keys [client-id] :as client} (get @*clients* client-key)]
+      (when (and client-id
+                 (pos? (long (drop-unsubscribed-pending! client-id removed
+                                                         (:subscribed-topics client))))
+                 (<= (pending-count client-id) resume-threshold))
+        (some-> (connection-of client-key) .ackDrained)))
     (log/trace "Unsubscribed trie:" @*subscriber-trie*)
     (log/trace "Unsubscribed clients:" (get-in @*clients* [client-key])))))
 
