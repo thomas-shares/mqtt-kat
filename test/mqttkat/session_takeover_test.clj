@@ -14,7 +14,8 @@
             [mqttkat.client :as client]
             [mqttkat.handlers :as h]
             [mqttkat.test-util :as tu])
-  (:import [java.nio.channels SelectionKey]))
+  (:import [java.nio.channels SelectionKey]
+           [org.mqttkat MqttStat]))
 
 (use-fixtures :once tu/broker-fixture)
 
@@ -137,3 +138,37 @@
       (settle)
       (is (not (contains? @h/*live-clients* id))
           "and deregistered when it goes, so the index cannot grow for ever"))))
+
+(deftest a-late-teardown-leaves-the-replacement-its-state
+  (testing "the displaced connection going away does not empty the new one's window"
+    ;; *outbound* and *inflight* are keyed by client id, not by connection. When
+    ;; the old connection's teardown runs after the new one has connected and
+    ;; started sending, remove-client! used to delete both by that id and take
+    ;; the replacement's in-flight messages with them. Driven by hand, because
+    ;; over sockets the ordering is a race this test could not rely on losing.
+    (let [id  "late-teardown"
+          new {:id id}]
+      (binding [h/*clients*      (atom {:old-conn {:client-id id :clean-session? true}
+                                        :new-conn {:client-id id :clean-session? true}})
+                h/*live-clients* (atom {id :new-conn})
+                h/*outbound*     (atom {id (atom {:next-id 2 :inflight {1 new}})})
+                h/*inflight*     (atom {[id 1] {:msg new :topic "t"}})]
+        ;; remove-client! counts the disconnect; count a connect to match, so
+        ;; the broker the rest of the suite shares is not left one short.
+        (MqttStat/clientConnected)
+        (h/remove-client! :old-conn)
+        (is (not (contains? @h/*clients* :old-conn)) "the old connection is gone")
+        (is (= :new-conn (h/live-connection id)) "the new one is still registered")
+        (is (contains? @h/*outbound* id) "and keeps its outbound window")
+        (is (contains? @h/*inflight* [id 1]) "and what it has in flight"))))
+
+  (testing "with no replacement, a clean session's records still go"
+    (let [id "no-replacement"]
+      (binding [h/*clients*      (atom {:only-conn {:client-id id :clean-session? true}})
+                h/*live-clients* (atom {id :only-conn})
+                h/*outbound*     (atom {id (atom {:next-id 1 :inflight {}})})
+                h/*inflight*     (atom {[id 1] {:msg {} :topic "t"}})]
+        (MqttStat/clientConnected)
+        (h/remove-client! :only-conn)
+        (is (not (contains? @h/*outbound* id)))
+        (is (not (contains? @h/*inflight* [id 1])))))))
