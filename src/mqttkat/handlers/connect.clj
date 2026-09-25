@@ -3,6 +3,7 @@
             [mqttkat.handlers :as handlers]
             [mqttkat.handlers :refer [*clients* send-buffer add-client!
                                       add-timer! flush-pending!]]
+            [mqttkat.bridge :as bridge]
             [mqttkat.handlers.disconnect :refer :all]
             [mqttkat.retained :as retained])
   (:import [org.mqttkat MqttReasonCode]
@@ -170,6 +171,10 @@
        ;; §3.2.2.3.7: sent only when the server chose the name, which is the
        ;; only case where the client does not already know it.
        :properties       (cond-> broker-properties
+                           ;; Another broker's bridge: the window a link
+                           ;; between brokers needs, not a client's.
+                           (bridge/bridge? client-id)
+                           (assoc :receive-maximum bridge/receive-maximum)
                            assigned-client-id?
                            (assoc :assigned-client-identifier client-id)
                            (not= (long (or keep-alive 0))

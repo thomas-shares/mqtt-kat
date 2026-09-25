@@ -386,9 +386,9 @@
             (is (every? #(present-in-trie? peer "lost/t" %) ["victim-1" "victim-2" "survivor"]))
 
             (record! conn {:event :broker-up :broker-id "peer-x" :incarnation "run-1"
-                           :host "127.0.0.1" :port 1 :at 4})
+                           :host "127.0.0.1" :port 1 :at (System/currentTimeMillis)})
             (record! conn {:event :broker-up :broker-id "peer-x" :incarnation "run-2"
-                           :host "127.0.0.1" :port 1 :at 5})
+                           :host "127.0.0.1" :port 1 :at (System/currentTimeMillis)})
             ;; Not on the announcement itself, which only notes the run that
             ;; is gone: on the sweep, a slice at a time.
             (Thread/sleep 200)
@@ -412,13 +412,19 @@
               (is (present-in-trie? peer "lost/t" "survivor")))
             (testing "and the announcement again, and more sweeps, change nothing more"
               (record! conn {:event :broker-up :broker-id "peer-x" :incarnation "run-2"
-                             :host "127.0.0.1" :port 1 :at 6})
+                             :host "127.0.0.1" :port 1 :at (System/currentTimeMillis)})
               (sweep! (System/currentTimeMillis))
               (sweep! (System/currentTimeMillis))
               (Thread/sleep 300)
               (is (true? (cluster/connected? conn "survivor")))
               (is (false? (cluster/connected? conn "victim-1"))))
             (record! conn {:event :broker-down :broker-id "peer-x" :at 7})
+            (testing "and when it withdraws, its last run is let go too"
+              (sweep! (System/currentTimeMillis))
+              (is (tu/wait-until #(false? (cluster/connected? conn "survivor"))))
+              ;; One more for the sweep to find the run empty and forget it,
+              ;; so the crowd below has the sweeps to itself.
+              (sweep! (System/currentTimeMillis)))
 
             (testing "a run that held many clients is let go a slice per sweep, never in one event"
               (let [slice module/lost-per-sweep
@@ -426,8 +432,8 @@
                     ids   (mapv #(str "crowd-" %) (range n))]
                 (doseq [id ids]
                   (record! conn (on-broker (cluster/->connect (connect-map id :clean? false)) "peer-y" "y1")))
-                (record! conn {:event :broker-up :broker-id "peer-y" :incarnation "y1" :host "h" :port 1 :at 1})
-                (record! conn {:event :broker-up :broker-id "peer-y" :incarnation "y2" :host "h" :port 1 :at 2})
+                (record! conn {:event :broker-up :broker-id "peer-y" :incarnation "y1" :host "h" :port 1 :at (System/currentTimeMillis)})
+                (record! conn {:event :broker-up :broker-id "peer-y" :incarnation "y2" :host "h" :port 1 :at (System/currentTimeMillis)})
                 (let [connected #(count (filter (fn [id] (cluster/connected? conn id)) ids))]
                   (is (= n (connected)))
                   (sweep! (System/currentTimeMillis))
@@ -441,6 +447,28 @@
                   (Thread/sleep 300)
                   (is (= 0 (connected))))
                 (record! conn {:event :broker-down :broker-id "peer-y" :at 3})))))
+
+        (testing "a broker that never comes back: forgotten, and what it held let go"
+          ;; Killed, so it never withdrew, and no next run replaced it. It
+          ;; used to be dropped from the registry and nothing more: a broker
+          ;; killed in a three-broker load run left 550 clients recorded as
+          ;; connected to it for good, their sessions never parked.
+          (record! conn (on-broker (cluster/->connect (connect-map "killed-1" :clean? false)) "peer-k" "k1"))
+          (record! conn {:event :broker-up :broker-id "peer-k" :incarnation "k1" :host "h" :port 1 :at 1})
+          (is (tu/wait-until #(true? (cluster/connected? conn "killed-1"))))
+          (sweep! (System/currentTimeMillis))
+          (sweep! (System/currentTimeMillis))
+          (is (tu/wait-until #(false? (cluster/connected? conn "killed-1")))
+              "silent for longer than broker-forgotten-after-millis, so its run is over"))
+
+        (testing "a broker that withdraws: what its shutdown did not get round to is let go"
+          (record! conn (on-broker (cluster/->connect (connect-map "downed-1" :clean? true)) "peer-d" "d1"))
+          (record! conn {:event :broker-up :broker-id "peer-d" :incarnation "d1" :host "h" :port 1
+                         :at (System/currentTimeMillis)})
+          (record! conn {:event :broker-down :broker-id "peer-d" :at (System/currentTimeMillis)})
+          (is (tu/wait-until #(true? (cluster/connected? conn "downed-1"))))
+          (sweep! (System/currentTimeMillis))
+          (is (tu/wait-until #(false? (cluster/connected? conn "downed-1")))))
 
         (testing "a session that is away: its subscriptions say so, and publishes are queued"
           (let [c (cluster/->connect (connect-map "away-1" :clean? false))]
@@ -1118,7 +1146,17 @@
                                          :stats {:clients 500} :at now})
                           (is (tu/wait-until #(= 500 (get-in @(:brokers conn) ["peer-r" :stats :clients]))))
                           (is (nil? (cluster/redirect-target "probe")))
-                          (is (= 0 (code (connack 5)))))
+                          (is (= 0 (code (connack 5))))
+
+                          (testing "and the clients it keeps count against it before it next reports"
+                            ;; A load run pointed at one broker connected 1,650 clients
+                            ;; between two of its reports and kept every one: level with
+                            ;; the others as last reported, it won each tie on its id.
+                            (record! conn {:event :broker-stats :broker-id "peer-r" :incarnation "r1"
+                                           :stats {:clients 50} :at (inc now)})
+                            (is (tu/wait-until #(= 50 (get-in @(:brokers conn) ["peer-r" :stats :clients]))))
+                            (let [sent (count (keep (fn [i] (cluster/redirect-target (str "level-" i))) (range 10)))]
+                              (is (<= 4 sent 6) (str sent " of 10 sent on; level brokers should share them")))))
 
                         (testing "the load generator follows the DISCONNECT form: pointed at this broker, sent round, all delivered"
                           (policy :round-robin)

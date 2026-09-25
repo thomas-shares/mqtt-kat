@@ -290,7 +290,14 @@
         (local-select> [(keypath *registry) ALL] $$brokers :> [*b *entry])
         (max (get *entry :at 0) (get *entry :stats-at 0) :> *heard)
         (<<if (< *heard (- *now broker-forgotten-after-millis))
-          (local-transform> [(keypath *registry *b) NONE>] $$brokers))
+          (local-transform> [(keypath *registry *b) NONE>] $$brokers)
+          ;; And its run is over, as when a new run replaces it: a broker
+          ;; that was killed never comes back to say so, and its clients
+          ;; would stay connected to it in the record for ever — their
+          ;; sessions never parked, so never expired either.
+          (local-transform> [(keypath *registry) NONE-ELEM
+                             (termval (run-key *b (get *entry :incarnation)))]
+                            $$dead-runs))
         ;; And the runs that were replaced: a slice of each run's clients is
         ;; told :lost, on the client's own partition, which ends the
         ;; connection there unless the record already shows the client back
@@ -378,9 +385,17 @@
                             $$brokers))
 
         (case> :broker-down)
+        (get *record :broker-id :> *b)
         (identity registry-key :> *registry)
         (|hash *registry)
-        (local-transform> [(keypath *registry (get *record :broker-id)) NONE>] $$brokers)
+        (local-select> [(keypath *registry *b)] $$brokers :> *entry)
+        (local-transform> [(keypath *registry *b) NONE>] $$brokers)
+        ;; Whoever it still held is let go by the sweep, as for a broker
+        ;; that was forgotten: its shutdown may not have got round to them.
+        (<<if *entry
+          (local-transform> [(keypath *registry) NONE-ELEM
+                             (termval (run-key *b (get *entry :incarnation)))]
+                            $$dead-runs))
 
         ;; ── the settings ───────────────────────────────────────────────
         (case> :setting)

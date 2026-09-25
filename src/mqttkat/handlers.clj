@@ -1689,6 +1689,14 @@
   [client-key]
   (get-in @*clients* [client-key :inbound-inflight] 0))
 
+(defn inbound-window
+  "The Receive Maximum this broker gave `client-key` (§3.2.2.3.3): its own
+   window for a client, a far wider one for another broker's bridge."
+  [client-key]
+  (if (bridge/bridge? (:client-id (get @*clients* client-key)))
+    bridge/receive-maximum
+    inflight-window))
+
 (defn over-receive-maximum?
   "Whether this client has broken the quota the broker advertised (§4.9).
 
@@ -1700,7 +1708,7 @@
    QoS 2 is the one a client can fill, by publishing and never releasing."
   [client-key]
   (and (>= (protocol-version-of client-key) 5)
-       (>= (inbound-inflight client-key) inflight-window)))
+       (>= (inbound-inflight client-key) (inbound-window client-key))))
 
 (defn qos-2
   ;; `keys`, not `_keys`: the subscriber list is used now, to tell the
@@ -1714,10 +1722,10 @@
     ;; too many and then blocks for ever waiting for the DISCONNECT that says
     ;; so, so the whole suite hangs here.
     (do
-      (log/warn "client" client-key "exceeded the receive maximum of" inflight-window)
+      (log/warn "client" client-key "exceeded the receive maximum of" (inbound-window client-key))
       (disconnect-with-reason! client-key
                                MqttReasonCode/RECEIVE_MAXIMUM_EXCEEDED
-                               (str "more than " inflight-window " QoS 2 messages in flight")))
+                               (str "more than " (inbound-window client-key) " QoS 2 messages in flight")))
     (qos-2-accept keys topic recv-msg)))
 
 (defn subscribers-for
@@ -1758,12 +1766,18 @@
                        (constantly true))})))
 
 (defn- forward-to-brokers!
-  "Hand a publish to the brokers its plan names. No-op on a nil plan."
-  [plan topic {:keys [qos payload properties]}]
+  "Hand a publish to the brokers its plan names. No-op on a nil plan.
+
+   With the connection it came in on, which the bridge stops reading if a
+   link to another broker falls behind — none for a will, whose publisher
+   is gone."
+  [plan topic {:keys [qos payload properties client-key]}]
   (when plan
     (bridge/forward! plan topic {:qos        qos
                                  :payload    payload
-                                 :properties (forwardable-properties properties)})))
+                                 :properties (forwardable-properties properties)
+                                 :publisher  (when (instance? SelectionKey client-key)
+                                               (connection-of client-key))})))
 
 (defn- publish-resolved [{:keys [topic qos retain? payload properties] :as msg}]
   (log/debug "PUBLISH:" (dissoc msg :client-key))

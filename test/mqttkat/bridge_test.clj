@@ -8,9 +8,10 @@
   (:require [clojure.test :refer [deftest is testing]]
             [mqttkat.bridge :as bridge]
             [mqttkat.test-util :as tu])
-  (:import [org.mqttkat MqttHandler]
+  (:import [java.nio.channels Selector SocketChannel]
+           [org.mqttkat MqttHandler]
            [org.mqttkat.packages MqttConnAck MqttPubAck MqttPubComp MqttPubRec]
-           [org.mqttkat.server MqttServer]))
+           [org.mqttkat.server Connection MqttServer]))
 
 (defn- peer
   "{:server :port :received (atom [msg]) :key (atom client-key)}, answering
@@ -105,3 +106,74 @@
         (is (empty? (publishes p)) "nothing sent into a connection that was never accepted")
         (is (not (contains? (bridge/peers) "peer-5")))
         (finally (bridge/drop! "peer-5") (.stop ^MqttServer (:server p) 100))))))
+
+(defn- bare-connection
+  "A Connection standing in for a publisher: a real SelectionKey, never
+   started, so only its pause bookkeeping is exercised."
+  ^Connection [^Selector selector]
+  (let [ch (doto (SocketChannel/open) (.configureBlocking false))]
+    (Connection. (.register ch selector 0) ch nil)))
+
+(defn- puback! [p id]
+  (answer! p (MqttPubAck/encode {:packet-type :PUBACK :protocol-version 5
+                                 :packet-identifier id :reason-code 0})))
+
+(deftest a-full-window-does-not-hold-up-the-caller
+  (testing "send-to! queues and returns; the link's own thread does the waiting"
+    ;; It used to wait for the slot itself — on one of the broker's four
+    ;; handler threads, which every client shares. Two brokers doing that to
+    ;; each other stalled both.
+    (let [p (peer connack-2)]
+      (try
+        (let [started (System/nanoTime)]
+          (dotimes [i 10]
+            (bridge/send-to! "me" "peer-6" {:host "127.0.0.1" :port (:port p)} [] (str "t/" i)
+                             {:qos 1 :payload (.getBytes "x") :properties {}}))
+          (is (< (/ (- (System/nanoTime) started) 1e6) 1000.0)
+              "ten sends into a window of two, none of them waiting"))
+        (is (tu/wait-until #(= 2 (count (publishes p)))))
+        (doseq [{:keys [packet-identifier]} (publishes p)] (puback! p packet-identifier))
+        (is (tu/wait-until #(= 4 (count (publishes p)))) "and the rest follow as slots come back")
+        (finally (bridge/drop! "peer-6") (.stop ^MqttServer (:server p) 100))))))
+
+(deftest a-publisher-is-held-while-the-link-is-behind
+  (testing "past queue-pause-at its publisher stops being read, and is read again once the queue drains"
+    (with-open [selector (Selector/open)]
+      (let [p         (peer connack-2)
+            publisher (bare-connection selector)]
+        (try
+          (with-redefs [bridge/queue-pause-at  4
+                        bridge/queue-resume-at 1]
+            (dotimes [i 10]
+              (bridge/send-to! "me" "peer-7" {:host "127.0.0.1" :port (:port p)} [] (str "t/" i)
+                               {:qos 1 :payload (.getBytes "x") :properties {} :publisher publisher}))
+            (is (.isReadingPaused publisher) "held: the peer has acknowledged nothing")
+            ;; Acknowledge whatever has been sent, until everything has.
+            (let [acked (atom #{})]
+              (is (tu/wait-until
+                   (fn []
+                     (doseq [{:keys [packet-identifier]} (publishes p)
+                             :when (not (@acked packet-identifier))]
+                       (swap! acked conj packet-identifier)
+                       (puback! p packet-identifier))
+                     (= 10 (count (publishes p))))
+                   5000)))
+            (is (tu/wait-until #(not (.isReadingPaused publisher)))
+                "let go once the queue is down to queue-resume-at"))
+          (finally (bridge/drop! "peer-7") (.stop ^MqttServer (:server p) 100))))))
+
+  (testing "a link that is dropped lets go of what it held"
+    (with-open [selector (Selector/open)]
+      (let [p         (peer connack-2)
+            publisher (bare-connection selector)]
+        (try
+          (with-redefs [bridge/queue-pause-at  2
+                        bridge/queue-resume-at 0]
+            (dotimes [i 6]
+              (bridge/send-to! "me" "peer-8" {:host "127.0.0.1" :port (:port p)} [] (str "t/" i)
+                               {:qos 1 :payload (.getBytes "x") :properties {} :publisher publisher}))
+            (is (.isReadingPaused publisher))
+            (bridge/drop! "peer-8")
+            (is (tu/wait-until #(not (.isReadingPaused publisher)))
+                "a publisher held by a link that is gone would never be read again"))
+          (finally (bridge/drop! "peer-8") (.stop ^MqttServer (:server p) 100)))))))

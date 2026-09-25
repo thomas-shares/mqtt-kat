@@ -721,8 +721,11 @@
                    :load        (first (sort-by (fn [[id entry]] [(estimated-clients id entry) id])
                                                 cs))))]
     (when-let [[id {:keys [host port stats-at]}] chosen]
+      ;; Counted for this broker too when it keeps the client: otherwise it
+      ;; looks as empty as it last reported until it reports again, and
+      ;; every client arriving in between stays here.
+      (note-sent! id stats-at)
       (when (not= id broker-id)
-        (note-sent! id stats-at)
         (awaited (record! @*connection* (->redirected client-id id)))
         {:server-reference (str host ":" port)
          :via              (redirect-via)

@@ -15,6 +15,7 @@
    left waiting for ever, which is worse and is what makes this the first thing
    to fix."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
+            [mqttkat.bridge :as bridge]
             [mqttkat.handlers :as handlers]
             [mqttkat.test-util :as tu])
   (:import [org.mqttkat MqttReasonCode]))
@@ -104,4 +105,24 @@
       (try
         (is (= handlers/inflight-window
                (:receive-maximum (:properties (:connack c)))))
+        (finally (tu/close! c))))))
+
+(deftest another-brokers-bridge-gets-a-wider-quota
+  (testing "advertised to a bridge, and kept to"
+    ;; A bridge carries every publish from one broker to another. Held to a
+    ;; client's 128 it could have 128 in flight per round trip, and QoS 1
+    ;; across three brokers ran at a 6 s median where QoS 0 ran at 29 ms.
+    (let [c (tu/connect-v5! "bridge-quota" :id (str bridge/client-id-prefix "quota-peer") :buffer 512)
+          n (+ handlers/inflight-window 72)]
+      (try
+        (is (= bridge/receive-maximum (:receive-maximum (:properties (:connack c)))))
+        (dotimes [i n]
+          (publish-qos2! c (inc i)))
+        (let [msgs (loop [seen []]
+                     (if-let [m (tu/take! (:ch c) 700)]
+                       (recur (conj seen m))
+                       seen))]
+          (is (not-any? #(= :DISCONNECT (:packet-type %)) msgs)
+              "more than a client's quota in flight, and not refused")
+          (is (= n (count (filter #(= :PUBREC (:packet-type %)) msgs)))))
         (finally (tu/close! c))))))

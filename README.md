@@ -344,6 +344,13 @@ them has let go (`peerHolds` is a count, not a flag). The `pending-limit` refusa
 exists only as a backstop, and in a healthy run the `dropped` counter stays at 0
 for QoS 1 traffic.
 
+The bridges between brokers work the same way. Each peer has a queue and a thread
+of its own, which waits for the peer's acknowledgements and writes to its socket;
+the broker's handler threads only enqueue. A publisher whose messages pile up in a
+link's queue (`bridge/queue-pause-at`) stops being read until the queue has
+drained. Brokers grant each other's bridges a Receive Maximum of
+`bridge/receive-maximum` (16,384) rather than a client's 128.
+
 ## Thank you
 
 First of all an extra big thank you to [Feng Shen](http://shenfeng.me/) for making http-kit. I have borrowed heavily from his code. And also a big thank you to the [Eclipse Paho Project](https://www.eclipse.org/paho/). I have used their [code](https://github.com/eclipse/paho.mqtt.java) as inspiration as well and yes I have copied the MQTT packet length code from them.
