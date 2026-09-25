@@ -40,3 +40,56 @@ jobs:
 
       # The :default selector leaves out the ^:performance load simulations.
       - run: lein test
+
+  # The Paho MQTT 5 interoperability suite, run against the broker as a
+  # separate process: the unit tests above only prove the broker agrees with
+  # a client written alongside it. scripts/paho_v5.py decides the outcome and
+  # lists the failures it tolerates for now.
+  paho-v5:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: DeLaGuardo/setup-clojure@13.2
+        with:
+          lein: 2.11.2
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.lein
+          key: m2-${{ runner.os }}-${{ hashFiles('project.clj') }}
+          restore-keys: m2-${{ runner.os }}-
+
+      # Pinned, so a change upstream cannot turn this red on its own.
+      - name: Fetch the Paho test suite
+        run: |
+          git clone --quiet https://github.com/eclipse/paho.mqtt.testing.git "$RUNNER_TEMP/paho"
+          git -C "$RUNNER_TEMP/paho" checkout --quiet 9d7bb80
+
+      # Without -Dmqttkat.rama, so no Rama cluster is needed.
+      - name: Start the broker
+        run: |
+          nohup lein run 1883 8081 > "$RUNNER_TEMP/broker.log" 2>&1 &
+          for i in $(seq 1 180); do
+            if (exec 3<>/dev/tcp/127.0.0.1/1883) 2>/dev/null; then exit 0; fi
+            sleep 1
+          done
+          echo "broker did not open 1883"; cat "$RUNNER_TEMP/broker.log"; exit 1
+
+      - name: Run the Paho MQTT 5 suite
+        timeout-minutes: 15
+        run: python3 scripts/paho_v5.py "$RUNNER_TEMP/paho/interoperability"
+
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: broker-log
+          path: ${{ runner.temp }}/broker.log
