@@ -90,8 +90,11 @@
   (testing "a receive maximum of one: one in flight, the rest queued"
     (let [ta     (tu/topic "unsub-drop-a")
           tb     (tu/topic "unsub-drop-b")
+          ;; :id, not the prefix alone: connect-v5! would otherwise mint its
+          ;; own id from the prefix, and pending-count would be asking about a
+          ;; client that does not exist.
           sub-id (tu/client-id "unsub-drop-sub")
-          sub    (tu/connect-v5! sub-id :properties {:receive-maximum 1})
+          sub    (tu/connect-v5! sub-id :id sub-id :properties {:receive-maximum 1})
           pub    (tu/connect-v5! (tu/client-id "unsub-drop-pub"))]
       (try
         (tu/send-v5! sub {:packet-type :SUBSCRIBE :packet-identifier 1
