@@ -22,7 +22,7 @@
   {:packet-type :PUBLISH :qos qos :topic topic :retain? false
    :duplicate false :payload payload :packet-identifier id})
 
-(deftest qos-2-publish-completes-its-handshake
+(deftest ^:portable qos-2-publish-completes-its-handshake
   (testing "PUBLISH -> PUBREC -> PUBREL -> PUBCOMP, and only then delivery"
     (let [topic   (tu/topic "qos2")
           payload "a qos 2 message"
@@ -104,7 +104,7 @@
       (tu/close! sub)
       (tu/close! pub))))
 
-(deftest qos-2-survives-a-reconnect-before-pubrel
+(deftest ^:portable qos-2-survives-a-reconnect-before-pubrel
   (testing "a persistent session finishes a QoS 2 flow left half-done"
     ;; MQTT 3.1.1 §4.4: a client that disconnects between PUBREC and PUBREL
     ;; must resend the PUBREL when it comes back, and the broker has to
@@ -145,7 +145,7 @@
         (tu/close! b))
       (tu/close! sub))))
 
-(deftest acknowledgements-do-not-depend-on-there-being-subscribers
+(deftest ^:portable acknowledgements-do-not-depend-on-there-being-subscribers
   (testing "QoS 1 and QoS 2 are answered on a topic nobody is subscribed to"
     ;; PUBACK and PUBREC are the receiver's answer for the packet, not a report
     ;; on delivery (§4.3.2, §4.3.3), so neither may depend on anyone being

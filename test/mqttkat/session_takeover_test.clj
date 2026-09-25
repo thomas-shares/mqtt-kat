@@ -61,7 +61,7 @@
         (is (= "after takeover" (tu/payload-str (tu/expect! (:ch b) :PUBLISH 3000))))
         (finally (tu/close! b pub))))))
 
-(deftest the-displaced-client-is-told-why
+(deftest ^:portable the-displaced-client-is-told-why
   (testing "a version 5 client gets DISCONNECT 0x8E before the socket closes"
     ;; §4.13.1. Otherwise the client sees an unexplained close and will
     ;; reconnect, taking the connection back off whoever displaced it.
@@ -95,7 +95,7 @@
             (finally (tu/close! b))))
         (finally (tu/close! a))))))
 
-(deftest a-persistent-session-survives-being-taken-over
+(deftest ^:portable a-persistent-session-survives-being-taken-over
   (testing "the replacement resumes the session rather than losing it"
     ;; §3.1.4 closes the *connection*; the session belongs to the client id and
     ;; is what the new connection is asking to continue. Discarding it here
@@ -114,7 +114,7 @@
               "the session the first connection built is still there")
           (finally (tu/close! a b)))))))
 
-(deftest other-client-ids-are-untouched
+(deftest ^:portable other-client-ids-are-untouched
   (testing "taking over one id does not disturb another"
     (let [a (tu/connect-v5! (tu/client-id "other-a"))
           b (tu/connect-v5! (tu/client-id "other-b"))]

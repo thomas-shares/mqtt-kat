@@ -214,7 +214,7 @@
 
 ;; ── the contract, end to end ──────────────────────────────────────────────────
 
-(deftest idle-client-is-disconnected
+(deftest ^:portable idle-client-is-disconnected
   (testing "a silent client is dropped after 1.5 x keep alive"
     (let [{:keys [client] :as c} (tu/connect! "ka-idle" :keep-alive keep-alive-secs)]
       (is (true? (client/connected? client)) "connected once the CONNACK is in")
@@ -223,7 +223,7 @@
                keep-alive-secs "s of silence"))
       (tu/close! c))))
 
-(deftest active-client-is-not-disconnected
+(deftest ^:portable active-client-is-not-disconnected
   (testing "a client that keeps pinging is left alone"
     (let [{:keys [client ch] :as c} (tu/connect! "ka-active" :keep-alive keep-alive-secs)]
       ;; Ping well inside the 1.5s budget, so a slow machine cannot turn this

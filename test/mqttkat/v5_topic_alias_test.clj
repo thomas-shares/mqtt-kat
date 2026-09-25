@@ -43,7 +43,7 @@
 
 ;; ── what a client may send us ─────────────────────────────────────────
 
-(deftest alias-zero-is-refused
+(deftest ^:portable alias-zero-is-refused
   (testing "§3.3.2.3.4: a topic alias of 0 is a protocol error"
     ;; Zero is not a small alias, it is not an alias — and storing it as one
     ;; would give the client a mapping it can never legally use again.
@@ -53,7 +53,7 @@
         (disconnected-with! c 0x94)
         (finally (tu/close! c))))))
 
-(deftest an-alias-above-what-the-broker-allows-is-refused
+(deftest ^:portable an-alias-above-what-the-broker-allows-is-refused
   (testing "the CONNACK's Topic Alias Maximum is a limit, not a suggestion"
     (let [c   (tu/connect-v5! "alias-high")
           max (:topic-alias-maximum (:properties (:connack c)))]
@@ -63,7 +63,7 @@
         (disconnected-with! c 0x94)
         (finally (tu/close! c))))))
 
-(deftest aliases-do-not-survive-the-connection
+(deftest ^:portable aliases-do-not-survive-the-connection
   (testing "a resumed session keeps its subscriptions and loses its aliases"
     ;; §3.3.2.3.4: the mapping belongs to the network connection, not to the
     ;; session. A resumed session that inherited its predecessor's aliases
@@ -88,7 +88,7 @@
 
 ;; ── what the broker may send a client ─────────────────────────────────
 
-(deftest the-broker-assigns-an-alias-when-the-client-allows-one
+(deftest ^:portable the-broker-assigns-an-alias-when-the-client-allows-one
   (testing "first delivery carries the topic and the alias, later ones just the alias"
     ;; §3.3.2.3.4. The saving only appears from the second message on, which is
     ;; why the first must carry both — a bare alias the client has never seen
@@ -115,7 +115,7 @@
               "and every payload still arrives"))
         (finally (tu/close! sub pub))))))
 
-(deftest a-client-that-allows-no-aliases-is-sent-none
+(deftest ^:portable a-client-that-allows-no-aliases-is-sent-none
   (testing "Topic Alias Maximum absent means zero (§3.1.2.11.5)"
     ;; The default, and what every subscriber gets unless it asks. It is also
     ;; what keeps the fan-out able to encode one buffer for many subscribers.
@@ -134,7 +134,7 @@
           (is (nil? (:topic-alias (:properties b)))))
         (finally (tu/close! sub pub))))))
 
-(deftest more-topics-than-aliases-still-all-arrive
+(deftest ^:portable more-topics-than-aliases-still-all-arrive
   (testing "once the client's allowance is used up, topics are sent in full"
     ;; A broker that ran out of aliases and sent one anyway would be sending a
     ;; number the client cannot resolve.
@@ -153,7 +153,7 @@
           (is (nil? (:topic-alias (:properties b))) "with no alias, the allowance being spent"))
         (finally (tu/close! sub pub))))))
 
-(deftest a-version-4-subscriber-is-unaffected
+(deftest ^:portable a-version-4-subscriber-is-unaffected
   (testing "3.1.1 has no aliases and must never be sent one"
     (let [topic (tu/topic "v4-alias")
           sub   (tu/connect! "v4-alias-sub" :ordered? true)

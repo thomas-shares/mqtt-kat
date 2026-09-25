@@ -6,7 +6,9 @@
      - The suite starts its own broker, so `lein test` works on a clean machine
        instead of silently depending on one someone left running.
      - Every read from a client has a timeout, so a packet that never arrives
-       fails the test it belongs to instead of wedging the whole run."
+       fails the test it belongs to instead of wedging the whole run.
+
+   The ^:portable tests can also run against another broker; see `external?`."
   (:require [clojure.core.async :as async :refer [alts!! chan go timeout >!]]
             [clojure.test :refer [is]]
             [mqttkat.client :as client]
@@ -38,22 +40,45 @@
       (finally
         (Configurator/setLevel logger previous)))))
 
-(def host "localhost")
+(def external?
+  "Whether the suite is pointed at a broker it did not start: set
+   MQTT_BROKER_HOST (and MQTT_BROKER_PORT, default 1883) to run the tests
+   tagged ^:portable against another broker, Mosquitto say:
+
+     MQTT_BROKER_HOST=localhost lein test :portable
+
+   Those tests talk to the broker over its socket and nothing else, so a
+   failure there is either a wrong test or a place where mqtt-kat and the
+   other broker disagree. Everything else looks inside this broker and only
+   means something against the one the suite starts itself."
+  (some? (System/getenv "MQTT_BROKER_HOST")))
+
+(def host (or (System/getenv "MQTT_BROKER_HOST") "localhost"))
 
 (def port
-  "Deliberately not 1883. A broker started by hand for REPL work must not
-   silently absorb the suite, and the suite must not fail to bind because one
-   is already running."
-  11883)
+  "Deliberately not 1883 for the suite's own broker. A broker started by hand
+   for REPL work must not silently absorb the suite, and the suite must not
+   fail to bind because one is already running."
+  (if external?
+    (Integer/parseInt ^String (or (System/getenv "MQTT_BROKER_PORT") "1883"))
+    11883))
 
 (defonce ^:private broker (delay (server/start! "0.0.0.0" port)))
 
 (defn ensure-broker!
   "Start the test broker, once per JVM. It is never stopped: the JVM exit tears
    it down, and stopping between namespaces only creates ways for a later
-   namespace to meet a half-torn-down broker."
+   namespace to meet a half-torn-down broker. Against an external broker there
+   is nothing to start."
   []
-  @broker)
+  (when-not external? @broker))
+
+(def ^:private external-settle-ms
+  "How long the helpers that watch this broker's own state wait instead, when
+   the broker is somewhere else and its state cannot be seen. A pause is the
+   weaker guarantee, but the assertion that follows each of them still goes
+   over the socket and still has to hold."
+  300)
 
 (defn broker-fixture [f]
   (ensure-broker!)
@@ -155,6 +180,7 @@
    (let [deadline (+ (System/currentTimeMillis) ms)]
      (loop []
        (cond
+         external?                                (do (Thread/sleep external-settle-ms) true)
          (contains? @handlers/*clients* id)       true
          (> (System/currentTimeMillis) deadline)  (do (is false (str "session " id " was never parked")) false)
          :else                                    (do (Thread/sleep 10) (recur)))))))
@@ -192,7 +218,8 @@
    at the mercy of that; one about ordering should be written on purpose."
   ([topic expected] (wait-for-retained! topic expected 2000))
   ([topic expected ms]
-   (or (wait-until #(= expected (retained-payload topic)) ms)
+   (or (when external? (Thread/sleep external-settle-ms) true)
+       (wait-until #(= expected (retained-payload topic)) ms)
        (do (is false (str "nothing retained on " topic " after " ms "ms")) false))))
 
 (defn payload-str
@@ -280,5 +307,7 @@
   [& clients]
   (doseq [c clients :when c]
     (try (.close ^MqttClient (:client c c)) (catch Exception _ nil)))
-  (doseq [c clients :when (and (map? c) (:client-id c))]
-    (wait-until #(not (still-connected? (:client-id c))) 2000)))
+  (if external?
+    (Thread/sleep 50)
+    (doseq [c clients :when (and (map? c) (:client-id c))]
+      (wait-until #(not (still-connected? (:client-id c))) 2000))))

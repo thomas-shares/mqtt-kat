@@ -34,7 +34,7 @@
                    expiry (assoc :properties {:session-expiry-interval expiry})))
   (Thread/sleep 300))
 
-(deftest an-expiry-of-zero-ends-the-session-with-the-connection
+(deftest ^:portable an-expiry-of-zero-ends-the-session-with-the-connection
   (testing "the default, and what a 3.1.1 client effectively has"
     (let [id    (tu/client-id "expiry-zero")
           topic (tu/topic "expiry-zero")
@@ -48,7 +48,7 @@
               "nothing survives an expiry of zero, even asking to resume")
           (finally (tu/close! a b)))))))
 
-(deftest a-session-survives-for-as-long-as-it-asked-to
+(deftest ^:portable a-session-survives-for-as-long-as-it-asked-to
   (testing "clean start with an expiry keeps the session afterwards"
     ;; The combination 3.1.1 cannot express: start fresh, then persist. The
     ;; broker used to key this off clean-session? alone, so a clean start meant
@@ -78,7 +78,7 @@
               "one second was one second")
           (finally (tu/close! a b)))))))
 
-(deftest a-disconnect-may-change-the-expiry-on-the-way-out
+(deftest ^:portable a-disconnect-may-change-the-expiry-on-the-way-out
   (testing "the DISCONNECT's interval overrides the CONNECT's"
     ;; §3.14.2.2.2. A client that decides on the way out that it will be back
     ;; can say so, without having planned for it when it connected.
@@ -106,7 +106,7 @@
               "the client said it was not coming back")
           (finally (tu/close! a b)))))))
 
-(deftest reconnecting-cancels-a-pending-expiry
+(deftest ^:portable reconnecting-cancels-a-pending-expiry
   (testing "a session resumed before it expires is not discarded behind you"
     ;; The expiry is scheduled when the connection ends; coming back has to
     ;; cancel it, or the session is torn out from under the live connection
@@ -127,7 +127,7 @@
               "the connection is still alive and its session intact")
           (finally (tu/close! a b)))))))
 
-(deftest a-version-4-session-is-unchanged
+(deftest ^:portable a-version-4-session-is-unchanged
   (testing "3.1.1 still decides on clean-session? alone"
     (let [id    (tu/client-id "v4-session")
           topic (tu/topic "v4-session")

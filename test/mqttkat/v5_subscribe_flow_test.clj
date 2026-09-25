@@ -28,7 +28,7 @@
 
 (defn- payload-of [m] (String. ^bytes (:payload m) "UTF-8"))
 
-(deftest a-version-5-subscriber-gets-a-version-5-suback
+(deftest ^:portable a-version-5-subscriber-gets-a-version-5-suback
   (testing "reason codes and a property block"
     (let [c (connect! 5 (tu/client-id "sub-ack"))]
       (try
@@ -37,7 +37,7 @@
           (is (map? (:properties ack)) "a v5 SUBACK always carries a block"))
         (finally (tu/close! c))))))
 
-(deftest no-local-keeps-a-client-from-hearing-itself
+(deftest ^:portable no-local-keeps-a-client-from-hearing-itself
   (testing "a subscriber that publishes to its own topic is not sent it back"
     ;; §3.8.3.1. Without this a client bridging two topics feeds itself.
     (let [topic (tu/topic "nl")
@@ -63,7 +63,7 @@
         (is (= "echo" (payload-of (tu/expect! (:ch me) :PUBLISH 3000))))
         (finally (tu/close! me))))))
 
-(deftest retain-as-published-keeps-the-publishers-flag
+(deftest ^:portable retain-as-published-keeps-the-publishers-flag
   (testing "with the flag, a retained publish arrives still marked retained"
     ;; §3.8.3.1. A bridge needs this: forwarding a retained message that has
     ;; lost its flag turns it into an ordinary one on the far side.
@@ -88,7 +88,7 @@
         (is (false? (:retain? (tu/expect! (:ch sub) :PUBLISH 3000))))
         (finally (tu/close! sub pub))))))
 
-(deftest retain-handling-decides-whether-the-backlog-is-replayed
+(deftest ^:portable retain-handling-decides-whether-the-backlog-is-replayed
   (testing "0 sends what is retained, which is the 3.1.1 behaviour"
     (let [topic (tu/topic "rh0")
           pub   (connect! 5 (tu/client-id "rh0-pub"))]
@@ -133,7 +133,7 @@
               "second time: the subscription already existed, so it does not")
           (finally (tu/close! sub pub)))))))
 
-(deftest a-subscription-identifier-comes-back-with-the-message
+(deftest ^:portable a-subscription-identifier-comes-back-with-the-message
   (testing "the identifier the client chose is on every matching delivery"
     ;; §3.3.4. It is how a client with many subscriptions knows which one a
     ;; message arrived for, without matching the topic against its filters.
@@ -162,12 +162,12 @@
           (is (not (contains? (:properties msg) :subscription-identifiers))))
         (finally (tu/close! sub pub))))))
 
-(deftest the-broker-now-says-identifiers-are-available
+(deftest ^:portable the-broker-now-says-identifiers-are-available
   (testing "the CONNACK no longer denies them"
     (is (true? (:subscription-identifier-available
                 @(resolve 'mqttkat.handlers.connect/broker-properties))))))
 
-(deftest unsubscribing-a-version-5-subscription-still-works
+(deftest ^:portable unsubscribing-a-version-5-subscription-still-works
   (testing "the options stored with a subscription do not break its removal"
     ;; The trie matches on the whole stored value, so a subscription carrying
     ;; the new option fields is deleted by a different key than a 3.1.1 one —

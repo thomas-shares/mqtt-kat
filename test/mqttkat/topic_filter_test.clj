@@ -32,7 +32,7 @@
     (is (not (h/valid-topic-filter? "")))
     (is (not (h/valid-topic-filter? nil)))))
 
-(deftest a-bad-filter-is-refused-on-its-own-line
+(deftest ^:portable a-bad-filter-is-refused-on-its-own-line
   (testing "§3.9.3: one reason code per filter, the good ones still granted"
     ;; Not a disconnect: the other filters in the packet may be perfectly good,
     ;; and the SUBACK has a place to say so for each of them.
@@ -65,7 +65,7 @@
             "nothing was stored for it")
         (finally (tu/close! c))))))
 
-(deftest a-version-4-client-gets-the-3-1-1-failure-code
+(deftest ^:portable a-version-4-client-gets-the-3-1-1-failure-code
   (testing "§3.9.3: 3.1.1 has one failure code, 0x80"
     ;; 0x8F means nothing to a 3.1.1 client — the only value it knows for
     ;; failure is 0x80, and anything else is a return code it cannot read.

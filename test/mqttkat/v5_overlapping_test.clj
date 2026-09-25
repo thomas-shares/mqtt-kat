@@ -23,7 +23,7 @@
                           :retain? false :duplicate? false}
                    (pos? qos) (assoc :packet-identifier 1))))
 
-(deftest two-matching-subscriptions-deliver-once
+(deftest ^:portable two-matching-subscriptions-deliver-once
   (testing "§3.3.4: one copy carrying every matching Subscription Identifier"
     ;; `a/#` matches `a` as well as `a/b` (§4.7.1.2), so these two filters both
     ;; match the parent topic. The broker used to send one delivery per
@@ -46,7 +46,7 @@
         (is (nil? (tu/take! (:ch sub) 700)) "exactly one delivery")
         (finally (tu/close! sub pub))))))
 
-(deftest the-delivery-takes-the-highest-matching-qos
+(deftest ^:portable the-delivery-takes-the-highest-matching-qos
   (testing "§3.3.5-1: the maximum QoS of the matching subscriptions"
     ;; One copy has to pick a QoS, and dropping to the lower of the two would
     ;; quietly downgrade a subscription the client asked for at QoS 1.
@@ -64,7 +64,7 @@
         (is (nil? (tu/take! (:ch sub) 700)) "exactly one delivery")
         (finally (tu/close! sub pub))))))
 
-(deftest one-subscription-still-carries-its-own-identifier
+(deftest ^:portable one-subscription-still-carries-its-own-identifier
   (testing "the ordinary case is unchanged"
     (let [topic (tu/topic "single-id")
           sub   (tu/connect-v5! "single-id-sub")
@@ -76,7 +76,7 @@
           (is (= [456789] (mapv long (:subscription-identifiers (:properties m))))))
         (finally (tu/close! sub pub))))))
 
-(deftest a-subscription-without-an-identifier-adds-none
+(deftest ^:portable a-subscription-without-an-identifier-adds-none
   (testing "a filter subscribed without one contributes nothing to the list"
     ;; §3.3.4: only subscriptions that *have* an identifier put one on the
     ;; delivery. A client mixing the two must not see a phantom.
@@ -92,7 +92,7 @@
         (is (nil? (tu/take! (:ch sub) 700)) "exactly one delivery")
         (finally (tu/close! sub pub))))))
 
-(deftest a-shared-and-an-ordinary-subscription-still-deliver-twice
+(deftest ^:portable a-shared-and-an-ordinary-subscription-still-deliver-twice
   (testing "they are independent subscriptions, not overlapping ones (§4.8.2)"
     ;; Deliberately not coalesced: a client subscribed both ways has asked for
     ;; the message once as itself and once as a member of the group.

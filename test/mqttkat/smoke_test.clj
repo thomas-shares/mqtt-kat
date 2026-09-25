@@ -5,7 +5,7 @@
 
 (use-fixtures :once tu/broker-fixture)
 
-(deftest broker-starts-and-serves
+(deftest ^:portable broker-starts-and-serves
   (let [{:keys [client ch] :as c} (tu/connect! "smoke")]
     (is (= 0 (:connect-return-code (:connack c))))
     (client/send-message client {:packet-type :SUBSCRIBE

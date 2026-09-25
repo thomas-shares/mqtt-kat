@@ -22,18 +22,18 @@
            :retain? retain? :duplicate false :payload payload}
     id (assoc :packet-identifier id)))
 
-(deftest connect-test
+(deftest ^:portable connect-test
   (let [c (tu/connect! "connect")]
     (is (= 0 (:connect-return-code (:connack c))))
     (tu/close! c)))
 
-(deftest zero-length-client-id-clean-session-true
+(deftest ^:portable zero-length-client-id-clean-session-true
   (testing "an empty client id is allowed when the session is clean"
     (let [c (tu/connect! nil :id "" :clean-session? true)]
       (is (= 0x00 (:connect-return-code (:connack c))))
       (tu/close! c))))
 
-(deftest zero-length-client-id-clean-session-false
+(deftest ^:portable zero-length-client-id-clean-session-false
   (testing "an empty client id with a persistent session is rejected"
     (let [{:keys [ch] :as c} (tu/client!)]
       (client/send-message (:client c) {:packet-type :CONNECT :protocol-name "MQTT"
@@ -42,7 +42,7 @@
       (is (= 0x02 (:connect-return-code (tu/expect! ch :CONNACK))))
       (tu/close! c))))
 
-(deftest retain-test
+(deftest ^:portable retain-test
   (testing "a retained message is delivered to a later subscriber"
     (let [topic   (tu/topic "retain")
           payload "this is a retained message"
@@ -57,7 +57,7 @@
         (is (= payload (tu/payload-str msg))))
       (tu/close! c))))
 
-(deftest update-retain-test
+(deftest ^:portable update-retain-test
   (testing "only the newest retained message on a topic is kept"
     (let [topic (tu/topic "update-retain")
           {:keys [client ch] :as c} (tu/connect! "update-retain")]
@@ -70,7 +70,7 @@
         (is (= "retained message two" (tu/payload-str msg))))
       (tu/close! c))))
 
-(deftest last-will-test
+(deftest ^:portable last-will-test
   (testing "the will is published when a client drops without DISCONNECT"
     (let [topic (tu/topic "will")
           will  "will message"
@@ -86,7 +86,7 @@
         (is (= 0 (:qos msg))))
       (tu/close! b))))
 
-(deftest last-will-test-and-retain
+(deftest ^:portable last-will-test-and-retain
   (testing "a retained will reaches a subscriber that arrives after the client died"
     (let [topic (tu/topic "will-retain")
           will  "will message"
@@ -103,7 +103,7 @@
           (is (= 0 (:qos msg))))
         (tu/close! b)))))
 
-(deftest session-test
+(deftest ^:portable session-test
   (testing "reconnecting with the same id resumes the session"
     (let [id (tu/client-id "session")
           a  (tu/connect! nil :id id :clean-session? false)]
@@ -115,7 +115,7 @@
         (is (true? (:session-present? (:connack b))))
         (tu/close! b)))))
 
-(deftest sub-unsub-test
+(deftest ^:portable sub-unsub-test
   (testing "a subscription delivers, and stops delivering once unsubscribed"
     (let [topic (tu/topic "sub-unsub")
           {:keys [client ch] :as c} (tu/connect! "sub-unsub")]
@@ -136,7 +136,7 @@
       (is (nil? (tu/take! ch 300)) "nothing may be delivered after UNSUBSCRIBE")
       (tu/close! c))))
 
-(deftest subscribe-test
+(deftest ^:portable subscribe-test
   (testing "a subscription made in one session still delivers in the next"
     (let [id      (tu/client-id "subscribe")
           topic   (tu/topic "qos-0")
@@ -161,7 +161,7 @@
           (is (= payload (tu/payload-str msg))))
         (tu/close! b)))))
 
-(deftest publish-with-an-explicit-payload
+(deftest ^:portable publish-with-an-explicit-payload
   (testing "client/publish delivers a caller-supplied payload"
     ;; Also keeps the four-argument arity exercised: it spent its life
     ;; uncalled, and uncalled means unverified.
@@ -176,7 +176,7 @@
         (is (= "an explicit payload" (tu/payload-str msg))))
       (tu/close! c))))
 
-(deftest publish-larger-than-the-encoder-scratch-buffer
+(deftest ^:portable publish-larger-than-the-encoder-scratch-buffer
   (testing "a payload well past 4 KB survives the round trip intact"
     ;; The encoders built every packet into a fixed 4096-byte array with no
     ;; bounds check, so anything larger threw ArrayIndexOutOfBoundsException
@@ -200,7 +200,7 @@
               (str "payload of " size " bytes came back altered")))
         (tu/close! c)))))
 
-(deftest non-ascii-topics-and-client-ids
+(deftest ^:portable non-ascii-topics-and-client-ids
   (testing "UTF-8 topics, filters and client ids survive decoding"
     ;; MQTT strings are UTF-8 (3.1.1 §1.5.3), but every decoder advanced past
     ;; one with String.length() — the character count, not the byte count it
@@ -226,7 +226,7 @@
                 "the payload was corrupted by the topic offset"))
           (tu/close! c))))))
 
-(deftest non-ascii-multi-topic-subscribe
+(deftest ^:portable non-ascii-multi-topic-subscribe
   (testing "a SUBSCRIBE carrying several UTF-8 filters decodes every one"
     ;; The per-topic offset error compounds inside the SUBSCRIBE loop: one
     ;; short advance and the QoS byte read for the next filter is really a
@@ -248,7 +248,7 @@
           (is (= (str "payload for " t) (tu/payload-str msg)))))
       (tu/close! c))))
 
-(deftest qos-1-test
+(deftest ^:portable qos-1-test
   (testing "an unacknowledged QoS 1 message is redelivered on the next session"
     (let [id      (tu/client-id "qos-1")
           topic   (tu/topic "qos-1")
@@ -294,7 +294,7 @@
                                               :packet-identifier (:packet-identifier msg)})))
         (tu/close! b)))))
 
-(deftest dollar-topics-are-not-matched-by-wildcard-filters
+(deftest ^:portable dollar-topics-are-not-matched-by-wildcard-filters
   (testing "a filter beginning with a wildcard must not match a $ topic"
     ;; MQTT 3.1.1 §4.7.2. Topic names beginning with $ are the server's own —
     ;; $SYS and the like — so a client asking for `#` is asking for the
@@ -334,7 +334,7 @@
           (tu/close! sub)
           (tu/close! pub))))))
 
-(deftest dollar-topics-match-filters-that-name-the-dollar-level
+(deftest ^:portable dollar-topics-match-filters-that-name-the-dollar-level
   (testing "$SYS/# still matches $SYS topics"
     ;; The other half of §4.7.2, and the half a blunt "drop anything starting
     ;; with $" would break.

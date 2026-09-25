@@ -50,7 +50,7 @@
         (recur got))
       got)))
 
-(deftest no-local-applies-at-qos-2
+(deftest ^:portable no-local-applies-at-qos-2
   (testing "a No Local subscriber is not sent its own QoS 2 message"
     ;; §3.8.3.1. The ordinary subscriber is the control: it shows the message
     ;; really was released and delivered, so the empty result for the
@@ -77,7 +77,7 @@
         (is (= ["theirs"] (received self)))
         (finally (tu/close! self pub))))))
 
-(deftest a-shared-group-gets-one-copy-at-qos-2
+(deftest ^:portable a-shared-group-gets-one-copy-at-qos-2
   (testing "one QoS 2 message reaches exactly one member of the group"
     ;; §4.8.2. Without select-shared on this path every member got a copy,
     ;; which is an ordinary subscription with a longer name.
@@ -116,7 +116,7 @@
           (is (seq got-b)))
         (finally (tu/close! a b pub))))))
 
-(deftest overlapping-subscriptions-deliver-once-at-qos-2
+(deftest ^:portable overlapping-subscriptions-deliver-once-at-qos-2
   (testing "§3.3.4: one copy carrying both Subscription Identifiers"
     ;; The same coalescing v5-overlapping-test pins at QoS 1, through the
     ;; PUBREL path. Two copies would be legal but is not what this broker does

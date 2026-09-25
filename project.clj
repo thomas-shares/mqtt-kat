@@ -62,8 +62,14 @@
   ;; `lein test` runs the unit tests only. The load simulations in
   ;; client-generator{,-2} are tagged ^:performance and run on request with
   ;; `lein test :performance`.
+  ;;
+  ;; `lein test :portable` runs the tests that talk to the broker over its
+  ;; socket and nothing else. With MQTT_BROKER_HOST (and MQTT_BROKER_PORT) set
+  ;; they run against that broker instead of one the suite starts, which is how
+  ;; CI checks them against Mosquitto; see mqttkat.test-util/external?.
   :test-selectors {:default     (complement :performance)
                    :performance :performance
+                   :portable    :portable
                    :all         (constantly true)}
   ;; mqttkat.rama.module is not instrumented. `defmodule` expands its whole
   ;; body — every depot, PState and dataflow form of the topology — into one

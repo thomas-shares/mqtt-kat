@@ -91,7 +91,7 @@
 
 (use-fixtures :once tu/broker-fixture)
 
-(deftest a-stray-puback-does-not-wedge-the-connection
+(deftest ^:portable a-stray-puback-does-not-wedge-the-connection
   (testing "a PUBACK for an identifier never issued leaves the client usable"
     ;; PUBACK used to return the client's identifier to the shared channel
     ;; without checking it had ever been issued. With the pool full that

@@ -121,7 +121,7 @@
     (tu/send-v5! c msg)
     (client/send-message (:client c) msg)))
 
-(deftest the-broker-reports-which-subscriptions-existed
+(deftest ^:portable the-broker-reports-which-subscriptions-existed
   (testing "one code per filter: success for a real one, 0x11 for a phantom"
     ;; The whole reason this payload was added. A client can now tell that its
     ;; unsubscribe was a no-op, which in 3.1.1 was indistinguishable from
@@ -140,7 +140,7 @@
           (is (map? (:properties ack))))
         (finally (tu/close! c))))))
 
-(deftest a-mismatched-dialect-is-refused-which-is-why-send-v5-exists
+(deftest ^:portable a-mismatched-dialect-is-refused-which-is-why-send-v5-exists
   (testing "a 3.1.1-shaped SUBSCRIBE on a version 5 connection gets a DISCONNECT, not a SUBACK"
     ;; Not a complaint about the broker: on a version 5 connection that packet
     ;; genuinely is malformed — with no property block, the topic filter's
@@ -174,7 +174,7 @@
         (is (= :SUBACK (:packet-type (tu/expect! (:ch c) :SUBACK 3000))))
         (finally (tu/close! c))))))
 
-(deftest a-version-4-client-still-gets-the-old-unsuback
+(deftest ^:portable a-version-4-client-still-gets-the-old-unsuback
   (testing "no payload, because a 3.1.1 client cannot read one"
     (let [topic (tu/topic "unsub-v4")
           c     (connect! 4 (tu/client-id "unsub-v4"))]
@@ -189,7 +189,7 @@
           (is (not (contains? ack :response))))
         (finally (tu/close! c))))))
 
-(deftest unsubscribing-actually-stops-delivery
+(deftest ^:portable unsubscribing-actually-stops-delivery
   (testing "for both versions, the subscription is really gone"
     (doseq [version [4 5]]
       (let [topic (tu/topic (str "unsub-stops-" version))

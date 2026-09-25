@@ -22,7 +22,7 @@
                            properties (assoc :properties properties)))
     (assoc c :connack (tu/expect! (:ch c) :CONNACK))))
 
-(deftest a-version-5-client-is-accepted
+(deftest ^:portable a-version-5-client-is-accepted
   (testing "the broker answers a version 5 CONNECT with a version 5 CONNACK"
     ;; Before this, protocol-version-not-valid? was (not= version 4), so a
     ;; version 5 client got return code 0x01 and a closed socket.
@@ -53,7 +53,7 @@
           (is (not (contains? props :maximum-qos)) "this broker does QoS 2, which is said by silence"))
         (finally (tu/close! c))))))
 
-(deftest a-version-5-client-can-send-its-properties
+(deftest ^:portable a-version-5-client-can-send-its-properties
   (testing "a CONNECT property block is accepted and does not disturb the rest"
     (let [id (tu/client-id "v5-props")
           c  (connect-v5! id :properties {:session-expiry-interval 300
@@ -67,7 +67,7 @@
         (is (= :CONNACK (:packet-type (:connack c))))
         (finally (tu/close! c))))))
 
-(deftest an-unsupported-version-is-refused-with-a-version-5-reason-code
+(deftest ^:portable an-unsupported-version-is-refused-with-a-version-5-reason-code
   (testing "version 6 gets 0x84, not 3.1.1's 0x01"
     ;; §3.2.2.2. The client asked in a dialect the broker does not speak, and
     ;; the answer has to be in one it does — which for anything above 5 is the
@@ -99,7 +99,7 @@
               "and no property block, which a 3.1.1 client could not parse"))
         (finally (tu/close! c))))))
 
-(deftest a-version-4-client-still-connects-unchanged
+(deftest ^:portable a-version-4-client-still-connects-unchanged
   (testing "the existing handshake is untouched"
     (let [c (tu/connect! (tu/client-id "v4-still"))]
       (try

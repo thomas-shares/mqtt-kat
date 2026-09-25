@@ -26,14 +26,14 @@
 
 (use-fixtures :once tu/broker-fixture)
 
-(deftest pingreq-is-answered
+(deftest ^:portable pingreq-is-answered
   (testing "the broker answers a PINGREQ with a PINGRESP"
     (let [{:keys [client ch] :as c} (tu/connect! "ping" :keep-alive 0)]
       (client/pingreq client)
       (is (some? (tu/expect! ch :PINGRESP)))
       (tu/close! c))))
 
-(deftest ping-does-not-disturb-the-session
+(deftest ^:portable ping-does-not-disturb-the-session
   (testing "a ping leaves the connection usable"
     (let [topic (tu/topic "ping")
           {:keys [client ch] :as c} (tu/connect! "ping" :keep-alive 0)]
@@ -47,7 +47,7 @@
       (is (= "after the ping" (tu/payload-str (tu/expect-eventually! ch :PUBLISH))))
       (tu/close! c))))
 
-(deftest zero-keep-alive-never-times-out
+(deftest ^:portable zero-keep-alive-never-times-out
   (testing "keep alive 0 switches the timeout off"
     (let [{:keys [client] :as c} (tu/connect! "no-keep-alive" :keep-alive 0)]
       (Thread/sleep 2500)
