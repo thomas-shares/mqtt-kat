@@ -146,6 +146,7 @@
 (declare qos-1-send)
 (declare qos-2-send)
 (declare remove-client!)
+(declare remove-timer!)
 (declare disconnect-with-reason!)
 (declare select-shared)
 (declare coalesce-subscriptions)
@@ -287,23 +288,53 @@
             (log/warn e "closing the connection of a timed-out client failed")))
         (log/debug "closed....")))))
 
+(defn- keep-alive-tick
+  "One tick of `timer`, the keep-alive job add-timer! filed under `key`.
+
+   remove-timer! can only stop a timer it finds in the entry, so one whose
+   entry was removed or replaced without it used to go on firing every
+   interval for the life of the broker, against a client that was no longer
+   there. The tick checks it is still the job filed under `key` first, and
+   cancels itself if not."
+  [key time-out timer]
+  (if (identical? timer (get-in @*clients* [key :timer]))
+    (check-timer key time-out)
+    (do
+      (log/debug "keep-alive timer outlived its client, stopping it:" key)
+      (at/kill timer))))
+
 (defn add-timer!
   [key time]
   (log/trace "adding client to timer" time " and key:   " key)
-  (let [time-out (* 1500 time)]
+  (let [time-out (* 1500 time)
+        ;; The tick needs its own job to know whether it is still wanted, and
+        ;; the job does not exist until at/every returns. The first tick is a
+        ;; whole time-out away, long after the promise is delivered.
+        timer    (promise)]
+    ;; One timer per connection: a second one would overwrite the first in
+    ;; the entry, and remove-timer! would never find the first again.
+    (remove-timer! key)
     ;; Stamp liveness BEFORE scheduling. The job's initial delay starts running
     ;; the moment at/every is called, so a stamp taken afterwards leaves the
     ;; first tick measuring fractionally less than time-out of idleness — the
     ;; client then survives that cycle and is only reaped on the next one.
     (swap! *clients* assoc-in [key :last-active] (volatile! (System/currentTimeMillis)))
-    (swap! *clients* assoc-in [key :timer]
-           (at/every time-out #(check-timer key time-out) my-pool :initial-delay time-out)))
+    (deliver timer (at/every time-out #(keep-alive-tick key time-out @timer) my-pool
+                             :initial-delay time-out))
+    (swap! *clients* assoc-in [key :timer] @timer))
   #_(log/trace @*clients*))
 
 (defn remove-timer! [key]
-  (when-let [timer (get-in @*clients* [key :timer])]
-    (at/kill timer)
-    (swap! *clients* assoc-in [key :timer] nil)))
+  ;; Taken off the entry in one step, and only from an entry that is there.
+  ;; The read and the write used to be separate, so a client removed between
+  ;; them came back as {key {:timer nil}}, an entry nothing would ever delete.
+  (let [[old _] (swap-vals! *clients*
+                            (fn [clients]
+                              (if (get-in clients [key :timer])
+                                (assoc-in clients [key :timer] nil)
+                                clients)))]
+    (when-let [timer (get-in old [key :timer])]
+      (at/kill timer))))
 
 (defn discard-session!
   "Forget everything stored under `client-id`: the parked session, the
