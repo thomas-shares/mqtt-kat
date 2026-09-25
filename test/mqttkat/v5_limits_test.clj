@@ -18,7 +18,7 @@
 
 ;; ── Maximum Packet Size ──────────────────────────────────────────────────
 
-(deftest a-packet-over-the-clients-maximum-is-not-sent
+(deftest ^:portable a-packet-over-the-clients-maximum-is-not-sent
   (testing "§3.1.2.11.4: the server discards it rather than sending it"
     ;; \"Where a Packet is too large to send, the Server MUST discard it and
     ;; behave as if it had completed delivery of the message.\" The client asked
@@ -41,7 +41,7 @@
               (str "the large one is discarded, qos " qos)))
         (finally (tu/close! sub pub))))))
 
-(deftest the-publisher-is-still-acknowledged
+(deftest ^:portable the-publisher-is-still-acknowledged
   (testing "a discarded delivery is not the publisher's problem"
     ;; §3.1.2.11.4 says to behave as if delivery had completed, and §4.3.2 makes
     ;; the PUBACK the receiver's answer for the packet rather than a report on
@@ -55,7 +55,9 @@
         (is (= :PUBACK (:packet-type (tu/expect-eventually! (:ch pub) :PUBACK 3000))))
         (finally (tu/close! sub pub))))))
 
-(deftest discarding-does-not-consume-the-window
+(deftest ^{:portable true
+           :diverges-on-mosquitto "Mosquitto stops delivering after oversized messages it discarded (§3.1.2.11.4)"}
+  discarding-does-not-consume-the-window
   (testing "the packet identifier comes back"
     ;; The identifier is reserved before the packet is built. Dropping the send
     ;; without releasing it would leak one per oversized message, and after
@@ -78,7 +80,7 @@
           (is (= "after" (tu/payload-str m))))
         (finally (tu/close! sub pub))))))
 
-(deftest a-client-that-sets-no-maximum-gets-everything
+(deftest ^:portable a-client-that-sets-no-maximum-gets-everything
   (testing "the limit is absent by default"
     (let [topic (tu/topic "nomax")
           sub   (tu/connect-v5! "nomax-sub")
@@ -92,6 +94,7 @@
 
 ;; ── Server Keep Alive ────────────────────────────────────────────────────
 
+;; Not ^:portable: pins mqtt-kat's choice. 60 is mqtt-kat's limit; stock Mosquitto has none.
 (deftest a-long-keep-alive-is-brought-down
   (testing "§3.2.2.3.5: the server's number wins, and it says so"
     (let [c (tu/connect-v5! "ka-long" :keep-alive 120)]
@@ -100,7 +103,7 @@
             "the client must use this instead of its own")
         (finally (tu/close! c))))))
 
-(deftest a-short-keep-alive-is-left-alone
+(deftest ^:portable a-short-keep-alive-is-left-alone
   (testing "the client asked for something the server can live with"
     ;; Only sent when the server is overriding. A client told its own number
     ;; back learns nothing, and §3.2.2.3.5 has it use its own when absent.
@@ -109,7 +112,7 @@
         (is (nil? (:server-keep-alive (:properties (:connack c)))))
         (finally (tu/close! c))))))
 
-(deftest a-version-4-client-is-told-nothing
+(deftest ^:portable a-version-4-client-is-told-nothing
   (testing "3.1.1 has nowhere to put it"
     (let [c (tu/connect! "ka-v4" :keep-alive 120)]
       (try

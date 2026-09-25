@@ -33,7 +33,7 @@
       (recur (if (= :PUBLISH (:packet-type msg)) (inc n) n))
       n)))
 
-(deftest a-message-reaches-exactly-one-member-of-a-group
+(deftest ^:portable a-message-reaches-exactly-one-member-of-a-group
   (testing "two clients sharing one subscription split the traffic"
     ;; §4.8.2. This is the whole feature: without it both would get every
     ;; message, which is an ordinary subscription.
@@ -70,7 +70,7 @@
           (is (pos? got-b)))
         (finally (tu/close! a b pub))))))
 
-(deftest different-groups-each-get-their-own-copy
+(deftest ^:portable different-groups-each-get-their-own-copy
   (testing "two groups on the same filter are two subscriptions"
     ;; The group name is part of the identity, so a message goes once to each
     ;; group — that is how two independent worker pools consume one topic.
@@ -86,7 +86,7 @@
         (is (= 1 (delivered (:ch b))))
         (finally (tu/close! a b pub))))))
 
-(deftest a-shared-and-an-ordinary-subscription-both-fire
+(deftest ^:portable a-shared-and-an-ordinary-subscription-both-fire
   (testing "a client subscribed both ways gets the message twice"
     ;; What the Paho suite asserts: the two subscriptions are independent, and
     ;; the shared one does not suppress the plain one.
@@ -103,7 +103,7 @@
             "once for the ordinary subscription, once for the shared one")
         (finally (tu/close! c pub))))))
 
-(deftest a-wildcard-inside-a-shared-filter-still-matches
+(deftest ^:portable a-wildcard-inside-a-shared-filter-still-matches
   (testing "the filter after the group name is an ordinary topic filter"
     (let [prefix (tu/topic "shared-wild")
           a      (tu/connect-v5! "wild-a")
@@ -114,7 +114,7 @@
         (is (= 1 (delivered (:ch a))))
         (finally (tu/close! a pub))))))
 
-(deftest leaving-a-group-stops-delivery-to-that-client
+(deftest ^:portable leaving-a-group-stops-delivery-to-that-client
   (testing "unsubscribing uses the filter the client sent, $share and all"
     (let [topic  (tu/topic "shared-unsub")
           shared (str "$share/workers/" topic)
@@ -132,7 +132,7 @@
         (is (= 0 (delivered (:ch a))))
         (finally (tu/close! a pub))))))
 
-(deftest no-local-on-a-shared-subscription-is-a-protocol-error
+(deftest ^:portable no-local-on-a-shared-subscription-is-a-protocol-error
   (testing "§3.8.3.1 forbids it outright"
     ;; No Local asks not to be sent your own messages; on a shared
     ;; subscription there is no single publisher it could mean, so the
@@ -149,7 +149,9 @@
               "protocol error"))
         (finally (tu/close! c))))))
 
-(deftest a-malformed-share-filter-is-refused
+(deftest ^{:portable true
+           :diverges-on-mosquitto "Mosquitto disconnects over a bad share name instead of a SUBACK, and grants $share//topic outright (§4.8.2)"}
+  a-malformed-share-filter-is-refused
   (testing "the group name may not be empty or contain wildcards or a slash"
     ;; §4.8.2. Reported per filter on the SUBACK rather than by closing the
     ;; connection: the client asked for something impossible, but the rest of
@@ -165,9 +167,10 @@
                 (str bad " should be refused as an invalid topic filter")))
           (finally (tu/close! c)))))))
 
-(deftest the-broker-now-advertises-shared-subscriptions
+(deftest ^:portable the-broker-now-advertises-shared-subscriptions
   (testing "the CONNACK no longer denies them"
     (let [c (tu/connect-v5! "shared-advert")]
       (try
-        (is (true? (:shared-subscription-available (:properties (:connack c)))))
+        ;; §3.2.2.3.15: absent means supported, so only a false denies them.
+        (is (not (false? (:shared-subscription-available (:properties (:connack c))))))
         (finally (tu/close! c))))))

@@ -37,7 +37,7 @@
                          :will-qos 0 :will-retain false
                          :properties {:will-delay-interval delay}}))
 
-(deftest a-will-delay-holds-the-will-back
+(deftest ^:portable a-will-delay-holds-the-will-back
   (testing "delay 2, session expiry 10: the will arrives after the delay"
     (let [topic (tu/topic "will-delay")
           sub   (watcher topic)
@@ -54,7 +54,9 @@
                 (str "the will should arrive around the delay, took " elapsed "ms"))))
         (finally (tu/close! sub))))))
 
-(deftest the-session-ending-cuts-the-delay-short
+(deftest ^{:portable true
+           :diverges-on-mosquitto "Mosquitto holds the will for the full delay although the session ended (§3.1.3.2.2)"}
+  the-session-ending-cuts-the-delay-short
   (testing "delay 5, session expiry 0: the will is immediate"
     ;; §3.1.3.2.2 — the delay is an upper bound, not a promise to wait. With a
     ;; session that ends at once there is nothing left to come back to, so
@@ -72,7 +74,7 @@
               (str "should not have waited for the delay, took " elapsed "ms")))
         (finally (tu/close! sub))))))
 
-(deftest coming-back-in-time-deletes-the-will
+(deftest ^:portable coming-back-in-time-deletes-the-will
   (testing "reconnecting under the same id before the delay elapses"
     ;; §3.1.2.5. This is the whole point of the delay: a client that drops and
     ;; reconnects within it has not really gone away, and announcing its death
@@ -96,7 +98,7 @@
             (finally (tu/close! back))))
         (finally (tu/close! sub))))))
 
-(deftest a-version-4-will-is-still-immediate
+(deftest ^:portable a-version-4-will-is-still-immediate
   (testing "3.1.1 has no delay, so nothing changes for it"
     (let [topic (tu/topic "will-v4")
           sub   (watcher topic)
@@ -111,7 +113,7 @@
           (is (< elapsed 2000) (str "took " elapsed "ms")))
         (finally (tu/close! sub))))))
 
-(deftest a-will-carries-its-properties
+(deftest ^:portable a-will-carries-its-properties
   (testing "§3.1.3.2: the Will Properties travel with the will message"
     ;; The will was rebuilt by hand as topic, QoS, payload and retain, so
     ;; everything the client attached to it — content type, response topic,

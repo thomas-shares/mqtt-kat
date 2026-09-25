@@ -30,7 +30,7 @@
       (tu/take! (:ch sub) ms)
       (finally (tu/close! sub)))))
 
-(deftest an-expired-retained-message-is-not-replayed
+(deftest ^:portable an-expired-retained-message-is-not-replayed
   (testing "§3.3.1.3: discarded, so a later subscriber gets nothing"
     (let [topic (tu/topic "ret-expire")
           pub   (tu/connect-v5! "ret-expire-pub")]
@@ -60,7 +60,7 @@
         (is (not (contains? @h/*retained* topic)) "and then gone")
         (finally (tu/close! pub))))))
 
-(deftest what-is-replayed-says-how-long-it-has-been-retained
+(deftest ^:portable what-is-replayed-says-how-long-it-has-been-retained
   (testing "§3.3.2.3.3: the value minus the time it has been waiting"
     ;; The same rule as a queued message. Without it a retained message
     ;; published with a ten minute life still claims ten minutes an hour later,
@@ -94,7 +94,7 @@
                             :payload (byte-array 0) :retain? true :duplicate? false})
           (tu/close! pub))))))
 
-(deftest replacing-a-retained-message-restarts-its-clock
+(deftest ^:portable replacing-a-retained-message-restarts-its-clock
   (testing "the new message is a new message"
     (let [topic (tu/topic "ret-replace")
           pub   (tu/connect-v5! "ret-replace-pub")]
@@ -111,7 +111,7 @@
                             :payload (byte-array 0) :retain? true :duplicate? false})
           (tu/close! pub))))))
 
-(deftest expiry-applies-at-every-stored-qos
+(deftest ^:portable expiry-applies-at-every-stored-qos
   (testing "the replay dispatches on the stored QoS, so all three paths need it"
     ;; process-retained-messages picks its branch from the QoS the message was
     ;; published at, and only one of those branches goes through send-publish!.

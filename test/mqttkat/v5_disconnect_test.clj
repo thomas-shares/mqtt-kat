@@ -90,7 +90,7 @@
   {:packet-type :SUBSCRIBE :packet-identifier 1
    :topics [{:qos 0 :topic-filter topic}]})
 
-(deftest a-polite-disconnect-discards-the-will
+(deftest ^:portable a-polite-disconnect-discards-the-will
   (testing "3.1.1: a client that says goodbye does not fire its will"
     ;; §3.14.4. The will is for a client that vanished, and publishing it after
     ;; an orderly goodbye tells every subscriber the client crashed when it
@@ -123,7 +123,7 @@
         (is (nil? (tu/take! (:ch sub) 1200)))
         (finally (tu/close! dying sub))))))
 
-(deftest disconnect-with-will-message-fires-it
+(deftest ^:portable disconnect-with-will-message-fires-it
   (testing "reason code 0x04 asks for the will to be published after all"
     ;; §3.14.2.1, and the only way to say it — in 3.1.1 a client that wanted
     ;; its will published had to drop the socket and hope.
@@ -144,6 +144,7 @@
 
 ;; ── the server saying why ─────────────────────────────────────────────
 
+;; Not ^:portable: pins mqtt-kat's choice. 0x94 where 0x82 Protocol Error is as good; Mosquitto sends 0x82.
 (deftest an-undeclared-topic-alias-is-answered-with-a-reason-code
   (testing "0x94, rather than the message being dropped in silence"
     ;; §3.3.2.3.4. This was left open when topic aliases landed: an alias
@@ -160,7 +161,7 @@
               "topic alias invalid"))
         (finally (tu/close! c))))))
 
-(deftest a-malformed-packet-is-answered-with-a-reason-code
+(deftest ^:portable a-malformed-packet-is-answered-with-a-reason-code
   (testing "0x81, rather than the connection simply going away"
     ;; §4.13. A 3.1.1-shaped SUBSCRIBE on a version 5 connection is malformed —
     ;; the topic filter's length prefix is read as the property block that

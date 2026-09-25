@@ -117,7 +117,7 @@
                   :payload (.getBytes "hello" "UTF-8")
                   :retain? false :duplicate? false}))
 
-(deftest a-publisher-learns-that-nobody-was-listening
+(deftest ^:portable a-publisher-learns-that-nobody-was-listening
   (testing "QoS 1 to a topic with no subscribers is acknowledged with 0x10"
     ;; §3.4.2.1. The message was accepted — the publisher owes nothing more —
     ;; but it went nowhere, and until version 5 there was no way to say so.
@@ -143,6 +143,7 @@
           (is (= 0 (long (:reason-code ack))) "success"))
         (finally (tu/close! sub pub))))))
 
+;; Not ^:portable: pins mqtt-kat's choice. 0x10 on PUBREC is optional; Mosquitto sends it on PUBACK only.
 (deftest a-qos-2-publisher-learns-the-same-thing
   (testing "PUBREC carries 0x10 when nothing matched"
     ;; §3.5.2.1. It is reported on the PUBREC, the first answer of the
@@ -155,7 +156,7 @@
           (is (= 0x10 (bit-and (long (:reason-code rec)) 0xff))))
         (finally (tu/close! c))))))
 
-(deftest a-version-4-publisher-sees-no-change
+(deftest ^:portable a-version-4-publisher-sees-no-change
   (testing "a 3.1.1 PUBACK is still four bytes with no reason code"
     (let [c (tu/connect! "old-talker")]
       (try

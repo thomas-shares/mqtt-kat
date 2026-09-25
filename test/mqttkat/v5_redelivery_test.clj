@@ -14,7 +14,7 @@
   (tu/connect-v5! nil :id id :clean-session? false
                   :properties {:session-expiry-interval 300}))
 
-(deftest an-unacknowledged-message-comes-back
+(deftest ^:portable an-unacknowledged-message-comes-back
   (testing "§4.4: resent on the new connection, marked as a duplicate"
     (let [id    (tu/client-id "redeliver")
           topic (tu/topic "redeliver")
@@ -48,7 +48,7 @@
             (finally (tu/close! b))))
         (finally (tu/close! pub))))))
 
-(deftest a-redelivery-is-a-well-formed-version-5-packet
+(deftest ^:portable a-redelivery-is-a-well-formed-version-5-packet
   (testing "the redelivered PUBLISH is in the connection's own dialect"
     ;; This is what actually broke. The redelivery loop built the packet by
     ;; hand and never set the protocol version, so no property block was
@@ -86,7 +86,7 @@
             (finally (tu/close! b))))
         (finally (tu/close! pub))))))
 
-(deftest an-acknowledged-message-is-not-sent-again
+(deftest ^:portable an-acknowledged-message-is-not-sent-again
   (testing "the session has no unfinished business"
     (let [id    (tu/client-id "no-redeliver")
           topic (tu/topic "no-redeliver")

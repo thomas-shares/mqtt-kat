@@ -22,7 +22,7 @@
                            properties (assoc :properties properties)))
     (assoc c :connack (tu/expect! (:ch c) :CONNACK))))
 
-(deftest a-version-5-client-is-accepted
+(deftest ^:portable a-version-5-client-is-accepted
   (testing "the broker answers a version 5 CONNECT with a version 5 CONNACK"
     ;; Before this, protocol-version-not-valid? was (not= version 4), so a
     ;; version 5 client got return code 0x01 and a closed socket.
@@ -44,8 +44,10 @@
     (let [c (connect-v5! (tu/client-id "v5-limits"))]
       (try
         (let [props (:properties (:connack c))]
-          (is (contains? props :retain-available))
-          (is (contains? props :wildcard-subscription-available))
+          ;; Absent means available (§3.2.2.3.11, §3.2.2.3.12), so what must
+          ;; not happen is a false; Mosquitto says it by leaving them out.
+          (is (not (false? (:retain-available props))))
+          (is (not (false? (:wildcard-subscription-available props))))
           ;; §3.2.2.3.4: the property says a broker does *less* than QoS 2 and
           ;; may only be 0 or 1; a broker that does QoS 2 leaves it out. Sent
           ;; as 2 it is a Protocol Error, and mosquitto's client refused every
@@ -53,7 +55,7 @@
           (is (not (contains? props :maximum-qos)) "this broker does QoS 2, which is said by silence"))
         (finally (tu/close! c))))))
 
-(deftest a-version-5-client-can-send-its-properties
+(deftest ^:portable a-version-5-client-can-send-its-properties
   (testing "a CONNECT property block is accepted and does not disturb the rest"
     (let [id (tu/client-id "v5-props")
           c  (connect-v5! id :properties {:session-expiry-interval 300
@@ -67,6 +69,7 @@
         (is (= :CONNACK (:packet-type (:connack c))))
         (finally (tu/close! c))))))
 
+;; Not ^:portable: pins mqtt-kat's choice. §3.1.2.2 makes the 0x84 CONNACK a MAY; Mosquitto answers in 3.1.1 form.
 (deftest an-unsupported-version-is-refused-with-a-version-5-reason-code
   (testing "version 6 gets 0x84, not 3.1.1's 0x01"
     ;; §3.2.2.2. The client asked in a dialect the broker does not speak, and
@@ -99,7 +102,7 @@
               "and no property block, which a 3.1.1 client could not parse"))
         (finally (tu/close! c))))))
 
-(deftest a-version-4-client-still-connects-unchanged
+(deftest ^:portable a-version-4-client-still-connects-unchanged
   (testing "the existing handshake is untouched"
     (let [c (tu/connect! (tu/client-id "v4-still"))]
       (try

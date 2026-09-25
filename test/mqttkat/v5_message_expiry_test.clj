@@ -22,7 +22,7 @@
                           :properties {:message-expiry-interval expiry}}
                    (pos? qos) (assoc :packet-identifier pid))))
 
-(deftest a-message-that-outlives-its-interval-is-not-delivered
+(deftest ^:portable a-message-that-outlives-its-interval-is-not-delivered
   (testing "§3.3.2.3.3: discarded rather than handed over late"
     (let [id    (tu/client-id "expiry")
           topic (tu/topic "expiry")
@@ -53,7 +53,7 @@
               (finally (tu/close! b))))
           (finally (tu/close! pub)))))))
 
-(deftest what-arrives-says-how-long-it-waited
+(deftest ^:portable what-arrives-says-how-long-it-waited
   (testing "§3.3.2.3.3: the interval sent on is the value minus the wait"
     ;; Without the subtraction a message queued for an hour would arrive
     ;; claiming its full lifetime ahead of it, and a client forwarding it on
@@ -82,7 +82,7 @@
               (finally (tu/close! b))))
           (finally (tu/close! pub)))))))
 
-(deftest a-message-delivered-at-once-keeps-its-interval
+(deftest ^:portable a-message-delivered-at-once-keeps-its-interval
   (testing "nothing was spent, so nothing is subtracted"
     (let [topic (tu/topic "expiry-live")
           sub   (tu/connect-v5! "expiry-live-sub")
@@ -96,7 +96,7 @@
           (is (= 60 (long (:message-expiry-interval (:properties m))))))
         (finally (tu/close! sub pub))))))
 
-(deftest a-queued-message-keeps-its-other-properties
+(deftest ^:portable a-queued-message-keeps-its-other-properties
   (testing "the offline queue carried only topic, payload and QoS"
     ;; Everything else was dropped on the way in, so a message that waited
     ;; arrived stripped of its content type and user properties while one

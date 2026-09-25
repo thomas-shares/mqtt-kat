@@ -27,7 +27,7 @@
 
 ;; ── session present ──────────────────────────────────────────────────────
 
-(deftest clean-session-is-never-told-a-session-is-present
+(deftest ^:portable clean-session-is-never-told-a-session-is-present
   (testing "CONNACK reports Session Present 0 whenever CleanSession is 1"
     ;; §3.2.2.2. This reported whatever happened to be parked under the
     ;; client-id regardless of the clean-session flag, so a client asking for a
@@ -155,7 +155,7 @@
 
 ;; ── retained replay ──────────────────────────────────────────────────────
 
-(deftest retained-messages-are-replayed-at-every-qos
+(deftest ^:portable retained-messages-are-replayed-at-every-qos
   (testing "a new subscription gets what is retained, whatever QoS it was published at"
     ;; The subscriber maps were rebuilt here without their :qos, and qos-2-send
     ;; dispatches on exactly that — so a retained QoS 2 message matched none of

@@ -42,6 +42,7 @@
           (= :DISCONNECT (:packet-type msg)) msg
           :else (recur (inc n)))))))
 
+;; Not ^:portable: pins mqtt-kat's choice. §3.3.4 says the server uses 0x93, not that it MUST; Mosquitto carries on.
 (deftest exceeding-the-brokers-receive-maximum-is-refused
   (testing "one QoS 2 publish too many gets a DISCONNECT with 0x93"
     ;; §4.9: the receiver's Receive Maximum is a promise the sender must keep,
@@ -58,7 +59,7 @@
               "receive maximum exceeded"))
         (finally (tu/close! c))))))
 
-(deftest staying-inside-the-quota-is-fine
+(deftest ^:portable staying-inside-the-quota-is-fine
   (testing "exactly the maximum, all acknowledged, and nothing is refused"
     ;; The limit is on messages *in flight*, so completing each handshake frees
     ;; the slot. A broker that counted publishes rather than outstanding ones
@@ -75,7 +76,7 @@
         (is true "twenty round trips well inside a quota of 128")
         (finally (tu/close! c))))))
 
-(deftest a-version-4-client-is-not-disconnected-for-it
+(deftest ^:portable a-version-4-client-is-not-disconnected-for-it
   (testing "3.1.1 has no Receive Maximum, so there is no promise to break"
     ;; The broker still has to protect itself, but a 3.1.1 client was never
     ;; told a limit and cannot be held to one — and there is no DISCONNECT it

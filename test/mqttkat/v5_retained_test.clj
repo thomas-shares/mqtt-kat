@@ -17,7 +17,7 @@
                           :retain? true :duplicate? false}
                    props (assoc :properties props))))
 
-(deftest a-retained-message-keeps-its-properties
+(deftest ^:portable a-retained-message-keeps-its-properties
   (testing "§3.3.1.3: the replay carries what the publisher sent"
     ;; *retained* stored only the QoS and the payload, so content type,
     ;; response topic, correlation data and user properties were all dropped on
@@ -47,7 +47,7 @@
           (publish! pub topic "")
           (tu/close! pub))))))
 
-(deftest a-retained-message-is-replaced-not-merged
+(deftest ^:portable a-retained-message-is-replaced-not-merged
   (testing "the newest publish is the one kept, properties and all"
     (let [topic (tu/topic "retain-replace")
           pub   (tu/connect-v5! "retain-replace-pub")]
@@ -69,7 +69,7 @@
           (publish! pub topic "")
           (tu/close! pub))))))
 
-(deftest a-version-4-subscriber-gets-no-properties
+(deftest ^:portable a-version-4-subscriber-gets-no-properties
   (testing "a 3.1.1 client cannot be sent a property block"
     ;; It would read the property length as the first byte of the payload.
     (let [topic (tu/topic "retain-v4")
@@ -91,7 +91,7 @@
           (publish! pub topic "")
           (tu/close! pub))))))
 
-(deftest retain-as-published-at-every-qos
+(deftest ^:portable retain-as-published-at-every-qos
   (testing "§3.8.3.1: the flag the publisher set, kept for this subscription"
     ;; send-publish! hard-coded :retain? false, so only QoS 0 ever carried the
     ;; flag. A bridge subscribing with Retain As Published at QoS 1 saw every
@@ -129,7 +129,7 @@
                               :payload (byte-array 0) :retain? true :duplicate? false})
             (tu/close! sub pub)))))))
 
-(deftest a-replayed-retained-message-says-so-at-every-qos
+(deftest ^:portable a-replayed-retained-message-says-so-at-every-qos
   (testing "§3.3.1.3: a replay to a new subscriber always has RETAIN set"
     (doseq [qos [1 2]]
       (let [topic (tu/topic (str "replay-" qos))

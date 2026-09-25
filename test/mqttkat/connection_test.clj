@@ -29,7 +29,7 @@
   {:packet-type :SUBSCRIBE :packet-identifier 1
    :topics [{:qos 0 :topic-filter topic}]})
 
-(deftest split-packet-is-reassembled
+(deftest ^:portable split-packet-is-reassembled
   (testing "a PUBLISH arriving in two TCP reads still reaches the subscriber"
     (let [topic   (tu/topic "framing")
           payload "this packet arrives in two pieces"
@@ -71,7 +71,7 @@
                                 :protocol-version version :keep-alive 60
                                 :clean-session? true :client-id client-id})))
 
-(deftest unsupported-protocol-version-is-answered-before-the-close
+(deftest ^:portable unsupported-protocol-version-is-answered-before-the-close
   (testing "the rejection CONNACK is written even though the broker is closing"
     ;; handle-not-valid-protocol-version replies 0x01 and then disconnects, so
     ;; the reply is queued on a connection that is about to be torn down.
@@ -90,7 +90,7 @@
             "unacceptable protocol version should be reported as 0x01"))
       (tu/close! c))))
 
-(deftest client-hanging-up-mid-handshake-is-quiet
+(deftest ^:portable client-hanging-up-mid-handshake-is-quiet
   (testing "a client that disconnects while its CONNECT is still being handled"
     ;; Closing the connection must not interrupt the thread that is running the
     ;; handler: it used to, and an ordinary rejection came out as an
@@ -105,7 +105,7 @@
           "the broker should be unbothered by clients that hang up")
       (tu/close! after))))
 
-(deftest a-slow-subscriber-does-not-stall-a-fast-one
+(deftest ^:portable a-slow-subscriber-does-not-stall-a-fast-one
   (testing "a subscriber that never reads cannot hold up delivery to others"
     ;; The slow client's socket buffer fills and stays full, so the broker's
     ;; write to it cannot complete. With a shared pool of writer threads that
@@ -147,7 +147,7 @@
           (tu/close! pub)))
       (tu/close! fast))))
 
-(deftest packets-sent-before-a-hangup-are-still-handled
+(deftest ^:portable packets-sent-before-a-hangup-are-still-handled
   (testing "a publish immediately followed by a hangup is not lost"
     ;; A raw socket, because MqttClient.sendMessage only queues the bytes for
     ;; its own selector thread — closing straight after would lose the packet
@@ -175,7 +175,7 @@
               "the publish was dropped when the connection was torn down")))
       (tu/close! sub))))
 
-(deftest broker-survives-keys-cancelled-by-other-threads
+(deftest ^:portable broker-survives-keys-cancelled-by-other-threads
   (testing "a connection closed off the selector thread does not kill the loop"
     ;; The keep-alive reaper closes idle connections from a timer thread, and
     ;; disconnect-client from a connection's own thread. Either cancels a
@@ -195,7 +195,7 @@
           "the broker stopped answering: the selector thread is gone")
       (tu/close! after))))
 
-(deftest packets-are-processed-in-order
+(deftest ^:portable packets-are-processed-in-order
   (testing "a PUBLISH sent before a SUBSCRIBE is processed before it"
     ;; The retained copy is delivered with retain? true; a live delivery to an
     ;; already-registered subscriber carries retain? false. So the flag says

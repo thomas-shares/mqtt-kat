@@ -21,7 +21,7 @@
       (recur (conj seen msg))
       seen)))
 
-(deftest the-broker-honours-a-clients-receive-maximum
+(deftest ^:portable the-broker-honours-a-clients-receive-maximum
   (testing "no more unacknowledged QoS 1 deliveries than the client allowed"
     ;; §4.9. The test subscriber never acknowledges, so the window fills and
     ;; stays full: whatever arrives is exactly what the broker was prepared to
@@ -68,7 +68,7 @@
                 "and it is the next message, not the same one again")))
         (finally (tu/close! sub pub))))))
 
-(deftest a-client-that-asks-for-nothing-gets-the-brokers-default
+(deftest ^:portable a-client-that-asks-for-nothing-gets-the-brokers-default
   (testing "no receive maximum in the CONNECT means the broker's own window"
     ;; §3.1.2.11.3: absent means 65,535. The broker's own window is smaller
     ;; than that and is what actually applies, but the point of this test is
@@ -90,7 +90,7 @@
               "all six, because nothing asked for a smaller window"))
         (finally (tu/close! sub pub))))))
 
-(deftest the-broker-states-its-own-receive-maximum
+(deftest ^:portable the-broker-states-its-own-receive-maximum
   (testing "the CONNACK says how much the broker will accept in flight"
     ;; §3.2.2.3.3. A client that is not told assumes 65,535 and may flood.
     (let [c (tu/connect-v5! "rm-advert")]
@@ -101,7 +101,7 @@
           (is (<= (:receive-maximum props) 65535)))
         (finally (tu/close! c))))))
 
-(deftest a-version-4-subscriber-is-unaffected
+(deftest ^:portable a-version-4-subscriber-is-unaffected
   (testing "3.1.1 has no receive maximum, so the broker's own window applies"
     (let [topic (tu/topic "recv-v4")
           sub   (tu/connect! "rv4-sub" :ordered? true :buffer 32)

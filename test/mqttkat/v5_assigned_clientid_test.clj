@@ -11,7 +11,7 @@
 
 (use-fixtures :once tu/broker-fixture)
 
-(deftest a-zero-length-id-is-given-one
+(deftest ^:portable a-zero-length-id-is-given-one
   (testing "the CONNACK names the client"
     (let [c (tu/connect-v5! nil :id "")]
       (try
@@ -22,7 +22,7 @@
           (is (seq assigned) "and it is not itself empty"))
         (finally (tu/close! c))))))
 
-(deftest two-clients-are-given-different-ones
+(deftest ^:portable two-clients-are-given-different-ones
   (testing "an assigned identifier has to be unique or it takes over a session"
     ;; §3.1.4 disconnects an existing connection holding the same id, so two
     ;; anonymous clients handed the same name would knock each other off.
@@ -36,14 +36,14 @@
         (is (nil? (tu/take! (:ch a) 500)) "the first was not disconnected")
         (finally (tu/close! a b))))))
 
-(deftest a-named-client-is-not-given-one
+(deftest ^:portable a-named-client-is-not-given-one
   (testing "§3.2.2.3.7: only sent when the server assigned the id"
     (let [c (tu/connect-v5! "named")]
       (try
         (is (nil? (:assigned-client-identifier (:properties (:connack c)))))
         (finally (tu/close! c))))))
 
-(deftest an-assigned-client-can-be-published-to
+(deftest ^:portable an-assigned-client-can-be-published-to
   (testing "the name is real, not decoration"
     (let [c     (tu/connect-v5! nil :id "")
           pub   (tu/connect-v5! "assign-pub")
@@ -58,7 +58,7 @@
         (is (= "hello" (tu/payload-str (tu/expect-eventually! (:ch c) :PUBLISH 3000))))
         (finally (tu/close! c pub))))))
 
-(deftest a-zero-length-id-may-resume-a-session-in-version-5
+(deftest ^:portable a-zero-length-id-may-resume-a-session-in-version-5
   (testing "§3.1.3.1: version 5 dropped 3.1.1's rejection of that combination"
     ;; 3.1.1 §3.1.3.1 required a zero-length client id to come with CleanSession
     ;; 1, and rejected it otherwise with return code 0x02 — there was no way to
@@ -75,7 +75,7 @@
             "and told the name it was given, which is what makes it resumable")
         (finally (tu/close! c))))))
 
-(deftest a-zero-length-id-still-needs-a-clean-session-in-version-4
+(deftest ^:portable a-zero-length-id-still-needs-a-clean-session-in-version-4
   (testing "3.1.1 §3.1.3.1: rejected, because there is nowhere to put the name"
     (let [{:keys [client ch]} (tu/client! 16 false)]
       (try

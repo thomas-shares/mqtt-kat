@@ -44,7 +44,7 @@
 
 (defn- payload-of [m] (String. ^bytes (:payload m) "UTF-8"))
 
-(deftest a-version-5-subscriber-receives-a-property-block
+(deftest ^:portable a-version-5-subscriber-receives-a-property-block
   (testing "the broker answers a v5 subscriber in v5, even for a v4 publisher"
     ;; A v5 client cannot read a 3.1.1 PUBLISH: it would take the first byte of
     ;; the payload as a property length. Which dialect a delivery is written in
@@ -61,7 +61,7 @@
           (is (map? (:properties msg)) "a v5 delivery always carries a block"))
         (finally (tu/close! sub pub))))))
 
-(deftest publish-properties-are-forwarded
+(deftest ^:portable publish-properties-are-forwarded
   (testing "content type, response topic, correlation data and user properties"
     ;; §3.3.2.3: these travel with the application message and the server
     ;; passes them on. Request/response is unusable without the pair of them.
@@ -85,7 +85,7 @@
           (is (= [["trace" "abc"]] (mapv vec (:user-properties props)))))
         (finally (tu/close! sub pub))))))
 
-(deftest a-mixed-fan-out-reaches-both-dialects
+(deftest ^:portable a-mixed-fan-out-reaches-both-dialects
   (testing "a v4 and a v5 subscriber on one topic each get a packet they can read"
     ;; The broker encodes one buffer and writes it to every matching
     ;; subscriber, which is only safe while they all speak the same version.
@@ -105,7 +105,7 @@
           (is (= "text/plain" (:content-type (:properties b)))))
         (finally (tu/close! old new pub))))))
 
-(deftest a-topic-alias-stands-for-a-topic-for-the-rest-of-the-connection
+(deftest ^:portable a-topic-alias-stands-for-a-topic-for-the-rest-of-the-connection
   (testing "declare the alias once with the topic, then send the alias alone"
     ;; §3.3.2.3.4. The mapping is per connection and per direction, so the
     ;; broker has to remember it against the publisher's connection.
@@ -143,7 +143,7 @@
               "while the properties that do travel still do"))
         (finally (tu/close! sub pub))))))
 
-(deftest the-broker-says-how-many-aliases-it-accepts
+(deftest ^:portable the-broker-says-how-many-aliases-it-accepts
   (testing "the CONNACK advertises a non-zero topic alias maximum"
     ;; It was 0 while aliases were unimplemented, which tells a client not to
     ;; use them at all. Now that they work it has to say so, or no client will.
@@ -158,7 +158,7 @@
       (is (pos? advertised))
       (is (<= advertised 65535) "an alias is a two byte integer"))))
 
-(deftest properties-survive-every-qos
+(deftest ^:portable properties-survive-every-qos
   (testing "a delivery carries the publisher's properties at QoS 0, 1 and 2"
     ;; QoS 2 used to lose them. Its delivery is built in qos-2-send, on the
     ;; PUBREL rather than on the PUBLISH, and that map was written out by hand
