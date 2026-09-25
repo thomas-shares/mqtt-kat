@@ -743,7 +743,10 @@
    four about a session, and the console's sample of this broker's figures;
    the broker says other things too."
   [{:keys [event connect] :as broker-event}]
-  (when-let [c @*connection*]
+  (when-let [c (when-not (bridge/bridge? (or (:client-id broker-event) (:client-id connect)))
+                 @*connection*)]
+    ;; Another broker's bridge is not a session and is not recorded as one:
+    ;; see handlers/adopt-session! for what recording it did.
     (case event
       ;; Waited for too, for the same reason as the subscribe below: it is
       ;; emitted before the CONNACK goes out, so the client cannot act — nor

@@ -28,7 +28,7 @@
             [mqttkat.web.console :as console]
             [mqttkat.web.state :as state])
   (:import [org.mqttkat MqttHandler]
-           [org.mqttkat.packages MqttPubRec]
+           [org.mqttkat.packages MqttConnAck MqttPubRec]
            [org.mqttkat.server MqttServer]))
 
 (use-fixtures :once tu/broker-fixture)
@@ -96,6 +96,13 @@
                   ^clojure.lang.IFn
                   (fn [{:keys [packet-type qos client-key packet-identifier] :as msg} _]
                     (swap! received conj (dissoc msg :client-key))
+                    ;; A CONNACK, as any broker sends: the bridge waits for it,
+                    ;; since it carries the Receive Maximum it has to keep to.
+                    (when (= :CONNECT packet-type)
+                      (.sendMessageBuffer ^MqttServer @server [client-key]
+                                          (MqttConnAck/encode {:packet-type :CONNACK :protocol-version 5
+                                                               :session-present? false :reason-code 0
+                                                               :properties {:receive-maximum 128}})))
                     (when (and (= :PUBLISH packet-type) (= 2 (long (or qos 0))))
                       (.sendMessageBuffer ^MqttServer @server [client-key]
                                           (MqttPubRec/encode {:packet-type       :PUBREC
@@ -661,7 +668,7 @@
                     (tu/close! c)))))
 
             (testing "forwarding to another broker"
-              (let [{:keys [server port received]} (peer-broker)
+              (let [{:keys [^MqttServer server port received]} (peer-broker)
                     of-type   (fn [t] (filterv #(= t (:packet-type %)) @received))
                     publishes #(of-type :PUBLISH)
                     peer-addr {:host "127.0.0.1" :port port :at 0 :incarnation "peer-run"}]
@@ -734,6 +741,22 @@
                           (Thread/sleep 200)
                           (is (= 3 (count (publishes))) "and not forwarded on")
                           (tu/close! b)))
+
+                      (testing "a bridge is not a session: not recorded, and never taken over"
+                        ;; Every broker's bridges share one client id, one per peer;
+                        ;; recorded as a session, a broker with two peers was one
+                        ;; client in two places, and each bridge took the other over.
+                        (let [id (str bridge/client-id-prefix "peer-z")]
+                          (record! conn (on-broker (cluster/->connect (connect-map id)) "peer-x" "px"))
+                          (let [before (count (of-type :PUBLISH))
+                                b      (tu/connect-v5! "bridge" :id id)]
+                            (try
+                              (Thread/sleep 300)
+                              (is (= before (count (of-type :PUBLISH)))
+                                  "no $mqttkat/takeover sent to the broker the record names")
+                              (is (= "peer-x" (:broker-id (cluster/session conn id)))
+                                  "and the connection here was not recorded over it")
+                              (finally (tu/close! b))))))
 
                       (testing "a topic nobody remote holds is not forwarded"
                         (client/send-message (:client pub) (publish-msg "elsewhere/t" "none" 0 nil))

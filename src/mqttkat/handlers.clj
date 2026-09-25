@@ -834,7 +834,12 @@
 
    Returns true when the cluster knew the session."
   [client-id]
-  (when-let [{:keys [resume takeover!]} @session-source]
+  ;; Never for another broker's bridge. It is not a client session: it has
+  ;; nothing to resume, and every broker's bridges share one client id — one
+  ;; per peer it connects to — so to the cluster's session table a broker
+  ;; with two peers looks like one client connected in two places, and the
+  ;; takeover below had its bridges knock each other off in turn.
+  (when-let [{:keys [resume takeover!]} (when-not (bridge/bridge? client-id) @session-source)]
     (when-let [{:keys [session subscriptions queued]} (resume client-id)]
       (when (and (:connected? session)
                  (:broker-id session)
@@ -1332,12 +1337,20 @@
     (.attachment ^SelectionKey key)))
 
 (defn- throttle-publisher!
-  "Stop reading from the publisher feeding a subscriber that is filling up, and
-   record it so the subscriber releases it once drained."
-  [subscriber-key publisher-key]
+  "Stop reading from the publisher feeding a subscriber whose pending queue is
+   filling up, and have the subscriber hold it until that queue has drained.
+
+   pauseUntilAcked, not pauseUntilDrained: that one releases on a short socket
+   write queue, which is QoS 0's backlog; a QoS 1 subscriber's backlog is its
+   pending queue, and its write queue is short all along. Then the queue is
+   looked at again: a drain that ran between the decision to throttle and the
+   hold being taken found nothing to release, and may have been the last."
+  [subscriber-key publisher-key client-id]
   (when-let [subscriber (connection-of subscriber-key)]
     (when-let [publisher (connection-of publisher-key)]
-      (.pauseUntilDrained subscriber publisher))))
+      (.pauseUntilAcked subscriber publisher)
+      (when (<= (pending-count client-id) resume-threshold)
+        (.ackDrained subscriber)))))
 
 (defn- deliver-or-queue!
   "Send `msg` to a subscriber if its window has room; hold it if not.
@@ -1360,7 +1373,7 @@
       (when-not (queue-pending! client-id msg)
         (.increment ^LongAdder MqttStat/droppedMessages))
       (when (>= (pending-count client-id) pause-threshold)
-        (throttle-publisher! key publisher-key)))))
+        (throttle-publisher! key publisher-key client-id)))))
 
 (defn queue-for-offline-sessions!
   "Keep a publish for persistent sessions that are subscribed but not connected.
@@ -1443,7 +1456,7 @@
       (release-packet-identifier! client-id packet-identifier)))
   (when (<= (pending-count client-id) resume-threshold)
     (when-let [subscriber (connection-of key)]
-      (.drained subscriber))))
+      (.ackDrained subscriber))))
 
 #_(defn send-message [keys msg]
     (log/debug "sending message  from  clj" (:packet-type msg) " " (:packet-identifier msg))

@@ -153,6 +153,59 @@
       (is (= 0 (:redirected (:counts r))) "nobody was sent anywhere")
       (is (= {(str tu/host ":" tu/port) 6} (:landed r)) "and everyone landed where they were pointed"))))
 
+(deftest the-protocol-version-can-be-mixed
+  (testing "--mqtt takes 4, 5 or mixed, from the command line or the file"
+    (is (= 4 (:mqtt (runner/parse-args []))))
+    (is (= 5 (:mqtt (runner/parse-args ["--mqtt" "5"]))))
+    (is (= :mixed (:mqtt (runner/parse-args ["--mqtt" "mixed"]))))
+    (is (thrown? clojure.lang.ExceptionInfo (runner/parse-args ["--mqtt" "6"])))
+    (let [f (java.io.File/createTempFile "load" ".edn")]
+      (try
+        (doseq [v [:mixed "mixed"]]
+          (spit f (pr-str {:mqtt v}))
+          (is (= :mixed (:mqtt (runner/parse-args ["--config" (str f)]))) (pr-str v)))
+        (spit f (pr-str {:mqtt 5}))
+        (is (= 5 (:mqtt (runner/parse-args ["--config" (str f)]))))
+        (spit f (pr-str {:mqtt :v7}))
+        (is (thrown? clojure.lang.ExceptionInfo (runner/parse-args ["--config" (str f)])))
+        (finally (.delete f)))))
+
+  (testing "half of every pool in each version, and both on every broker and every topic"
+    ;; Three brokers and four topics: alternating on the client number alone
+    ;; would line the versions up with topics (two topics would be all 3.1.1).
+    (let [opts   (runner/parse-args ["--mqtt" "mixed" "--brokers" "a:1,b:2,c:3" "--topics" "4"])
+          cell   12
+          subs   (range 240)
+          v5?    #(runner/mqtt5-for? opts % cell)]
+      (is (= 120 (count (filter v5? subs))) "exactly half")
+      (let [opts (runner/parse-args ["--mqtt" "mixed" "--brokers" "a:1,b:2,c:3" "--topics" "20"])]
+        (is (= 150 (count (filter #(runner/mqtt5-for? opts % 60) (range 300))))
+            "half, also with an odd number of clients in each cell"))
+      (doseq [b (range 3) t (range 4)
+              :let [here (filter #(and (= b (mod % 3)) (= t (mod % 4))) subs)]]
+        (is (= #{true false} (set (map v5? here)))
+            (str "broker " b " topic " t " should get both versions")))))
+
+  (testing "4 still means 5 when following redirects, which only version 5 can"
+    (is (false? (runner/mqtt5-for? (runner/parse-args []) 0 1)))
+    (is (true? (runner/mqtt5-for? (runner/parse-args ["--follow-redirects" "1"]) 0 1)))
+    (is (false? (runner/mqtt5-for? (runner/parse-args ["--mqtt" "mixed" "--follow-redirects" "1"]) 0 1))
+        "but in mixed mode the 3.1.1 half stays 3.1.1")))
+
+(deftest a-mixed-run-delivers-across-versions
+  (doseq [qos [1 2]]
+    (testing (str "QoS " qos ": version 5 publishers to 3.1.1 subscribers and the other way round")
+      (let [r (runner/execute (merge runner/defaults
+                                     {:host tu/host :port tu/port :mqtt :mixed
+                                      :publishers 4 :subscribers 8 :topics 2
+                                      :messages 400 :rate 1000 :qos qos
+                                      :size 64 :progress-ms 0 :drain-ms 1500
+                                      :churn 1 :resubscribe 1}))]
+        (is (= 400 (:published (:counts r))))
+        (is (= 1.0 (:delivery-ratio r)) "every subscriber got every message on its topic")
+        (is (= {:publishers {:v3.1.1 2 :v5 2} :subscribers {:v3.1.1 4 :v5 4}} (:versions r)))
+        (is (zero? (:received-dup (:counts r))))))))
+
 (deftest a-run-over-several-brokers-spreads-its-clients
   (testing "the same broker twice is two brokers as far as placement goes"
     ;; Only one broker in the test JVM, so it is named twice: what this checks

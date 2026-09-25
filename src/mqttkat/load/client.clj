@@ -193,12 +193,13 @@
    once, rather than paying a round trip per client.
 
    `mqtt5?` connects in version 5, which is what lets a broker send the
-   client elsewhere (§4.13); `follow-redirects?` has it go."
+   client elsewhere (§4.13); `follow-redirects?` has it go — a 3.1.1
+   client is never sent, so for one it changes nothing."
   [{:keys [host port client-id index window counters mqtt5? follow-redirects?
            service-latency response-latency ack-latency source-address]}]
   (let [client {:client-id         client-id
                 :index             index
-                :mqtt5?            (boolean (or mqtt5? follow-redirects?))
+                :mqtt5?            (boolean mqtt5?)
                 :follow-redirects? (boolean follow-redirects?)
                 :source-address    source-address
                 :hops              (AtomicInteger. 0)

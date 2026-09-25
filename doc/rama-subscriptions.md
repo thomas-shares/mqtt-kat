@@ -573,3 +573,28 @@ SUBSCRIBE in flight already; the handler acted on it — a subscription for a
 socket that was gone, and a subscribe event for a client with no name.
 SUBSCRIBE and UNSUBSCRIBE from a connection with no client behind it are
 ignored now.
+
+## 18. Two bridge bugs that QoS 2 across three brokers found
+
+The load generator's mixed mode (half 3.1.1, half 5) delivered 1.0000 at QoS
+1 over three brokers and 0.5012 at QoS 2. Two bugs, one behind the other:
+
+- **The bridge ignored the peer's Receive Maximum** (§4.9). It sent QoS 1
+  and 2 publishes with no window; at QoS 2 the peer holds each until its
+  PUBREL, the count passed 128, and the peer rightly dropped the bridge
+  with everything in flight. The bridge now waits for the peer's CONNACK,
+  sizes a window from its Receive Maximum (absent means 65,535), takes a
+  slot per QoS 1/2 publish and gives it back on PUBACK, PUBCOMP, or a
+  refusing PUBREC. Waiting for a slot is back-pressure on the publisher,
+  as everywhere else in the broker; five seconds without one drops the
+  peer. Tested against a stand-in peer advertising a window of two.
+- **Bridges were recorded as client sessions.** A broker's bridges share
+  one client id, `mqttkat-bridge/<broker-id>`, one per peer. To the
+  cluster's session table a broker with two peers was one client connected
+  in two places, and the cross-broker takeover had its two bridges knock
+  each other off in turn — which left exactly half the remote deliveries
+  unserved, 0.6667 of the total once the first bug was fixed. Bridge
+  connections are no longer recorded in Rama, adopted or taken over.
+
+After both: 1.0000 at QoS 0, 1 and 2, mixed versions, three brokers, one
+bridge connection per direction and not a single reconnect.

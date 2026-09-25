@@ -299,7 +299,10 @@ traffic crosses the bridges:
 
 The file is an EDN map of the same options as the flags, keywords for keys;
 a flag on the command line wins over the file. `--brokers a:1885,b:1886` does the
-same from the command line. `--mqtt 5 --follow-redirects 1` is the other way of
+same from the command line. `--mqtt mixed` makes every pool half 3.1.1 and half
+version 5 — alternating within each broker and topic, so every broker and every
+topic has both, and messages cross between the versions both ways; the report
+shows the split (`:mqtt :mixed` in the config file). `--mqtt 5 --follow-redirects 1` is the other way of
 spreading a load: every client goes to the first broker and follows wherever it
 is sent, so the brokers do the balancing by their redirect policy, and the
 report says how many were sent on and where they landed.
@@ -309,7 +312,7 @@ and here are the other options:
 ```
   --config FILE      an EDN map of these options, keywords for keys; the command line wins
   --brokers H:P,H:P  several brokers; clients are spread over them round-robin
-  --mqtt 4|5         protocol version the clients speak (4)
+  --mqtt 4|5|mixed   protocol version the clients speak; mixed is half 3.1.1, half 5 (4)
   --follow-redirects 1  connect everything to the first broker and go where it sends you (0)
   --host HOST        broker host (localhost)
   --port PORT        broker port (1883)
@@ -327,6 +330,19 @@ and here are the other options:
   --max-drain-ms N   cap on the whole drain, however much is still arriving (300000)
   --source-ips N     spread clients over N source addresses; 0 to choose automatically
 ```
+
+### Back-pressure
+
+A slow subscriber holds up the publishers feeding it: the broker stops reading
+their sockets (`Connection.pauseReading`) instead of dropping messages. There are
+two kinds of hold. The first, at QoS 0, is on the subscriber's socket write queue,
+which `drained()` releases. The second, at QoS 1 and 2, is on its queue of messages
+waiting for an inflight slot. `ackDrained()` releases that one as the
+PUBACKs/PUBCOMPs bring the queue back under the resume threshold. A publisher can
+be held by several subscribers at once. It is only read again when every one of
+them has let go (`peerHolds` is a count, not a flag). The `pending-limit` refusal
+exists only as a backstop, and in a healthy run the `dropped` counter stays at 0
+for QoS 1 traffic.
 
 ## Thank you
 

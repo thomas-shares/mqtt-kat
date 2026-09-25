@@ -27,6 +27,7 @@
   (:require [clojure.tools.logging :as log]
             [mqttkat.client :as client])
   (:import [java.io IOException]
+           [java.util.concurrent Semaphore TimeUnit]
            [java.util.concurrent.atomic AtomicInteger]
            [org.mqttkat MqttHandler]))
 
@@ -117,25 +118,57 @@
   ^long [^AtomicInteger ids]
   (inc (mod (.getAndIncrement ids) 65535)))
 
+(def connack-wait-ms
+  "How long a new bridge waits for the peer's CONNACK, which carries the
+   Receive Maximum the bridge must keep to."
+  5000)
+
+(def window-wait-ms
+  "How long a publish waits for a slot in the peer's Receive Maximum before
+   the peer is taken to have stopped acknowledging, and dropped."
+  5000)
+
 (defn- on-packet
-  "What the peer sends back. A bridge subscribes to nothing, so this is
-   acknowledgements: the QoS 2 handshake needs a PUBREL from this side, and
-   a PUBACK or PUBCOMP needs nothing."
-  [holder peer-id {:keys [packet-type packet-identifier] :as msg}]
-  (case packet-type
-    :PUBREC  (when-let [c @holder]
-               (client/send-message c {:packet-type :PUBREL :packet-identifier packet-identifier}))
-    :CONNACK (log/info "bridge to" peer-id "up")
-    :DISCONNECT (log/info "bridge to" peer-id "closed by the other end:" (:reason-code msg))
-    nil))
+  "What the peer sends back. A bridge subscribes to nothing, so this is its
+   CONNACK and acknowledgements.
+
+   Each acknowledgement that ends a QoS 1 or 2 flow gives a slot back to the
+   window (§4.9): PUBACK, PUBCOMP, or a PUBREC that refuses the message
+   (0x80 and up), which ends the flow there. Any other PUBREC is answered
+   with the PUBREL the QoS 2 handshake needs, and the slot stays taken until
+   the PUBCOMP."
+  [holder window peer-id {:keys [packet-type packet-identifier reason-code properties] :as msg}]
+  (let [release! #(when (realized? window) (.release ^Semaphore @window))
+        code     (bit-and 0xFF (long (or reason-code 0)))]
+    (case packet-type
+      :CONNACK (if (>= code 0x80)
+                 (log/warn "bridge to" peer-id "refused:" code)
+                 (do (log/info "bridge to" peer-id "up")
+                     ;; §3.2.2.3.3: absent means 65,535.
+                     (deliver window (Semaphore. (int (or (:receive-maximum properties) 65535))))))
+      :PUBACK  (release!)
+      :PUBCOMP (release!)
+      :PUBREC  (if (>= code 0x80)
+                 (release!)
+                 (when-let [c @holder]
+                   (try
+                     (client/send-message c {:packet-type :PUBREL :packet-identifier packet-identifier})
+                     (catch IOException e
+                       (log/debug "bridge to" peer-id "closed before its PUBREL went:" (.getMessage e))))))
+      :DISCONNECT (log/info "bridge to" peer-id "closed by the other end:" (:reason-code msg))
+      nil)))
 
 (defn- open!
-  "Connect to `peer` and introduce this broker. Does not wait for the
-   CONNACK: the publish that follows is behind the CONNECT on the same
-   socket, and the other end handles them in order."
+  "Connect to `peer` and introduce this broker, and wait for its CONNACK:
+   that is where the peer says how many unacknowledged QoS 1 and 2 publishes
+   it will take at once (§3.2.2.3.3), and a bridge that ignores it is
+   dropped by the peer for exceeding it — with everything it had in flight.
+   That happened at a few thousand QoS 2 messages a second, with the peer's
+   window at 128."
   [my-id peer-id {:keys [host port]}]
   (let [holder  (atom nil)
-        handler (MqttHandler. ^clojure.lang.IFn (fn [msg _] (on-packet holder peer-id msg)) 1)
+        window  (promise)
+        handler (MqttHandler. ^clojure.lang.IFn (fn [msg _] (on-packet holder window peer-id msg)) 1)
         c       (client/client host (int port) handler)]
     (reset! holder c)
     (client/send-message c {:packet-type      :CONNECT
@@ -144,7 +177,10 @@
                             :keep-alive       0
                             :clean-session?   true
                             :client-id        (str client-id-prefix my-id)})
-    {:client c :ids (AtomicInteger. 0)}))
+    (if-let [w (deref window connack-wait-ms nil)]
+      {:client c :ids (AtomicInteger. 0) :window w}
+      (do (try (client/close c) (catch Exception _ nil))
+          (throw (IOException. (str "no CONNACK from " peer-id " within " connack-wait-ms " ms")))))))
 
 (defn- connection!
   "The connection to `peer-id`, opened if there is none. nil if the peer was
@@ -189,9 +225,20 @@
    properties travel; the receiving broker strips them for its 3.1.1
    subscribers as it does for any publish."
   [my-id peer-id peer group-keys topic {:keys [qos payload properties]}]
-  (when-let [{:keys [client ids]} (connection! my-id peer-id peer)]
+  (when-let [{:keys [client ids ^Semaphore window]} (connection! my-id peer-id peer)]
     (let [qos (long (or qos 0))]
-      (try
+      (cond
+        ;; A slot in the peer's window first (§4.9). Waiting here is
+        ;; back-pressure on the publisher whose message this is, which is
+        ;; where the broker puts it everywhere else. A peer that frees no
+        ;; slot for this long has stopped acknowledging: it is dropped,
+        ;; and reconnected afresh on the next publish.
+        (and (pos? qos) (not (.tryAcquire window (long window-wait-ms) TimeUnit/MILLISECONDS)))
+        (do (log/warn "bridge to" peer-id "has not acknowledged anything for" window-wait-ms "ms; dropping it")
+            (drop! peer-id))
+
+        :else
+        (try
         (client/send-message client
                              (cond-> {:packet-type      :PUBLISH
                                       :protocol-version 5
@@ -203,8 +250,9 @@
                                       :properties       (with-shares (or properties {}) group-keys)}
                                (pos? qos) (assoc :packet-identifier (next-packet-id ids))))
         (catch IOException e
+          (when (pos? qos) (.release window))
           (log/warn "bridge to" peer-id "lost:" (.getMessage e))
-          (drop! peer-id))))))
+          (drop! peer-id)))))))
 
 (def control-prefix
   "Where an instruction to the other broker goes: a publish on a topic

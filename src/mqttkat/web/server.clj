@@ -40,8 +40,8 @@
             (keep (fn [pair]
                     (when (seq pair)
                       (let [[k v] (str/split pair #"=" 2)]
-                        [(java.net.URLDecoder/decode (or k "") "UTF-8")
-                         (java.net.URLDecoder/decode (or v "") "UTF-8")]))))
+                        [(java.net.URLDecoder/decode (str k) "UTF-8")
+                         (java.net.URLDecoder/decode (str v) "UTF-8")]))))
             (str/split text #"&")))))
 
 (defn handler

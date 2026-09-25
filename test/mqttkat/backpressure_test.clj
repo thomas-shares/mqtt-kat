@@ -365,7 +365,7 @@
 (defn- bare-connection
   "A Connection with a real SelectionKey and deliberately not started: this
    exercises the pause bookkeeping, not the reader and writer threads."
-  [^Selector selector]
+  ^Connection [^Selector selector]
   (let [ch (doto (SocketChannel/open) (.configureBlocking false))]
     (Connection. (.register ch selector 0) ch nil)))
 
@@ -412,6 +412,106 @@
         (is (zero? @orphaned)
             (str @orphaned " of " rounds " rounds left the publisher paused with"
                  " nobody holding it — its socket would never be read again"))))))
+
+(deftest a-drain-landing-inside-the-pause-cannot-orphan-the-publisher
+  (testing "drained() at the worst moment: while the publisher is being paused"
+    ;; The race above, made deterministic. The publisher's pauseReading() is
+    ;; where drained() used to be able to land between "become its waiter"
+    ;; and "pause it": it took the publisher out of the set and resumed it,
+    ;; then the pause arrived, and the publisher stayed stopped with nobody
+    ;; holding it — the stall behind a 1,000,000 message QoS 1 run that never
+    ;; finished. Here that drained() runs from inside pauseReading() itself,
+    ;; on every call, so the old order fails every time rather than once in
+    ;; a hundred full-suite runs.
+    (with-open [selector (Selector/open)]
+      (let [subscriber (bare-connection selector)
+            ch         (doto (SocketChannel/open) (.configureBlocking false))
+            ^Connection publisher (proxy [Connection] [(.register ch selector 0) ch nil]
+                         (pauseReading []
+                           (.drained subscriber)
+                           (let [^Connection this this] (proxy-super pauseReading))))
+            queued     (field-value subscriber "queuedCount")]
+        ;; Busy, so pauseUntilDrained's re-check does not release it.
+        (.set ^java.util.concurrent.atomic.AtomicInteger queued Integer/MAX_VALUE)
+        (.pauseUntilDrained subscriber publisher)
+        (is (.isReadingPaused publisher) "paused, as the subscriber is still busy")
+        (is (contains? (set (field-value subscriber "waiters")) publisher)
+            "and held by the subscriber, so its drain will let it go")
+        (.set ^java.util.concurrent.atomic.AtomicInteger queued 0)
+        (.drained subscriber)
+        (is (not (.isReadingPaused publisher)) "which it does")))))
+
+(deftest a-publisher-held-by-several-subscribers-waits-for-all-of-them
+  (testing "one subscriber draining does not release a publisher another still holds"
+    ;; A publisher feeds every subscriber of every topic it publishes to. As a
+    ;; flag, the pause was lifted by the first of them to drain, and the
+    ;; publisher went on filling the others until they refused QoS 1 messages.
+    (with-open [selector (Selector/open)]
+      (let [s1        (bare-connection selector)
+            s2        (bare-connection selector)
+            publisher (bare-connection selector)]
+        (doseq [^Connection s [s1 s2]]
+          (.set ^java.util.concurrent.atomic.AtomicInteger (field-value s "queuedCount") Integer/MAX_VALUE)
+          (.pauseUntilDrained s publisher))
+        (is (.isReadingPaused publisher))
+        (.set ^java.util.concurrent.atomic.AtomicInteger (field-value s1 "queuedCount") 0)
+        (.drained s1)
+        (is (.isReadingPaused publisher) "still paused: s2 is still congested")
+        (.set ^java.util.concurrent.atomic.AtomicInteger (field-value s2 "queuedCount") 0)
+        (.drained s2)
+        (is (not (.isReadingPaused publisher)) "released once the last holder drains"))))
+
+  (testing "the same subscriber holding the same publisher twice is one hold"
+    (with-open [selector (Selector/open)]
+      (let [s         (bare-connection selector)
+            publisher (bare-connection selector)
+            queued    (field-value s "queuedCount")]
+        (.set ^java.util.concurrent.atomic.AtomicInteger queued Integer/MAX_VALUE)
+        (.pauseUntilDrained s publisher)
+        (.pauseUntilDrained s publisher)
+        (.set ^java.util.concurrent.atomic.AtomicInteger queued 0)
+        (.drained s)
+        (is (not (.isReadingPaused publisher)) "one drain lets it go")))))
+
+(deftest a-qos-1-hold-waits-for-the-pending-queue-not-the-socket
+  (testing "a short socket write queue does not release a publisher held for QoS 1"
+    ;; A QoS 1 subscriber's socket only ever carries its in-flight window, so its
+    ;; write queue is short while hundreds wait in the broker's pending queue.
+    ;; Released on the socket's measure, as it was, the QoS 1 throttle let go of
+    ;; a publisher the moment it took it, and the pending queue ran up to its
+    ;; limit and refused messages.
+    (with-open [selector (Selector/open)]
+      (let [subscriber (bare-connection selector)
+            publisher  (bare-connection selector)]
+        (is (zero? (.get ^java.util.concurrent.atomic.AtomicInteger (field-value subscriber "queuedCount")))
+            "the socket queue is empty, as for a QoS 1 subscriber with a full window")
+        (.pauseUntilAcked subscriber publisher)
+        (is (.isReadingPaused publisher) "held, where pauseUntilDrained would have let go at once")
+        (.drained subscriber)
+        (is (.isReadingPaused publisher) "and the socket-queue signal is not the one that releases it")
+        (.ackDrained subscriber)
+        (is (not (.isReadingPaused publisher)) "the pending queue draining is"))))
+
+  (testing "a subscriber that closes lets its QoS 1 holds go"
+    (with-open [selector (Selector/open)]
+      (let [subscriber (bare-connection selector)
+            publisher  (bare-connection selector)]
+        (.pauseUntilAcked subscriber publisher)
+        (.close subscriber)
+        (is (not (.isReadingPaused publisher))))))
+
+  (testing "held for QoS 0 and for QoS 1 at once, it waits for both"
+    (with-open [selector (Selector/open)]
+      (let [subscriber (bare-connection selector)
+            publisher  (bare-connection selector)]
+        (.set ^java.util.concurrent.atomic.AtomicInteger (field-value subscriber "queuedCount") Integer/MAX_VALUE)
+        (.pauseUntilDrained subscriber publisher)
+        (.pauseUntilAcked subscriber publisher)
+        (.ackDrained subscriber)
+        (is (.isReadingPaused publisher) "the socket queue is still full")
+        (.set ^java.util.concurrent.atomic.AtomicInteger (field-value subscriber "queuedCount") 0)
+        (.drained subscriber)
+        (is (not (.isReadingPaused publisher)))))))
 
 (deftest draining-releases-every-waiter
   (testing "the ordinary case still works"

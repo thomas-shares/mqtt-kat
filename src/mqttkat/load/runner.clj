@@ -61,7 +61,8 @@
    :source-ips 0
    :churn 1
    :resubscribe 1
-   ;; 4 or 5. 5 is what a broker needs to send a client elsewhere.
+   ;; 4, 5 or :mixed — half of every pool in each. 5 is what a broker needs
+   ;; to send a client elsewhere.
    :mqtt 4
    ;; 1: every client goes to the first broker and follows wherever it is
    ;; sent — the brokers do the balancing, by their redirect policy.
@@ -87,7 +88,7 @@
    ["--source-ips N"       "spread clients over N source addresses; 0 to choose automatically"]
    ["--churn N"            "subscribers reconnected per second, 0 to disable (1)"]
    ["--resubscribe N"      "subscription cycles per second, 0 to disable (1)"]
-   ["--mqtt 4|5"           "protocol version the clients speak (4)"]
+   ["--mqtt 4|5|mixed"     "protocol version the clients speak; mixed is half 3.1.1, half 5 (4)"]
    ["--follow-redirects 1" "connect everything to the first broker and go where it sends you (0)"]])
 
 (defn parse-brokers
@@ -100,12 +101,24 @@
             {:host h :port (parse-long p)}))
         (str/split s #",")))
 
+(defn parse-mqtt
+  "4, 5 or :mixed, from the command line's text or the config file's value —
+   which may be the number, the keyword or the string. nil for anything else."
+  [v]
+  (case (str (if (keyword? v) (name v) v))
+    "4"     4
+    "5"     5
+    "mixed" :mixed
+    nil))
+
 (defn- coerce
   "A command-line value into the option's type, which the default says."
   [k v]
   (case k
     :brokers (parse-brokers v)
     :config  v
+    :mqtt    (or (parse-mqtt v)
+                 (throw (ex-info (str "--mqtt should be 4, 5 or mixed, not " v) {:arg v})))
     (if (string? (defaults k)) v (parse-long v))))
 
 (defn read-config
@@ -125,6 +138,8 @@
           (= k :brokers) (when-not (and (sequential? v) (every? #(and (map? %) (:host %) (:port %)) v))
                            (throw (ex-info (str ":brokers in " path " should be [{:host \"h\" :port 1883} ...]")
                                            {:config path})))
+          (= k :mqtt) (when-not (parse-mqtt v)
+                        (throw (ex-info (str ":mqtt in " path " should be 4, 5 or :mixed") {:config path :key k})))
           (string? expected) (when-not (string? v)
                                (throw (ex-info (str k " in " path " should be a string") {:config path :key k})))
           :else (when-not (integer? v)
@@ -148,8 +163,9 @@
                     (when-not (contains? defaults k)
                       (throw (ex-info (str "unknown option: " a) {:arg a})))
                     (recur more (assoc opts k (coerce k v))))))
-        from-file (some-> (:config given) read-config)]
-    (merge defaults from-file given)))
+        from-file (some-> (:config given) read-config)
+        merged    (merge defaults from-file given)]
+    (update merged :mqtt parse-mqtt)))
 
 (defn brokers-of
   "Where the clients connect: :brokers, or the one broker at :host and
@@ -170,6 +186,54 @@
     (if (follow-redirects? opts)
       (first bs)
       (nth bs (mod (long i) (count bs))))))
+
+(defn- lcm [a b]
+  (let [gcd (fn [a b] (if (zero? b) a (recur b (mod a b))))]
+    (quot (* a b) (gcd a b))))
+
+(defn mqtt5-for?
+  "Whether client `i` of a pool speaks version 5.
+
+   :mixed alternates, but not simply by `i`: client i goes to broker
+   (i mod brokers) and, for a subscriber, to topic (i mod topics), and
+   alternating on i would line the two versions up with brokers or topics —
+   with two topics, every 3.1.1 subscriber on one and every version 5
+   subscriber on the other. So it alternates within each broker-and-topic
+   cell: the clients that share a cell are the ones whose i agree modulo
+   `cell`, and their turn in it is (quot i cell). Every broker and every
+   topic gets both kinds. The cell's own number is added in, so neighbouring
+   cells start on opposite versions: with an odd number of clients per cell
+   the odd one out goes to 3.1.1 in half the cells and to 5 in the other
+   half, and the whole pool still comes out even — 300 subscribers over
+   three brokers and twenty topics are five a cell, which alternating alone
+   split 180 to 120.
+
+   Plain 4 still means 5 when redirects are followed, as it always has:
+   only a version 5 client can be told to go elsewhere."
+  [opts i cell]
+  (case (:mqtt opts)
+    5      true
+    :mixed (odd? (+ (quot (long i) (long cell)) (mod (long i) (long cell))))
+    (follow-redirects? opts)))
+
+(defn- cell-size
+  "The length of the pattern client placement repeats with: brokers, and for
+   a pool that subscribes, topics as well."
+  [opts subscribes?]
+  (let [nb (count (brokers-of opts))]
+    (if subscribes? (lcm nb (max 1 (long (:topics opts)))) nb)))
+
+(defn version-tally
+  "How many of `clients` speak each version: {:v3.1.1 n, :v5 m}."
+  [clients]
+  (let [v5 (count (filter :mqtt5? clients))]
+    {:v3.1.1 (- (count clients) v5) :v5 v5}))
+
+(defn mqtt-str [opts]
+  (case (:mqtt opts)
+    :mixed "3.1.1 and 5, half each"
+    5      "5"
+    (if (follow-redirects? opts) "5 (to follow redirects)" "3.1.1")))
 
 (defn landing-tally
   "How many of `clients` ended up on each broker, as \"host:port\" -> n."
@@ -233,8 +297,9 @@
 (defn- open-pool!
   "Open `n` clients and wait for all their CONNACKs at once, rather than a
    round trip each."
-  [opts prefix n shared]
+  [opts prefix n shared subscribes?]
   (let [addrs (source-addresses (:host (first (brokers-of opts))) n (:source-ips opts))
+        cell  (cell-size opts subscribes?)
         clients (mapv (fn [i]
                         (let [{:keys [host port]} (broker-for opts i)]
                           (lc/open! (assoc shared
@@ -242,6 +307,7 @@
                                            :client-id (str prefix "-" i)
                                            :index i
                                            :window (:window opts)
+                                           :mqtt5? (mqtt5-for? opts i cell)
                                            :source-address (nth addrs (mod i (count addrs)))))))
                       (range n))]
     (doseq [c clients]
@@ -384,7 +450,7 @@
   "Everything the run measured. Returns the map as well as printing it, so a
    test can assert on it."
   [{:keys [opts counts service response ack elapsed-ms expected outstanding churn
-           lateness-us blocked-us burst ended setup-ms total-ms drain landed]}]
+           lateness-us blocked-us burst ended setup-ms total-ms drain landed versions]}]
   (let [attempted (:attempted counts 0)
         published (:published counts 0)
         received  (:received counts 0)
@@ -396,7 +462,7 @@
         all-secs  (max 0.001 (/ (double (or total-ms elapsed-ms)) 1000.0))
         payload   (max (long (:size opts)) lc/header-bytes)
         result {:opts opts :counts counts :expected expected :outstanding outstanding
-                :churn churn :landed landed
+                :churn churn :landed landed :versions versions
                 :elapsed-ms elapsed-ms :ended (or ended :finished) :setup-ms setup-ms
                 :publish-rate (/ (double published) secs)
                 :deliver-rate (/ (double received) all-secs)
@@ -425,8 +491,12 @@
       (println (format "    redirects   %d clients sent on; landed on %s"
                        (:redirected counts 0)
                        (str/join ", " (map (fn [[b n]] (str b " " n)) landed)))))
-    (println (format "    messages    MQTT %d, QoS %d, %d byte payloads, window %d"
-                     (:mqtt opts) (:qos opts) (:size opts) (:window opts)))
+    (println (format "    messages    MQTT %s, QoS %d, %d byte payloads, window %d"
+                     (mqtt-str opts) (:qos opts) (:size opts) (:window opts)))
+    (when (= :mixed (:mqtt opts))
+      (println (format "    versions    publishers %s, subscribers %s"
+                       (str (get-in versions [:publishers :v3.1.1]) " × 3.1.1 + " (get-in versions [:publishers :v5]) " × 5")
+                       (str (get-in versions [:subscribers :v3.1.1]) " × 3.1.1 + " (get-in versions [:subscribers :v5]) " × 5"))))
     (println (format "    target      %s%s"
                      (if (pos? (long (:rate opts))) (str (:rate opts) "/s") "unlimited")
                      (if (> (long (or burst 1)) 1)
@@ -600,7 +670,8 @@
                                              :host host :port port
                                              :client-id (str "load-churn-" i)
                                              :index (int t)
-                                             :window (:window opts)))]
+                                             :window (:window opts)
+                                             :mqtt5? (mqtt5-for? opts i (cell-size opts true))))]
                       (when (lc/await-connack c 30000)
                         (lc/subscribe! c (topic-name t) qos)
                         (lc/await-suback c 30000))
@@ -681,7 +752,6 @@
         ack      (stats/histogram)
         shared   {:counters counters :service-latency service
                   :response-latency response :ack-latency ack
-                  :mqtt5? (= 5 (long (or (:mqtt opts) 4)))
                   :follow-redirects? (follow-redirects? opts)}
         topic-names (mapv topic-name (range topics))
         ^"[Ljava.util.concurrent.atomic.LongAdder;" published-per-topic
@@ -703,7 +773,7 @@
     ;; stopped answering.
     (let [setup-t0 (System/currentTimeMillis)
           t0   (System/currentTimeMillis)
-          subs (open-pool! opts "load-sub" subscribers shared)
+          subs (open-pool! opts "load-sub" subscribers shared true)
           _    (println (format "    %d subscribers connected in %d ms"
                                 subscribers (- (System/currentTimeMillis) t0)))
           t1   (System/currentTimeMillis)
@@ -739,7 +809,7 @@
                                      (:churn opts) (:resubscribe opts)))
                     c))
           t2   (System/currentTimeMillis)
-          pubs (open-pool! opts "load-pub" publishers shared)
+          pubs (open-pool! opts "load-pub" publishers shared false)
           _    (println (format "    %d publishers connected in %d ms"
                                 publishers (- (System/currentTimeMillis) t2)))
           setup-ms (- (System/currentTimeMillis) setup-t0)
@@ -789,6 +859,7 @@
                                         :unsubacks (:unsubacks cs)}))]
                   (report {:opts opts
                            :landed (landing-tally (concat pubs subs))
+                           :versions {:publishers (version-tally pubs) :subscribers (version-tally subs)}
                            :counts (stats/read-counters counters)
                            :service (stats/snapshot service)
                            :response (stats/snapshot response)

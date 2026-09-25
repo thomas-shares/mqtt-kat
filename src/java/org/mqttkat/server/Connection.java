@@ -177,6 +177,23 @@ public class Connection {
 	 */
 	private final Set<Connection> waiters = ConcurrentHashMap.newKeySet();
 
+	/**
+	 * Publishers held for the QoS 1 and 2 path, apart from `waiters`.
+	 *
+	 * The two measure different congestion. `waiters` are released when this
+	 * connection's socket write queue is short, which is the backlog for QoS 0.
+	 * For QoS 1 and 2 the socket only ever holds the in-flight window; the
+	 * backlog is the broker's pending queue (mqttkat.handlers), and a short
+	 * write queue says nothing about it. Sharing one set, a publisher the
+	 * QoS 1 throttle had just paused was released at once — often by the very
+	 * re-check that paused it — so that throttle never held, and the pending
+	 * queue ran up to its limit and refused messages: fifteen to twenty
+	 * thousand in a million-message run. These are released only by the
+	 * pending queue draining, which the broker reports with ackDrained(), and
+	 * by this connection closing.
+	 */
+	private final Set<Connection> ackWaiters = ConcurrentHashMap.newKeySet();
+
 	private volatile boolean readingPaused = false;
 
 	/**
@@ -185,7 +202,19 @@ public class Connection {
 	 * must not undo a pause this connection put on itself, or the other way
 	 * round.
 	 */
-	private volatile boolean pausedByPeers = false;
+	/**
+	 * How many congested subscribers are holding this connection's reads — a
+	 * count, not a flag. A publisher feeds every subscriber of every topic it
+	 * publishes to, and several of them fall behind at once; as a flag, the
+	 * first of them to drain resumed it while the rest were still congested,
+	 * so it went on feeding them until their queues passed pending-limit and
+	 * QoS 1 messages were refused — twenty thousand of them in a million
+	 * message run at 2,000 subscribers. Counted, it reads again only when the
+	 * last subscriber holding it lets go. Each successful add to a
+	 * subscriber's waiters is matched by exactly one successful removal, so
+	 * the count cannot drift.
+	 */
+	private final AtomicInteger peerHolds = new AtomicInteger();
 	private volatile boolean pausedByInbound = false;
 
 	/**
@@ -364,6 +393,7 @@ public class Connection {
 		running = false;
 		// Nobody may be left throttled on a connection that no longer exists.
 		drained();
+		ackDrained();
 		inbound.offer(STOP_READING);
 		outbound.offer(STOP_WRITING);
 	}
@@ -382,7 +412,7 @@ public class Connection {
 
 	/** Apply whichever of the two reasons currently hold to the interest ops. */
 	private synchronized void applyReadInterest() {
-		boolean pause = pausedByPeers || pausedByInbound;
+		boolean pause = peerHolds.get() > 0 || pausedByInbound;
 		if (pause == readingPaused) {
 			return;
 		}
@@ -401,15 +431,19 @@ public class Connection {
 		}
 	}
 
-	/** Stop reading this connection's socket on a congested subscriber's behalf. */
+	/** One more congested subscriber holding this connection's reads. */
 	public void pauseReading() {
-		pausedByPeers = true;
+		peerHolds.incrementAndGet();
 		applyReadInterest();
 	}
 
-	/** Release the pause a subscriber put on this connection. */
+	/**
+	 * One subscriber fewer holding this connection's reads; it reads again when
+	 * none is left. Never below zero, so a release with no hold behind it — a
+	 * reset, in the tests — cannot bank a credit against the next pause.
+	 */
 	public void resumeReading() {
-		pausedByPeers = false;
+		peerHolds.updateAndGet(n -> Math.max(0, n - 1));
 		applyReadInterest();
 	}
 
@@ -428,15 +462,34 @@ public class Connection {
 		if (publisher == null || publisher == this) {
 			return;
 		}
-		waiters.add(publisher);
+		// Pause first, then become its waiter — in that order. The other way
+		// round, a drained() on another thread could land between the two:
+		// take the publisher out of the set and resume it, and then the pause
+		// arrived — leaving it stopped with nobody holding it. Its socket was
+		// never read again: its last window of publishes sat unread in the
+		// kernel, got no PUBACK, and the publisher blocked on its full window
+		// for good. A 1,000,000 message QoS 1 run at 2,000 subscribers left
+		// four to nine publishers like that, each with exactly its window of
+		// a hundred messages unread.
+		//
+		// This way round, whatever drained() does in between, it cannot undo a
+		// pause it will not also release: if it runs before the add it does not
+		// see the publisher, which is then added still paused and released by
+		// the next drained(); if it runs after, the resume comes after the
+		// pause and wins.
 		publisher.pauseReading();
+		// Already held by this subscriber: the hold just taken is one too many,
+		// and would outlive the one release this subscriber's drain will give.
+		if (!waiters.add(publisher)) {
+			publisher.resumeReading();
+		}
 		// Re-check, because the two lines above are not one step. If this
-		// connection drained, or closed, between the add and the pause, then
-		// the drained() that would have released this publisher has already
-		// run and seen an empty set — leaving it paused with nothing left to
-		// wake it. On the QoS 1 path that heals on the next acknowledgement;
-		// QoS 0 has none, and a subscriber that has gone will never drain
-		// again, so the publisher would stay stopped for good.
+		// connection drained, or closed, before the add, then the drained()
+		// that would have released this publisher has already run — leaving
+		// it paused with nothing left to wake it. On the QoS 1 path that heals
+		// on the next acknowledgement; QoS 0 has none, and a subscriber that
+		// has gone will never drain again, so the publisher would stay stopped
+		// for good.
 		//
 		// Locking instead would mean holding this connection's monitor while
 		// taking the publisher's, and two clients each publishing to a topic
@@ -478,6 +531,38 @@ public class Connection {
 		// close — picks it up.
 		for (Connection publisher : waiters) {
 			if (waiters.remove(publisher)) {
+				publisher.resumeReading();
+			}
+		}
+	}
+
+	/**
+	 * Stop reading `publisher` until the broker reports, with ackDrained(),
+	 * that this connection's pending queue has drained. For the QoS 1 and 2
+	 * path; see `ackWaiters`. The same order as pauseUntilDrained — pause,
+	 * then hold — and for the same reason. The caller re-checks its queue
+	 * after this returns, which covers a drain that landed before the add.
+	 */
+	public void pauseUntilAcked(Connection publisher) {
+		if (publisher == null || publisher == this) {
+			return;
+		}
+		publisher.pauseReading();
+		if (!ackWaiters.add(publisher)) {
+			publisher.resumeReading();
+		}
+		if (!running) {
+			ackDrained();
+		}
+	}
+
+	/** Let every publisher held by pauseUntilAcked read again. */
+	public void ackDrained() {
+		if (ackWaiters.isEmpty()) {
+			return;
+		}
+		for (Connection publisher : ackWaiters) {
+			if (ackWaiters.remove(publisher)) {
 				publisher.resumeReading();
 			}
 		}
