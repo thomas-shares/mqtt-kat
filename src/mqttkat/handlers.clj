@@ -369,10 +369,17 @@
            (fn [m] (if (= client-key (get m client-id)) (dissoc m client-id) m)))))
 
 (defonce ^:private session-expiries
-  ;; client-id -> the job that will discard its parked session. Cancelled when
-  ;; the client comes back, or the session would be torn out from under the
-  ;; live connection that resumed it.
+  ;; client-id -> {:job the timer that will discard its parked session, :token
+  ;; what that timer has to find here to go ahead}. Cancelled when the client
+  ;; comes back, or the session would be torn out from under the live
+  ;; connection that resumed it.
   (atom {}))
+
+(defonce ^:private session-expiry-lock
+  ;; Held by cancel-session-expiry! and by an expiry deciding to go ahead, so
+  ;; a cancel either lands first and the expiry stands down, or waits until
+  ;; the session is gone and the client is let in to a fresh one.
+  (Object.))
 
 (defn session-expiry-seconds
   "How long this client's session outlives its connection (§3.1.2.11.2).
@@ -407,9 +414,31 @@
            (long seconds))))
 
 (defn cancel-session-expiry! [client-id]
-  (when-let [job (get @session-expiries client-id)]
-    (swap! session-expiries dissoc client-id)
-    (try (at/kill job) (catch Exception _ nil))))
+  (locking session-expiry-lock
+    (when-let [{:keys [job]} (get @session-expiries client-id)]
+      (swap! session-expiries dissoc client-id)
+      (try (at/kill job) (catch Exception _ nil)))))
+
+(defn expire-session!
+  "Discard `client-id`'s parked session, if `token` is still the expiry filed
+   for it.
+
+   at/kill stops a job that has not started, not one already running. The job
+   used to take itself out of session-expiries and then discard, so a reconnect
+   landing in between found nothing to cancel, resumed the session — CONNACK
+   saying it was present — and then had discard-session! empty *outbound* and
+   *inflight* under it, those being keyed by client-id and not by connection.
+   The redelivery that followed found nothing, and the next delivery numbered
+   its identifiers from 1 again. The token also stops an expiry that was held
+   up past a resume and a second disconnect from discarding the session that
+   second disconnect parked, whose own timer has not run out."
+  [client-id token]
+  (locking session-expiry-lock
+    (if (identical? token (:token (get @session-expiries client-id)))
+      (do (swap! session-expiries dissoc client-id)
+          (log/debug "session expired for" client-id)
+          (discard-session! client-id))
+      (log/debug "expiry for" client-id "was cancelled before it ran"))))
 
 (def ^:private never-expires
   "0xFFFFFFFF — §3.1.2.11.2's \"do not expire\", not a very long timer."
@@ -419,17 +448,20 @@
   "Discard the parked session once `seconds` have passed."
   [client-id seconds]
   (when (and client-id (pos? (long seconds)) (not= (long seconds) never-expires))
-    (cancel-session-expiry! client-id)
-    (swap! session-expiries assoc client-id
-           (at/after (* 1000 (long seconds))
-                     (fn []
-                       (swap! session-expiries dissoc client-id)
-                       (try
-                         (log/debug "session expired for" client-id)
-                         (discard-session! client-id)
-                         (catch Throwable t
-                           (log/error t "expiring a session failed"))))
-                     my-pool))))
+    ;; Filed under the lock, so a timer short enough to fire before it is filed
+    ;; waits for it rather than finding someone else's token and standing down.
+    (locking session-expiry-lock
+      (cancel-session-expiry! client-id)
+      (let [token (Object.)]
+        (swap! session-expiries assoc client-id
+               {:token token
+                :job   (at/after (* 1000 (long seconds))
+                                 (fn []
+                                   (try
+                                     (expire-session! client-id token)
+                                     (catch Throwable t
+                                       (log/error t "expiring a session failed"))))
+                                 my-pool)})))))
 
 (defn add-client! [{:keys [client-key client-id clean-session?] :as msg}]
   (if (and (false? clean-session?)
