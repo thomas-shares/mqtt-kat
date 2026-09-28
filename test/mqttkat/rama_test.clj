@@ -480,7 +480,7 @@
             (record! conn (cluster/->disconnect c))
             (is (tu/wait-until #(and (contains? (matches conn "away/t") "away-1")
                                      (not (present-in-trie? conn "away/t" "away-1")))))
-            (is (= {:brokers {} :skip #{} :queue [{:client-id "away-1" :qos 1}] :holders {}}
+            (is (= {:brokers {} :skip #{} :queue [{:client-id "away-1" :qos 1}] :holders {} :groups {}}
                    (cluster/plan conn "away/t"))
                 "away: queued here, forwarded nowhere")
 
@@ -833,6 +833,67 @@
                             (tu/close! pub)
                             (record! conn {:event :broker-down :broker-id "peer-dead"
                                            :at (System/currentTimeMillis)}))))))
+
+                  (testing "a shared group whose chosen broker cannot be reached is served by another member's"
+                    ;; The group went to one broker per publish, and if that
+                    ;; broker was dead the message went nowhere: no other
+                    ;; member was ever asked.
+                    (let [dead-port   (with-open [s (java.net.ServerSocket. 0)] (.getLocalPort s))
+                          member-on   (fn [id b run filter-topic group]
+                                        (let [c (assoc (cluster/->connect (connect-map id))
+                                                       :broker-id b :incarnation run)]
+                                          (record! conn c)
+                                          (record! conn (cluster/->subscribe
+                                                         {:connect-id (:connect-id c) :client-id id
+                                                          :filter (str "$share/" group "/" filter-topic)
+                                                          :entry (entry (str "$share/" group "/" filter-topic) 1
+                                                                        :topic-filter filter-topic :share-group group)}))))]
+                      (record! conn {:event :broker-up :broker-id "peer-dead2" :incarnation "d2"
+                                     :host "127.0.0.1" :port dead-port :at (System/currentTimeMillis)})
+                      (is (tu/wait-until #(contains? @(:brokers conn) "peer-dead2")))
+                      (try
+                        (testing "by this broker, when a member is here"
+                          (let [local (tu/connect-v5! "grp-local-member")
+                                plain (tu/connect-v5! "grp-plain")
+                                pub   (tu/connect-v5! "grp-pub")]
+                            (try
+                              (member-on "grp-dead-member" "peer-dead2" "d2" "grp/#" "h")
+                              (client/send-message (:client local) (subscribe-msg "$share/h/grp/#" 1 1 :version 5))
+                              (tu/expect! (:ch local) :SUBACK)
+                              (client/send-message (:client plain) (subscribe-msg "grp/#" 1 1 :version 5))
+                              (tu/expect! (:ch plain) :SUBACK)
+                              (is (tu/wait-until #(= 2 (count (filter :share-group (cluster/matching-subscriptions conn "grp/t"))))))
+                              (dotimes [i 4]
+                                (client/send-message (:client pub) (publish-msg "grp/t" (str "g" i) 1 (+ 50 i))))
+                              (is (= 4 (count (:PUBLISH (tu/take-n! (:ch local) 4 5000))))
+                                  "every one to the member here, the two meant for the dead broker as well")
+                              (is (= 4 (count (:PUBLISH (tu/take-n! (:ch plain) 8 1500))))
+                                  "and the ordinary subscriber here once each, not again for the group")
+                              (finally (tu/close! local plain pub)))))
+
+                        (testing "by another broker, when the members are elsewhere: a copy for the group alone"
+                          (let [pub    (tu/connect-v5! "grp2-pub")
+                                before (count (publishes))
+                                mine   #(filterv (fn [p] (= "grp2/t" (:topic p))) (drop before (publishes)))
+                                only?  (fn [p] (some (fn [[k _]] (= bridge/groups-only-property k))
+                                                     (get-in p [:properties :user-properties])))]
+                            (try
+                              (member-on "grp2-dead-member" "peer-dead2" "d2" "grp2/#" "k")
+                              (member-on "grp2-live-member" "peer-x" "peer-run" "grp2/#" "k")
+                              (is (tu/wait-until #(= 2 (count (filter :share-group (cluster/matching-subscriptions conn "grp2/t"))))))
+                              (dotimes [i 4]
+                                (client/send-message (:client pub) (publish-msg "grp2/t" (str "k" i) 1 (+ 60 i))))
+                              (is (tu/wait-until #(= 4 (count (mine))) 5000) "all four to the broker that is there")
+                              (is (= 2 (count (filter only? (mine))))
+                                  "the two meant for the dead broker marked for the group alone")
+                              (is (every? #(some (fn [[k v]] (and (= bridge/share-property k) (= "k/grp2/#" v)))
+                                                 (get-in % [:properties :user-properties]))
+                                          (mine))
+                                  "and every one telling it which group to serve")
+                              (finally (tu/close! pub)))))
+                        (finally
+                          (record! conn {:event :broker-down :broker-id "peer-dead2"
+                                         :at (System/currentTimeMillis)})))))
 
                   (testing "a retained publish here is retained in Rama, an expiry clears it there too"
                     (let [pub   (tu/connect-v5! "retainer")
@@ -1248,7 +1309,12 @@
 
                   (testing "this broker announces itself the same way"
                     @(cluster/record! conn (cluster/->broker-up "here" 1883))
-                    (is (tu/wait-until #(= "here" (:host (get @(:brokers peer) cluster/broker-id)))))
+                    ;; Both copies, not only the one looked at: the sample below
+                    ;; is handled against `conn`, and a broker whose own copy
+                    ;; does not show it yet announces itself again — under its
+                    ;; real address, over "here".
+                    (is (tu/wait-until #(and (= "here" (:host (get @(:brokers peer) cluster/broker-id)))
+                                             (= "here" (:host (get @(:brokers conn) cluster/broker-id))))))
                     (is (= 1883 (:port (get @(:brokers peer) cluster/broker-id))))
                     (is (= cluster/incarnation (:incarnation (get @(:brokers peer) cluster/broker-id))))
 
