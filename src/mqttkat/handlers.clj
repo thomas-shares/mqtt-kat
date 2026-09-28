@@ -352,6 +352,13 @@
   [client-id]
   (get @*live-clients* client-id))
 
+(defn live-sessions
+  "Every client connected here now, as *clients* holds it: the terms of its
+   CONNECT, its connect-id and its subscriptions."
+  []
+  (let [clients @*clients*]
+    (keep (fn [[_ key]] (get clients key)) @*live-clients*)))
+
 (defn- register-live! [client-id client-key]
   (when client-id
     (swap! *live-clients* assoc client-id client-key)))

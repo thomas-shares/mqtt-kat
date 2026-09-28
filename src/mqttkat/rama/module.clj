@@ -78,6 +78,10 @@
      {:event :setting      :key :value :at}
      {:event :redirected   :client-id :to :at}
      {:event :lost         :client-id :broker-id :incarnation :at}
+     {:event :still-connected
+                           :connect-id :client-id :broker-id :incarnation
+                           :protocol-version :clean-session? :keep-alive
+                           :session-expiry-interval :subscriptions :at}
 
    `:filter` is the filter as the client sent it — `$share/g/a/#` for a
    shared subscription — and is unique per client. `:entry` is the broker's
@@ -85,6 +89,10 @@
    for that share), `:qos`, and the version 5 options when present. `:lost`
    is never appended by a broker: the topology appends it to itself, one per
    client a broker held when it was replaced (see :broker-up).
+   `:still-connected` is a broker saying, after it has announced itself
+   again, that a connection the sweep took for lost is in fact still up:
+   the CONNECT's terms, as `:connect` has them, and the subscriptions the
+   broker holds for it, filter -> entry.
 
    The connect-id ties every event about a connection to that connection,
    and the incarnation ties every connection to one run of a broker. Both
@@ -222,9 +230,47 @@
                       :connected-at            Long
                       :disconnected-at         Long
                       :connections             Long
+                      :lost?                   Boolean
                       :expires-at              Long
                       :sent-to                 String
                       :subscriptions           (map-schema String Object)}))
+
+(defn- cluster-entry
+  "The entry as `$$subscriptions` stores it: the broker's, plus who it is
+   for, which broker holds the connection, and whether it is up — what
+   another broker needs to deliver to it, forward, or queue."
+  [entry client-id broker-id connected?]
+  (assoc entry :client-id client-id :broker-id broker-id :connected? connected?))
+
+(defn still-connected-session
+  "The record for a connection a broker says is still up, from what the
+   record `current` had and the `:still-connected` `record`: connected
+   again, on the run that says so, with the subscriptions that run holds.
+   The CONNECT's terms are the record's own where it still has them — it
+   was written from that CONNECT — and the broker's where it has none, a
+   session that expired in the meantime."
+  [current record]
+  (merge (select-keys record [:protocol-version :clean-session? :keep-alive
+                              :session-expiry-interval])
+         (select-keys current [:protocol-version :clean-session? :keep-alive
+                               :session-expiry-interval])
+         {:connect-id    (:connect-id record)
+          :broker-id     (:broker-id record)
+          :incarnation   (:incarnation record)
+          :connected?    true
+          :connected-at  (or (:connected-at current) (:at record))
+          :connections   (or (:connections current) 1)
+          :subscriptions (or (:subscriptions record) {})}))
+
+(defn still-connected-shards
+  "What `$$subscriptions` has to change for a connection that is still up:
+   [shard filter entry] for each subscription the broker holds, as the
+   shard stores it, and [shard filter nil] for each the record had and the
+   broker does not — one a clean session lost with it, say, or one given
+   up while the record was not listening."
+  [old-subs new-subs client-id broker-id]
+  (vec (for [f (distinct (concat (keys new-subs) (keys old-subs)))]
+         [(shard-of f) f (some-> (get new-subs f) (cluster-entry client-id broker-id true))])))
 
 (defn partition-key
   "What a session event is partitioned by: the client it is about; for the
@@ -241,13 +287,6 @@
    one value: broker-id -> {:host :port :at}, small, rewritten whole on the
    rare occasion a broker comes or goes."
   "brokers")
-
-(defn- cluster-entry
-  "The entry as `$$subscriptions` stores it: the broker's, plus who it is
-   for, which broker holds the connection, and whether it is up — what
-   another broker needs to deliver to it, forward, or queue."
-  [entry client-id broker-id connected?]
-  (assoc entry :client-id client-id :broker-id broker-id :connected? connected?))
 
 (defmodule MqttKatModule [setup topologies]
   ;; Partitioned by client id: a record lands on the task that owns its
@@ -381,6 +420,13 @@
           (local-transform> [(keypath *registry) NONE-ELEM
                              (termval (run-key *b (get *entry :incarnation)))]
                             $$dead-runs))
+        ;; And the run announcing itself is not over, whatever the sweep made
+        ;; of it: a broker cut off from the cluster for long enough to be
+        ;; forgotten says so once it can. The sweep stops letting its clients
+        ;; go; the ones already let go the broker states again, as
+        ;; :still-connected, once it sees itself listed.
+        (local-transform> [(keypath *registry) (set-elem (run-key *b (get *record :incarnation))) NONE>]
+                          $$dead-runs)
 
         ;; Only onto an entry that is there: a report from a broker that has
         ;; withdrawn, or has not announced yet, must not conjure one up
@@ -447,6 +493,19 @@
 
         ;; ── the sessions ───────────────────────────────────────────────
         (default>)
+        ;; A :lost was decided on a sweep; the run it names may have announced
+        ;; itself since, and a run that is back holds its clients. Asked of
+        ;; the registry's partition before anything is read here.
+        (<<if (= *event :lost)
+          (identity registry-key :> *registry)
+          (|hash *registry)
+          (local-select> [(keypath *registry)
+                          (view contains? (run-key (get *record :broker-id) (get *record :incarnation)))]
+                         $$dead-runs :> *applies?)
+          (|hash *client-id)
+          (else>)
+          (identity true :> *applies?))
+        (filter> *applies?)
         ;; One read for every event: the count and the subscriptions have to
         ;; come from somewhere, and the same read says whether this event is
         ;; about the connection on record. Read and write happen on one task
@@ -547,6 +606,14 @@
                 (ops/current-task-id :> *task)
                 (local-transform> [(keypath *task (expiry-key *expires *client-id)) (termval *connect-id)]
                                   $$expiring)))
+            ;; Lost is noted, and only lost: a broker that turns out to be
+            ;; alive may take back a connection the sweep let go, never one
+            ;; that ended — a DISCONNECT, a dropped socket — however late
+            ;; the broker's word arrives.
+            (<<if (= *event :lost)
+              (local-transform> [(keypath *client-id) :lost? (termval true)] $$sessions)
+              (else>)
+              (local-transform> [(keypath *client-id) :lost? NONE>] $$sessions))
             (run-key *b (get *current :incarnation) :> *run)
             (|hash *run)
             (local-transform> [(keypath *run) (set-elem *client-id) NONE>] $$broker->clients)
@@ -561,6 +628,34 @@
               ;; the queue, not the wire.
               (local-transform> [(keypath *shard *filter *client-id :connected?) (termval false)]
                                 $$subscriptions)))
+
+          ;; A broker that was forgotten, alive after all, stating a
+          ;; connection it still holds. Taken only for the connection the
+          ;; sweep let go — the one on record, marked lost — or for a client
+          ;; with no record left at all, its session having expired while it
+          ;; was taken for away. Anything else is a client that has moved on
+          ;; or gone, and the broker's word is late.
+          (case> (= *event :still-connected))
+          (<<if (or> (nil? *current)
+                     (and> (= *connect-id *last-id) (get *current :lost?)))
+            (get *record :broker-id :> *b)
+            (get *record :subscriptions {} :> *now-subs)
+            (local-transform> [(keypath *client-id) (termval (still-connected-session *current *record))]
+                              $$sessions)
+            (<<if (get *current :expires-at)
+              (ops/current-task-id :> *task)
+              (local-transform> [(keypath *task (expiry-key (get *current :expires-at) *client-id)) NONE>]
+                                $$expiring))
+            (run-key *b (get *record :incarnation) :> *run)
+            (|hash *run)
+            (local-transform> [(keypath *run) NONE-ELEM (termval *client-id)] $$broker->clients)
+            (ops/explode (still-connected-shards *subs *now-subs *client-id *b) :> [*shard *filter *entry])
+            (|hash *shard)
+            (<<if *entry
+              (local-transform> [(keypath *shard *filter *client-id) (termval *entry)] $$subscriptions)
+              (else>)
+              (local-transform> [(keypath *shard *filter *client-id) NONE>] $$subscriptions)
+              (local-transform> [(keypath *shard *filter) (pred empty?) NONE>] $$subscriptions)))
 
           ;; Sent to another broker (§4.13): noted on the record so that
           ;; broker takes the client rather than sending it on again. The

@@ -215,6 +215,17 @@
            :at         (System/currentTimeMillis)}
     session-expiry-interval (assoc :session-expiry-interval (long session-expiry-interval))))
 
+(defn ->still-connected
+  "The record saying a connection this broker holds is still up: the
+   CONNECT's terms as ->connect has them, and every subscription the
+   connection holds, filter -> entry. Takes the broker's own client map,
+   which has both. See restate-clients!."
+  [{:keys [subscribed-topics] :as client}]
+  (assoc (->connect client)
+         :event :still-connected
+         :subscriptions (into {} (map (fn [e] [(or (:filter e) (:topic-filter e)) e]))
+                              subscribed-topics)))
+
 (defn ->subscribe
   "The record for a subscription the broker has accepted: the filter as the
    client sent it, and the broker's own entry for it."
@@ -416,11 +427,53 @@
       (when-not (identical? ov nv)
         (retained/sync! topic (some-> nv text->payload))))))
 
+(declare ^:dynamic *connection*)
+
+(defn restate-clients!
+  "Tell the cluster about every connection this broker holds, as
+   :still-connected. For a broker that was forgotten while it lived — cut
+   off from the cluster for longer than broker-forgotten-after-millis — and
+   is listed again: the sweep let its clients go meanwhile, and until they
+   are recorded as here again the other brokers queue their messages
+   instead of forwarding them. The cluster takes each only for a
+   connection it let go that way, so stating one it already has costs an
+   append and changes nothing."
+  [conn]
+  (let [clients (remove #(bridge/bridge? (:client-id %)) (handlers/live-sessions))]
+    (log/info "listed in the cluster again - restating" (count clients) "connections")
+    (doseq [client clients
+            :when (:connect-id client)]
+      (record! conn (->still-connected client)))))
+
+(defonce ^:private listing
+  ;; Whether this run has seen itself in the registry, and whether it has
+  ;; seen itself dropped from it since: what tells a broker listed again
+  ;; from one listed for the first time.
+  (atom {:listed? false :dropped? false}))
+
+(defn- note-own-listing!
+  "Follow this run's own entry through a registry change, and restate this
+   broker's connections when it comes back after being dropped. On seeing
+   itself listed again rather than on announcing itself: by then the
+   cluster has taken the run off its dead runs, so a :lost still on its way
+   finds the run live and lets nobody go."
+  [conn new]
+  (when (identical? conn @*connection*)
+    (let [here?          (= incarnation (get-in new [broker-id :incarnation]))
+          [before after] (swap-vals! listing
+                                     (fn [{:keys [listed? dropped?]}]
+                                       (if here?
+                                         {:listed? true :dropped? false}
+                                         {:listed? listed? :dropped? (or dropped? listed?)})))]
+      (when (and here? (:dropped? before) (not (:dropped? after)))
+        (restate-clients! conn)))))
+
 (defn- registry-changed!
   "The registry as Rama now has it. A broker that has gone is also a
    connection the bridge should not keep."
-  [brokers old new]
+  [conn brokers old new]
   (reset! brokers (or new {}))
+  (note-own-listing! conn new)
   (doseq [gone (remove #(contains? new %) (keys old))]
     (log/info "broker" gone "left the cluster")
     (bridge/drop! gone))
@@ -459,7 +512,7 @@
               [(r/foreign-proxy (keypath module/registry-key) brokers-state
                                 {:callback-fn (guarded "the registry"
                                                        (fn [new _diff old]
-                                                         (registry-changed! brokers old new)))})
+                                                         (registry-changed! conn brokers old new)))})
                (r/foreign-proxy (keypath module/settings-key) settings-state
                                 {:callback-fn (guarded "the settings"
                                                        (fn [new _diff _old]
@@ -862,6 +915,7 @@
    out so a test can hand the broker a connection it opened itself."
   [conn]
   (reset! *connection* conn)
+  (reset! listing {:listed? false :dropped? false})
   (events/listen! ::rama on-broker-event)
   (reset! bridge/planner (fn [topic] (plan conn topic)))
   (reset! bridge/forwarder (fn [plan topic msg] (forward-publish! conn plan topic msg)))

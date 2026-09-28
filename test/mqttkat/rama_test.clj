@@ -470,6 +470,67 @@
           (sweep! (System/currentTimeMillis))
           (is (tu/wait-until #(false? (cluster/connected? conn "downed-1")))))
 
+        (testing "a broker forgotten while it lived: its clients are here again once it says so"
+          ;; Cut off from the cluster, not dead: it went quiet for longer than
+          ;; broker-forgotten-after-millis, the sweep let its clients go, and
+          ;; it has since announced itself again under the same run.
+          (let [client   (fn [id & opts]
+                           (assoc (apply connect-map id opts) :connect-id (str id "-conn")))
+                kept     (client "cut-kept" :version 5 :clean? false :expiry 60)
+                clean    (client "cut-clean")
+                gone     (client "cut-gone" :clean? false)
+                ids      (map :client-id [kept clean gone])
+                on-c     #(on-broker % "peer-c" "c1")
+                still    (fn [c] (on-c (cluster/->still-connected
+                                        (assoc c :subscribed-topics #{(entry "cut/#" 1)}))))
+                here?    (fn [id] (and (true? (cluster/connected? conn id))
+                                       (present-in-trie? peer "cut/t" id)))
+                sweep-to (fn [pred] (tu/wait-until #(do (sweep! (System/currentTimeMillis)) (pred)) 10000))]
+            (doseq [c [kept clean gone]]
+              (record! conn (on-c (cluster/->connect c)))
+              (record! conn (cluster/->subscribe {:connect-id (:connect-id c) :client-id (:client-id c)
+                                                  :filter "cut/#" :entry (entry "cut/#" 1)})))
+            (record! conn {:event :broker-up :broker-id "peer-c" :incarnation "c1" :host "h" :port 1 :at 1})
+            (is (tu/wait-until #(every? here? ids)))
+            (is (sweep-to #(not-any? (fn [id] (cluster/connected? conn id)) ids))
+                "forgotten, and its clients let go")
+            (is (nil? (get @(:brokers peer) "peer-c")))
+            (is (= {} (cluster/subscriptions conn "cut-clean")) "a clean session lost its subscriptions")
+            (is (some? (:expires-at (cluster/session conn "cut-kept"))) "a kept one is due to expire")
+            (is (tu/wait-until #(not-any? (fn [id] (present-in-trie? peer "cut/t" id)) ids)))
+            ;; And one of them really did leave, while the broker was cut off;
+            ;; its word on that reaches the cluster before its word on the rest.
+            (record! conn (on-c (cluster/->disconnect gone)))
+
+            (record! conn {:event :broker-up :broker-id "peer-c" :incarnation "c1" :host "h" :port 1
+                           :at (System/currentTimeMillis)})
+            (doseq [c [kept clean gone]]
+              (record! conn (still c)))
+            (testing "a connection the sweep let go is recorded as here again, subscriptions and all"
+              (is (tu/wait-until #(and (here? "cut-kept") (here? "cut-clean"))))
+              (doseq [id ["cut-kept" "cut-clean"]]
+                (is (= "peer-c" (:broker-id (cluster/session conn id))))
+                (is (= {"cut/#" (entry "cut/#" 1)} (cluster/subscriptions conn id)))
+                (is (= 1 (cluster/connections conn id)) "the same connection, not another"))
+              (is (nil? (:expires-at (cluster/session conn "cut-kept"))) "and no longer due to expire")
+              (is (= 60 (:session-expiry-interval (cluster/session conn "cut-kept")))))
+            (testing "one that ended is not brought back"
+              (is (false? (cluster/connected? conn "cut-gone")))
+              (is (not (present-in-trie? peer "cut/t" "cut-gone"))))
+            (testing "nor is a client that has since connected again"
+              (let [again (assoc kept :connect-id "cut-kept-again")]
+                (record! conn (cluster/->connect again))
+                (record! conn (still kept))
+                (Thread/sleep 200)
+                (is (= cluster/broker-id (:broker-id (cluster/session conn "cut-kept"))))
+                (record! conn (cluster/->disconnect again))))
+            (testing "and the run, listed again, is no longer let go"
+              (dotimes [_ 3] (sweep! (System/currentTimeMillis)))
+              (Thread/sleep 300)
+              (is (true? (cluster/connected? conn "cut-clean"))))
+            (record! conn {:event :broker-down :broker-id "peer-c" :at 1})
+            (sweep-to #(false? (cluster/connected? conn "cut-clean")))))
+
         (testing "a session that is away: its subscriptions say so, and publishes are queued"
           (let [c (cluster/->connect (connect-map "away-1" :clean? false))]
             (record! conn c)
@@ -1344,6 +1405,38 @@
                     (is (tu/wait-until #(nil? (get @(:brokers peer) cluster/broker-id)))))
                   (finally
                     (.stop server 100)))))
+
+            (testing "forgotten while it lived: listed again, this broker records its clients again"
+              (let [id    (tu/client-id "cutoff")
+                    topic (tu/topic "cutoff")
+                    c     (tu/connect! "cutoff" :id id :clean-session? false)]
+                (try
+                  (client/send-message (:client c) (subscribe-msg (str topic "/#") 1 9))
+                  (tu/expect! (:ch c) :SUBACK)
+                  (is (tu/wait-until #(present-in-trie? peer (str topic "/a") id)))
+                  @(cluster/record! conn (cluster/->broker-up "here" 1883))
+                  (is (tu/wait-until #(get @(:brokers conn) cluster/broker-id)))
+                  ;; Dropped from the registry and its run let go, as the sweep
+                  ;; does to a broker it has not heard from in ten minutes —
+                  ;; by a withdrawal, which the sweep treats the same, rather
+                  ;; than by winding the cluster's clock on.
+                  (record! conn {:event :broker-down :broker-id cluster/broker-id :at 0})
+                  (is (tu/wait-until #(do (sweep! (System/currentTimeMillis))
+                                          (false? (cluster/connected? conn id)))
+                                     10000))
+                  (is (tu/wait-until #(not (present-in-trie? peer (str topic "/a") id))))
+                  (is (some? (h/live-connection id)) "though it is still connected here")
+                  @(cluster/record! conn (cluster/->broker-up "here" 1883))
+                  (is (tu/wait-until #(true? (cluster/connected? conn id)))
+                      "stated again once this broker saw itself listed")
+                  (is (tu/wait-until #(present-in-trie? peer (str topic "/a") id))
+                      "so the other brokers forward to it again")
+                  (is (= cluster/broker-id (:broker-id (cluster/session conn id))))
+                  (is (= cluster/incarnation (:incarnation (cluster/session conn id))))
+                  (is (= {(str topic "/#") (entry (str topic "/#") 1)} (cluster/subscriptions conn id)))
+                  (finally
+                    @(cluster/record! conn (cluster/->broker-down))
+                    (tu/close! c)))))
 
             (testing "an anonymous client is recorded under the id it was given"
               (let [c   (tu/connect-v5! "anon" :id "")
