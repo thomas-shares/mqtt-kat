@@ -12,6 +12,9 @@
 ;;   bb scripts/brokers.bb stop 2             just broker-2
 ;;   bb scripts/brokers.bb kill 2             broker-2 with SIGKILL, to see the others cope
 ;;   bb scripts/brokers.bb logs 2             tail broker-2's log
+;;   bb scripts/brokers.bb start 1 --rama in-process
+;;                                            one broker with its own InProcessCluster, no
+;;                                            Rama to run (--rama none: no Rama at all)
 ;;
 ;; Each broker is broker-<n>, advertises 127.0.0.1 with its own port, logs to
 ;; logs/brokers/broker-<n>.log and leaves its pid in logs/brokers/broker-<n>.pid.
@@ -30,7 +33,9 @@
    :http      {:default 8085 :coerce :long :desc "HTTP (console) port of broker-1; each next one is +1"}
    :conductor {:default "localhost" :desc "the Rama Conductor"}
    :advertise {:default "127.0.0.1" :desc "the address the other brokers reach these at"}
-   :heap      {:default "4g" :desc "-Xmx for each broker"}})
+   :heap      {:default "4g" :desc "-Xmx for each broker"}
+   :rama      {:default "external"
+               :desc "external (the Conductor above), in-process (each broker its own) or none"}})
 
 (defn pid-file [n] (fs/path run-dir (str "broker-" n ".pid")))
 (defn log-file [n] (fs/path run-dir (str "broker-" n ".log")))
@@ -61,7 +66,18 @@
   (try (with-open [_ (java.net.ServerSocket. (int port))] true)
        (catch java.io.IOException _ false)))
 
-(defn start-one! [n {:keys [port http conductor advertise heap]}]
+(defn rama-flags
+  "-Dmqttkat.rama and friends for `mode`. Only external makes the brokers one
+   cluster: in-process gives each broker a Rama of its own."
+  [mode conductor]
+  (case (str mode)
+    "external"   ["-Dmqttkat.rama=external" (str "-Dmqttkat.rama.conductor=" conductor)]
+    "in-process" ["-Dmqttkat.rama=in-process"]
+    "none"       []
+    (do (println "--rama should be external, in-process or none, not" mode)
+        (System/exit 2))))
+
+(defn start-one! [n {:keys [port http conductor advertise heap rama]}]
   (let [mqtt  (+ port (dec n))
         web   (+ http (dec n))
         log   (str (log-file n))
@@ -76,18 +92,18 @@
 
       :else
       (let [_    (fs/delete-if-exists log)
-            proc (p/process {:out :write :out-file (fs/file log)
-                             :err :write :err-file (fs/file log)}
-                            "java"
-                            "--add-opens" "java.base/java.lang=ALL-UNNAMED"
-                            "--enable-native-access=ALL-UNNAMED"
-                            (str "-Xmx" heap)
-                            "-Dmqttkat.rama=external"
-                            (str "-Dmqttkat.rama.conductor=" conductor)
-                            (str "-Dmqttkat.brokerId=broker-" n)
-                            (str "-Dmqttkat.advertise=" advertise)
-                            "-Dmqttkat.sysInterval=60"
-                            "-jar" jar (str mqtt) (str web))
+            argv (concat ["java"
+                          "--add-opens" "java.base/java.lang=ALL-UNNAMED"
+                          "--enable-native-access=ALL-UNNAMED"
+                          (str "-Xmx" heap)]
+                         (rama-flags rama conductor)
+                         [(str "-Dmqttkat.brokerId=broker-" n)
+                          (str "-Dmqttkat.advertise=" advertise)
+                          "-Dmqttkat.sysInterval=60"
+                          "-jar" jar (str mqtt) (str web)])
+            proc (apply p/process {:out :write :out-file (fs/file log)
+                                   :err :write :err-file (fs/file log)}
+                        argv)
             pid  (.pid (:proc proc))]
         (spit (str (pid-file n)) (str pid))
         ;; Up when the console is listening: that is the last thing -main starts.
@@ -160,7 +176,7 @@
       "kill"   (stop! (map parse-long more) "KILL")
       "status" (status!)
       "logs"   (logs! (n-of))
-      (do (println "usage: bb scripts/brokers.bb start N [--port 1885] [--http 8085] [--conductor localhost] [--advertise 127.0.0.1] [--heap 1g]")
+      (do (println "usage: bb scripts/brokers.bb start N [--port 1885] [--http 8085] [--conductor localhost] [--advertise 127.0.0.1] [--heap 1g] [--rama external|in-process|none]")
           (println "       bb scripts/brokers.bb stop [N ...] | kill [N ...] | status | logs N")
           (System/exit 2)))))
 

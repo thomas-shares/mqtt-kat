@@ -1,0 +1,21 @@
+;; One broker with its own in-process Rama: no cluster to run, so it goes
+;; anywhere, CI included. Clients are killed, disconnected and resubscribe;
+;; the broker is not touched, since an in-process Rama dies with it.
+;;
+;;   bb scripts/chaos.bb chaos/single-broker.edn
+{:setup {:brokers {:count 1 :port 1885 :http 8085 :heap "1g" :rama :in-process}
+         :rama    {:start? false}}
+
+ :load {:publishers  10
+        :subscribers 40
+        :topics      5
+        :rate        300
+        :duration-s  30
+        :qos         {0 1, 1 2, 2 2}
+        :sub-qos     {0 1, 1 2, 2 2}}
+
+ :chaos {:kill-client         {:every-ms [300 1000]  :down-ms [0 2000] :who :any}
+         :disconnect-client   {:every-ms [1000 2000] :down-ms [0 1000] :who :any}
+         :toggle-subscription {:every-ms [200 600]}}
+
+ :check {:subscribe-settle-ms 200}}

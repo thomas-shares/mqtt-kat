@@ -271,6 +271,30 @@ again before starting brokers.
 
 Without `-Dmqttkat.rama` at all the broker runs as it always has.
 
+### Chaos runs
+
+`scripts/chaos.bb` puts the cluster under load and knocks it about, then checks
+that every message arrived as its QoS promised. It starts Rama and the brokers
+with the two scripts above, runs publishers and subscribers (persistent and
+clean, 3.1.1 and 5, QoS 0, 1 and 2) while clients are killed and reconnect
+elsewhere, subscriptions come and go, and brokers are killed and restarted, and
+exits 0 only if nothing was lost, duplicated where the QoS forbids it, or
+delivered where it should not have been.
+
+```
+bb scripts/chaos.bb chaos/three-brokers.edn                          # everything
+bb scripts/chaos.bb chaos/three-brokers.edn chaos/three-brokers-calm.edn  # brokers left alone
+bb scripts/chaos.bb chaos/single-broker.edn                          # no cluster needed; what CI runs
+bb scripts/chaos.bb --keep chaos/single-broker.edn                   # leave the brokers up afterwards
+```
+
+The EDN files merge left to right over `mqttkat.chaos.runner/defaults`, which
+documents every key: `:setup` (brokers, Rama), `:load` (clients, rate, QoS
+mix, share of persistent sessions), `:chaos` (each action and how often) and
+`:check`. The report, every violation with the chaos around it, goes to
+`logs/chaos/<run>.edn`. `brokers.bb start` takes `--rama in-process` or
+`--rama none` for a broker that needs no cluster.
+
 ## And here are some links with info to help me:
 https://gist.github.com/Botffy/3860641
 
