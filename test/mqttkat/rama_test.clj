@@ -1426,14 +1426,36 @@
                                      10000))
                   (is (tu/wait-until #(not (present-in-trie? peer (str topic "/a") id))))
                   (is (some? (h/live-connection id)) "though it is still connected here")
+                  ;; Meanwhile another broker, taking it for away, queues for it.
+                  (record! conn (cluster/->enqueue id {:topic (str topic "/a") :payload (.getBytes "while away")
+                                                       :qos 1}))
                   @(cluster/record! conn (cluster/->broker-up "here" 1883))
                   (is (tu/wait-until #(true? (cluster/connected? conn id)))
                       "stated again once this broker saw itself listed")
+                  ;; And one more, from a broker whose copy has not caught up yet.
+                  (record! conn (cluster/->enqueue id {:topic (str topic "/a") :payload (.getBytes "straggler")
+                                                       :qos 1}))
                   (is (tu/wait-until #(present-in-trie? peer (str topic "/a") id))
                       "so the other brokers forward to it again")
                   (is (= cluster/broker-id (:broker-id (cluster/session conn id))))
                   (is (= cluster/incarnation (:incarnation (cluster/session conn id))))
                   (is (= {(str topic "/#") (entry (str topic "/#") 1)} (cluster/subscriptions conn id)))
+                  (testing "and what was queued for it meanwhile is sent now, not on its next connect"
+                    (let [got (tu/take-n! (:ch c) 2 (+ cluster/restated-settle-millis 3000))]
+                      (is (= #{"while away" "straggler"} (set (map tu/payload-str (:PUBLISH got)))))
+                      (is (every? #(= 1 (:qos %)) (:PUBLISH got)))
+                      (is (= 2 (count (cluster/queued conn id)))
+                          "sent, not acknowledged: still on the cluster's queue")
+                      (doseq [p (:PUBLISH got)]
+                        (client/send-message (:client c) {:packet-type :PUBACK
+                                                          :packet-identifier (:packet-identifier p)}))
+                      (is (tu/wait-until #(empty? (cluster/queued conn id))) "acknowledged: off it")
+                      (is (empty? (:PUBLISH (tu/take-n! (:ch c) 1 (+ cluster/restated-settle-millis 500))))
+                          "each once, though the queue is read twice")
+                      (is (= #{} (h/deliver-queued! id "another-connection"
+                                                    [["k" {:topic (str topic "/a") :payload (.getBytes "x") :qos 1}]]
+                                                    nil))
+                          "nothing for a connection that is not the one here")))
                   (finally
                     @(cluster/record! conn (cluster/->broker-down))
                     (tu/close! c)))))
