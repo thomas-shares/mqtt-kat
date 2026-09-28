@@ -14,6 +14,8 @@
    so sessions persisted on `clean-session?` alone and never expired."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [mqttkat.client :as client]
+            [mqttkat.handlers :as h]
+            [mqttkat.trie :as trie]
             [mqttkat.test-util :as tu]))
 
 (use-fixtures :once tu/broker-fixture)
@@ -153,3 +155,63 @@
         (try
           (is (false? (:session-present? (:connack b))))
           (finally (tu/close! a b)))))))
+
+;; Not ^:portable: this drives the broker's own expiry job, because over a
+;; socket the window between the timer firing and a reconnect is a race the
+;; test could not rely on losing.
+(deftest an-expiry-already-running-leaves-a-resumed-session-alone
+  (let [id      "expiry-vs-resume"
+        parked  {:client-id id :protocol-version 5 :clean-session? false
+                 :properties {:session-expiry-interval 60}
+                 :subscribed-topics #{}}
+        state!  (fn []
+                  {:clients  (atom {id parked})
+                   :outbound (atom {id (atom {:next-id 2 :inflight {1 {}}})})
+                   :inflight (atom {[id 1] {:msg {} :topic "t"}})})
+        token   (fn [] (:token (get @@#'h/session-expiries id)))]
+    (testing "a reconnect cancels an expiry whose timer has already fired"
+      ;; at/kill cannot stop a job that is already running. That job used to
+      ;; discard the session whatever happened after it started, emptying the
+      ;; outbound window and in-flight records of the client that had just
+      ;; resumed it. Here the job has fired and not yet decided, the client
+      ;; comes back, and only then does the job get to run.
+      (let [{:keys [clients outbound inflight]} (state!)]
+        (binding [h/*clients* clients h/*outbound* outbound h/*inflight* inflight
+                  h/*offline-trie* (atom (trie/make-trie))]
+          (try
+            (h/schedule-session-expiry! id 60)
+            (let [fired (token)]
+              (h/cancel-session-expiry! id)
+              (h/expire-session! id fired))
+            (is (contains? @h/*clients* id) "the session is still there to resume")
+            (is (contains? @h/*outbound* id) "with its outbound window")
+            (is (contains? @h/*inflight* [id 1]) "and what it has in flight")
+            (finally (h/cancel-session-expiry! id))))))
+
+    (testing "an expiry held up past a second park does not cut the new one short"
+      (let [{:keys [clients outbound inflight]} (state!)]
+        (binding [h/*clients* clients h/*outbound* outbound h/*inflight* inflight
+                  h/*offline-trie* (atom (trie/make-trie))]
+          (try
+            (h/schedule-session-expiry! id 60)
+            (let [stale (token)]
+              ;; Resumed, then parked again: a new timer is filed.
+              (h/cancel-session-expiry! id)
+              (h/schedule-session-expiry! id 60)
+              (h/expire-session! id stale))
+            (is (contains? @h/*clients* id)
+                "the session parked second lives out its own interval")
+            (finally (h/cancel-session-expiry! id))))))
+
+    (testing "an expiry nobody cancelled still discards the session"
+      (let [{:keys [clients outbound inflight]} (state!)]
+        (binding [h/*clients* clients h/*outbound* outbound h/*inflight* inflight
+                  h/*offline-trie* (atom (trie/make-trie))]
+          (try
+            (h/schedule-session-expiry! id 60)
+            (h/expire-session! id (token))
+            (is (not (contains? @h/*clients* id)) "the session is gone")
+            (is (not (contains? @h/*outbound* id)) "its window with it")
+            (is (not (contains? @h/*inflight* [id 1])) "and its in-flight records")
+            (is (nil? (get @@#'h/session-expiries id)) "and so is its timer")
+            (finally (h/cancel-session-expiry! id))))))))

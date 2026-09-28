@@ -4,6 +4,25 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20260928
 
+### A session expiry that had already fired could empty a resumed session
+
+The last open half of the late-teardown race from 20260925. Parking was already
+guarded; expiry was not. `cancel-session-expiry!` kills the timer, but `at/kill`
+stops a job that has not started, not one that is running, and the job took
+itself out of `session-expiries` before discarding. A reconnect landing in that
+window found nothing to cancel, resumed the session and said so in the CONNACK,
+and then `discard-session!` emptied `*outbound*` and `*inflight*` under it,
+keyed by client-id as they are. The redelivery found nothing to redeliver, and
+the next delivery numbered identifiers from 1 again.
+
+Each expiry now carries a token, and the job only discards if its token is still
+the one filed, checked under the same lock `cancel-session-expiry!` takes. So a
+cancel either lands first and the job stands down, or waits until the session is
+gone and the client gets a fresh one, which is what an expired session is. The
+token also stops a job that was held up past a resume and a second disconnect
+from cutting the second park short. `v5_session_expiry_test` drives all three
+cases by hand.
+
 Run this to test a different broker, for instance Mosquitto. This is to also check if our tests are any good:
 
 ```
@@ -57,7 +76,8 @@ _Later:_ fixed for a clean session. `remove-client!` now leaves `*outbound*` and
 `*inflight*` alone when another connection is already registered under the
 client-id, and `session_takeover_test` covers the late teardown. A persistent
 session takes a different path when it is parked, and whether a late expiry
-there can empty a reconnected client's queue is still open.
+there can empty a reconnected client's queue is still open. _Later:_ it could,
+and does not any more; see 20260928.
 
 ### What was fixed today, and what is still open
 
@@ -91,7 +111,7 @@ Fixed, each with a test:
 
 Still open:
 
-- The same late-teardown guard for persistent sessions.
+- ~~The same late-teardown guard for persistent sessions.~~ Fixed on 20260928.
 - `test_unsubscribe` in the Paho v5 suite, flaky in the run and unexplained.
 - The Paho conformance suites are not in CI, so a conformance regression only
   shows when someone runs them by hand.
