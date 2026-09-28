@@ -26,19 +26,17 @@ another member's broker. Left over:
   is 600000, against a report every five seconds. Nothing is lost in that
   window any more, but the other brokers try its bridge every five seconds, its
   clients' session expiry only starts once it is forgotten, and the console
-  shows it as `stale`. The next point is done, so a broker forgotten by
-  mistake no longer loses its clients for good; but every mistake now costs
-  the gap in the point after it, so a shorter timeout wants that one done
-  first.
+  shows it as `stale`. Left at ten minutes on purpose, see "Why the timeout
+  stays at ten minutes" below: a broker forgotten by mistake still loses
+  what was published for its clean sessions, and its QoS 0, while it is.
 - ~~**A live broker cut off from Rama is treated as dead.**~~ Fixed, see
   "A broker forgotten while it lived gets its clients back" below. What it left
   behind is the next point.
-- **Messages queued for a broker's clients while it was forgotten wait for their
-  next reconnect.** Between the sweep letting them go and the broker restating
-  them, the other brokers queue QoS 1 and 2 messages for its persistent
-  sessions in Rama, and nobody takes them off while the client stays
-  connected. A clean session's subscriptions are gone for that window, so what
-  was published for it then is not kept at all.
+- ~~**Messages queued for a broker's clients while it was forgotten wait for
+  their next reconnect.**~~ Fixed, see "What was queued while a broker was
+  forgotten is sent once it is back" below. The other half stands: **a clean
+  session's subscriptions are gone for that window**, so what was published
+  for it then is not kept at all, and neither is QoS 0 for a persistent one.
 - **A queued fallback is late when the client is actually still connected.**
   The fallback queues for a peer's persistent sessions whenever that peer does
   not acknowledge. If the peer is alive but this broker cannot reach it (the
@@ -80,6 +78,50 @@ From before, not re-checked today:
 - The 53 of 150 subscriber sockets with an empty Send-Q, the regex split in
   triennium's `split-topic` on the publish path, and the median latency MQTT 5
   cost.
+
+### What was queued while a broker was forgotten is sent once it is back
+
+While a live broker was forgotten, the other brokers queued QoS 1 and 2
+messages in Rama for its persistent sessions, and those waited there until the
+client next connected, which for a client that never dropped could be days.
+
+`restate-clients!` now waits for the cluster to have its `:still-connected`
+records, and for each connection the cluster took back (the record names this
+connection, on this run, connected) reads the client's queue and hands it to
+`handlers/deliver-queued!`. That puts each message on the broker's own queue
+exactly as `adopt-session!` does on a resume, carrying its cluster key, so it
+is flushed at once and comes off Rama's queue only when the client
+acknowledges it. A connection the cluster did not take back, or one that has
+gone or been replaced here by the time the queue is read, is left alone: its
+queue waits for the next resume, which reads it whole.
+
+The queue is read twice, the second time `restated-settle-millis` (2 s) later.
+The other brokers learn the client is back through their proxies, a moment
+after the cluster does, and a publish they matched in that moment is still
+queued. Reading twice cannot send anything twice: a key already waiting or in
+flight here, or taken by the first read, is skipped. The test in `rama_test`
+queues one message while the broker is forgotten and one after it is back, and
+checks each arrives once and leaves the queue on its PUBACK.
+
+### Why the timeout stays at ten minutes
+
+`broker-forgotten-after-millis` is the price of two mistakes, and the tests
+only settle one. A broker that is really dead and still listed costs latency
+and noise, not messages: the others try its bridge, fail, and queue for its
+persistent sessions, which get everything on their next connect. A broker that
+is alive and forgotten now gets its clients back and, after today, their queued
+messages too. But for as long as it is forgotten its clean sessions have no
+subscriptions in the cluster, so what is published for them then is dropped,
+and QoS 0 for its persistent sessions is dropped as well. `rama_test` asserts
+exactly that ("a clean session lost its subscriptions").
+
+So a shorter timeout turns more stalls (a long GC, a slow Rama leader
+election, a network blip to the cluster) into lost messages, to save a stale
+console row and ten minutes of bridge retries for a broker that really died.
+That is the wrong way round while the second mistake still loses anything.
+The order stays: make a false forget lossless for clean sessions too (keep
+their subscriptions, marked as away, instead of dropping them, and let the
+restatement or the sweep's own expiry settle them), then shorten.
 
 ### A broker forgotten while it lived gets its clients back
 

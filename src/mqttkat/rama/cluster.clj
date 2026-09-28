@@ -427,7 +427,45 @@
       (when-not (identical? ov nv)
         (retained/sync! topic (some-> nv text->payload))))))
 
-(declare ^:dynamic *connection*)
+(declare ^:dynamic *connection* awaited)
+
+(def restated-settle-millis
+  "How long after a restatement the queues of the connections it took back
+   are read a second time. The other brokers learn that a client is here
+   again through their proxies, a moment after the cluster has it, and a
+   publish they matched in that moment is still queued."
+  2000)
+
+(defn- taken-back?
+  "Whether the cluster took this broker's word that `client`'s connection is
+   still up: its record names this connection on this run, connected."
+  [conn {:keys [client-id connect-id]}]
+  (let [s (session conn client-id)]
+    (and (:connected? s)
+         (= connect-id (:connect-id s))
+         (= broker-id (:broker-id s))
+         (= incarnation (:incarnation s)))))
+
+(defn- drain-restated!
+  "Deliver what was queued in the cluster for the connections a restatement
+   took back, while they were taken for away: read each one's queue once
+   the cluster has the restatement, and again restated-settle-millis later
+   for what the other brokers queued before their proxies caught up. A
+   connection the cluster did not take back — the client has moved on or
+   gone — leaves its queue alone, for whichever resume comes next."
+  [conn clients]
+  (let [back  (filterv #(taken-back? conn %) clients)
+        drain (fn [taken]
+                (into {}
+                      (for [{:keys [client-id connect-id]} back]
+                        [client-id (into (get taken client-id #{})
+                                         (handlers/deliver-queued! client-id connect-id
+                                                                   (queued conn client-id)
+                                                                   (get taken client-id)))])))]
+    (when (seq back)
+      (let [taken (drain {})]
+        (Thread/sleep (long restated-settle-millis))
+        (drain taken)))))
 
 (defn restate-clients!
   "Tell the cluster about every connection this broker holds, as
@@ -439,11 +477,16 @@
    connection it let go that way, so stating one it already has costs an
    append and changes nothing."
   [conn]
-  (let [clients (remove #(bridge/bridge? (:client-id %)) (handlers/live-sessions))]
+  (let [clients (filter :connect-id
+                        (remove #(bridge/bridge? (:client-id %)) (handlers/live-sessions)))]
     (log/info "listed in the cluster again - restating" (count clients) "connections")
-    (doseq [client clients
-            :when (:connect-id client)]
-      (record! conn (->still-connected client)))))
+    (let [appends (mapv #(record! conn (->still-connected %)) clients)]
+      (future
+        (try
+          (run! awaited appends)
+          (drain-restated! conn clients)
+          (catch Throwable t
+            (log/warn t "could not deliver what was queued for the restated connections")))))))
 
 (defonce ^:private listing
   ;; Whether this run has seen itself in the registry, and whether it has

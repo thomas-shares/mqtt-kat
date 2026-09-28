@@ -887,7 +887,7 @@
   ;; queues in memory as it always did.
   (atom nil))
 
-(declare queue-pending!)
+(declare queue-pending! flush-pending!)
 
 (defn- settled!
   "A message from the cluster's queue has been acknowledged, or found
@@ -964,6 +964,39 @@
                                            ::queued-at (:queued-at msg)
                                            ::cluster-key k))))
       true)))
+
+(defn deliver-queued!
+  "Send a connected client what the cluster queued for it while it was taken
+   for away: `queued` as the cluster's queue has it, [key msg] oldest first.
+   Only while `connect-id` is still the connection here — one that has gone
+   or been replaced leaves the queue to the next resume, which reads it
+   whole. Each message goes on the broker's own queue as adopt-session! puts
+   it there, carrying its key, so it comes off the cluster's queue when the
+   client acknowledges it. A key already here, waiting or in flight, or in
+   `taken` — the keys an earlier call for the same restatement sent — is
+   left out, so reading the queue twice sends nothing twice.
+
+   Returns the keys it put on the broker's queue."
+  [client-id connect-id queued taken]
+  (let [key (live-connection client-id)]
+    (if-not (and key (= connect-id (get-in @*clients* [key :connect-id])))
+      #{}
+      (let [{:keys [pending inflight]} (some-> (existing-outbound client-id) deref)
+            here  (into (set taken) (keep ::cluster-key) (concat pending (vals inflight)))
+            ;; A full queue here refuses the rest, which stay on the
+            ;; cluster's for the next read or the next resume.
+            took  (into #{}
+                        (keep (fn [[k msg]]
+                                (when (and (not (contains? here k))
+                                           (queue-pending! client-id (assoc msg
+                                                                            ::queued-at (:queued-at msg)
+                                                                            ::cluster-key k)))
+                                  k)))
+                        queued)]
+        (when (seq took)
+          (log/info "delivering" (count took) "messages queued for" client-id "while it was taken for away")
+          (flush-pending! key client-id))
+        took))))
 
 (defn queue-pending!
   "Hold `msg` for `client-id` until a window slot frees up.
