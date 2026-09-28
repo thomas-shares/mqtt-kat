@@ -423,7 +423,16 @@
   (reset! brokers (or new {}))
   (doseq [gone (remove #(contains? new %) (keys old))]
     (log/info "broker" gone "left the cluster")
-    (bridge/drop! gone)))
+    (bridge/drop! gone))
+  ;; A broker back under the same name is a new run at the same address:
+  ;; whatever the bridge knew about the old one — its connection, or that
+  ;; it could not be reached a moment ago — is about a broker that is gone,
+  ;; and would drop the new one's first messages.
+  (doseq [[id {:keys [incarnation]}] new
+          :let [before (get-in old [id :incarnation])]
+          :when (and before (not= before incarnation))]
+    (log/info "broker" id "is back as a new run")
+    (bridge/drop! id)))
 
 (defn- guarded
   "A proxy callback that cannot take the broker down. An exception thrown
@@ -500,6 +509,19 @@
         i       (get (swap! share-cursor update group-key (fnil inc -1)) group-key)]
     (nth ordered (mod i (count ordered)))))
 
+(defn- per-client
+  "One entry per client among `entries`, at the highest QoS of its matching
+   subscriptions (§3.3.5-1), as a live delivery would be. A shared group's
+   members are left out: a group has other members to take a message, or
+   nobody."
+  [entries]
+  (->> entries
+       (remove :share-group)
+       (reduce (fn [m {:keys [client-id qos]}]
+                 (update m client-id (fnil max 0) (long (or qos 0))))
+               {})
+       (mapv (fn [[client-id qos]] {:client-id client-id :qos qos}))))
+
 (defn plan
   "Where a publish on `topic` goes besides this broker — see
    mqttkat.bridge/planner for the shape — or nil when nowhere.
@@ -535,14 +557,18 @@
         ;; matching subscriptions (§3.3.5-1), as a live delivery would be.
         ;; A shared group's away members are left out: the group has
         ;; present members to take the message, or it has nobody.
-        queue   (->> parked
-                     (remove :share-group)
-                     (reduce (fn [m {:keys [client-id qos]}]
-                               (update m client-id (fnil max 0) (long (or qos 0))))
-                             {})
-                     (mapv (fn [[client-id qos]] {:client-id client-id :qos qos})))]
+        queue   (per-client parked)
+        ;; And who each other broker is being sent this for, so that if it
+        ;; cannot be reached the message is queued for them instead of
+        ;; lost: a broker that dies is recorded as holding its clients
+        ;; until it is forgotten, and until then every message for them
+        ;; went to a broker that was not there.
+        holders (into {}
+                      (keep (fn [[b entries]]
+                              (when-not (= broker-id b) [b (per-client entries)])))
+                      (group-by :broker-id ordinary))]
     (when (or (seq brokers) (seq skip) (seq queue))
-      {:brokers brokers :skip skip :queue queue})))
+      {:brokers brokers :skip skip :queue queue :holders holders})))
 
 (defn forward-publish!
   "What the bridge's forwarder does when this broker is attached: `plan`,
@@ -550,21 +576,34 @@
    does not know yet gets nothing — its subscriptions arrived before its
    announcement, which the next publish will find."
   [{:keys [brokers] :as conn} plan topic {:keys [qos payload properties] :as msg}]
-  (doseq [[peer-id group-keys] (:brokers plan)]
-    (if-let [peer (get @brokers peer-id)]
-      (bridge/send-to! broker-id peer-id peer group-keys topic msg)
-      (log/debug "no address for broker" peer-id "- not forwarding" topic)))
-  ;; §4.1 keeps QoS 1 and 2 for a session that is away; at-most-once means a
-  ;; message for a client that is not there has already been delivered as
-  ;; well as it is going to be. The QoS kept is the lesser of the publish
-  ;; and the subscription, as it would be on delivery.
-  (when (pos? (long (or qos 0)))
-    (doseq [{:keys [client-id] sub-qos :qos} (:queue plan)
-            :when (pos? (long sub-qos))]
-      (record! conn (->enqueue client-id {:topic      topic
-                                         :payload    payload
-                                         :properties properties
-                                         :qos        (min (long qos) (long sub-qos))})))))
+  (let [qos       (long (or qos 0))
+        queue-for (fn [clients if-kept?]
+                    ;; §4.1 keeps QoS 1 and 2 for a session that is away;
+                    ;; at-most-once means a message for a client that is not
+                    ;; there has already been delivered as well as it is going
+                    ;; to be. The QoS kept is the lesser of the publish and
+                    ;; the subscription, as it would be on delivery.
+                    (doseq [{:keys [client-id] sub-qos :qos} clients
+                            :when (pos? (long sub-qos))]
+                      (record! conn (cond-> (->enqueue client-id {:topic      topic
+                                                                  :payload    payload
+                                                                  :properties properties
+                                                                  :qos        (min qos (long sub-qos))})
+                                      if-kept? (assoc :if-kept? true)))))]
+    (doseq [[peer-id group-keys] (:brokers plan)]
+      (let [holders (get-in plan [:holders peer-id])
+            ;; What was for this broker's clients, queued for them if it does
+            ;; not get there — only for those whose sessions outlive their
+            ;; connection, which the cluster checks against its own record: a
+            ;; clean session on a broker that died died with it.
+            on-lost (when (and (pos? qos) (seq holders))
+                      #(queue-for holders true))]
+        (if-let [peer (get @brokers peer-id)]
+          (bridge/send-to! broker-id peer-id peer group-keys topic (assoc msg :on-lost on-lost))
+          (do (log/debug "no address for broker" peer-id "- queuing" topic "for its sessions")
+              (when on-lost (on-lost))))))
+    (when (pos? qos)
+      (queue-for (:queue plan) false))))
 
 ;; ── the running broker's connection ──────────────────────────────────────
 

@@ -112,7 +112,10 @@ In `src/mqttkat/rama/` and around it:
   socket write. A shared subscription (`$share/g/…`) with members on several
   brokers is served by one of them per publish, chosen on the publisher's broker
   where the whole group is visible and told to the chosen one in a user property
-  on the forwarded copy; the others leave the group alone.
+  on the forwarded copy; the others leave the group alone. A QoS 1 or 2 message the peer never
+  acknowledged (it is down, or went down with the message queued or in flight)
+  is not dropped: it is queued in Rama for the persistent sessions it was for, so
+  a client that comes back on another broker gets it there.
 - Sessions roam. A persistent session's subscriptions and whatever is owed to
   it — queued while it was away by whichever broker saw the publish, or left
   unacknowledged when it went — live in Rama; a client coming back on any

@@ -173,6 +173,17 @@
    the peer is taken to have stopped acknowledging, and dropped."
   5000)
 
+(defn- lost!
+  "Tell a message's sender it did not reach the peer: the cluster queues it
+   for the sessions it was for (see mqttkat.rama.cluster/forward-publish!).
+   Never throws — this runs on the link's thread and the peer's reader."
+  [peer-id on-lost]
+  (when on-lost
+    (try
+      (on-lost)
+      (catch Throwable t
+        (log/warn t "bridge to" peer-id "could not hand back a message it lost")))))
+
 (defn- on-packet
   "What the peer sends back. A bridge subscribes to nothing, so this is its
    CONNACK and acknowledgements.
@@ -181,21 +192,31 @@
    window (§4.9): PUBACK, PUBCOMP, or a PUBREC that refuses the message
    (0x80 and up), which ends the flow there. Any other PUBREC is answered
    with the PUBREL the QoS 2 handshake needs, and the slot stays taken until
-   the PUBCOMP."
-  [holder window peer-id {:keys [packet-type packet-identifier reason-code properties] :as msg}]
+   the PUBCOMP.
+
+   `inflight` is packet identifier -> the message's on-lost, for the
+   messages the peer has not taken yet. A PUBACK, or a PUBREC accepting the
+   message, says it has: from then on it is the peer's to deliver. A PUBREC
+   refusing it says it will not, and the message is lost here after all."
+  [holder window ^ConcurrentHashMap inflight peer-id
+   {:keys [packet-type packet-identifier reason-code properties] :as msg}]
   (let [release! #(when (realized? window) (.release ^Semaphore @window))
-        code     (bit-and 0xFF (long (or reason-code 0)))]
+        code     (bit-and 0xFF (long (or reason-code 0)))
+        settle!  #(when packet-identifier (.remove inflight (int packet-identifier)))]
     (case packet-type
       :CONNACK (if (>= code 0x80)
                  (log/warn "bridge to" peer-id "refused:" code)
                  (do (log/info "bridge to" peer-id "up")
                      ;; §3.2.2.3.3: absent means 65,535.
                      (deliver window (Semaphore. (int (or (:receive-maximum properties) 65535))))))
-      :PUBACK  (release!)
+      :PUBACK  (do (settle!) (release!))
       :PUBCOMP (release!)
       :PUBREC  (if (>= code 0x80)
-                 (release!)
+                 (let [on-lost (settle!)]
+                   (release!)
+                   (lost! peer-id on-lost))
                  (when-let [c @holder]
+                   (settle!)
                    (try
                      (client/send-message c {:packet-type :PUBREL :packet-identifier packet-identifier})
                      (catch IOException e
@@ -211,10 +232,10 @@
    That happened at a few thousand QoS 2 messages a second, with the peer's
    window at 128. On the link's own thread, so the wait holds up nothing
    but the link."
-  [my-id peer-id {:keys [host port]}]
+  [my-id peer-id {:keys [host port]} inflight]
   (let [holder  (atom nil)
         window  (promise)
-        handler (MqttHandler. ^clojure.lang.IFn (fn [msg _] (on-packet holder window peer-id msg)) 1)
+        handler (MqttHandler. ^clojure.lang.IFn (fn [msg _] (on-packet holder window inflight peer-id msg)) 1)
         c       (client/client host (int port) handler)]
     (reset! holder c)
     (client/send-message c {:packet-type      :CONNECT
@@ -260,33 +281,57 @@
   "Send one queued message: a slot in the peer's window first for QoS 1 and
    2 (§4.9), then the write. A peer that frees no slot for window-wait-ms
    has stopped acknowledging, which ends the link."
-  [{:keys [^AtomicInteger ids]} client ^Semaphore window {:keys [qos packet]}]
-  (let [qos (long qos)]
-    (when (and (pos? qos) (not (.tryAcquire window (long window-wait-ms) TimeUnit/MILLISECONDS)))
-      (throw (IOException. (str "nothing acknowledged for " window-wait-ms " ms"))))
+  [{:keys [^AtomicInteger ids ^ConcurrentHashMap inflight] :as link} client ^Semaphore window {:keys [qos packet on-lost]}]
+  (let [qos (long qos)
+        id  (when (pos? qos) (next-packet-id ids))]
+    ;; Off the queue and not yet written while it waits for a slot: if the
+    ;; wait ends the link, this one is handed back here, since neither the
+    ;; queue nor the in-flight map has it to hand back later.
+    (when id
+      (let [slot? (try (.tryAcquire window (long window-wait-ms) TimeUnit/MILLISECONDS)
+                       (catch InterruptedException e
+                         (lost! (:peer-id link) on-lost)
+                         (throw e)))]
+        (when-not slot?
+          (lost! (:peer-id link) on-lost)
+          (throw (IOException. (str "nothing acknowledged for " window-wait-ms " ms"))))))
+    ;; Recorded before the write, so an acknowledgement quicker than the
+    ;; line after it still finds it.
+    (when (and id on-lost)
+      (.put inflight (int id) on-lost))
     (try
-      (client/send-message client (cond-> packet (pos? qos) (assoc :packet-identifier (next-packet-id ids))))
+      (client/send-message client (cond-> packet id (assoc :packet-identifier id)))
       (catch IOException e
-        (when (pos? qos) (.release window))
+        (when id
+          (.release window)
+          (.remove inflight (int id))
+          ;; Not written, so not the peer's.
+          (lost! (:peer-id link) on-lost))
         (throw e)))))
 
 (defn- forget-link!
   "Take `link` out of the connections, if it is still the one there —
    leaving `replacement` in its place, or nothing."
   [peer-id link replacement]
+  ;; Told apart by `:running`, which every copy of one link shares: the map
+  ;; the link's thread was given is not the one stored, which also has the
+  ;; thread on it.
   (swap! connections (fn [m]
-                       (if (identical? (get m peer-id) link)
+                       (if (identical? (:running (get m peer-id)) (:running link))
                          (if replacement (assoc m peer-id replacement) (dissoc m peer-id))
                          m))))
 
 (defn- run-link!
   "The link's thread: connect, then write whatever is queued, in order,
-   until the link is dropped or the peer is lost. Whatever is still queued
-   then is lost with it and counted, and every publisher it held is let go."
-  [my-id peer-id peer {:keys [^LinkedBlockingQueue queue ^AtomicBoolean running client] :as link}]
+   until the link is dropped or the peer is lost. Then every message the
+   peer had not taken — still queued, or written and not acknowledged — is
+   handed back through its on-lost and counted, and every publisher the
+   link held is let go."
+  [my-id peer-id peer {:keys [^LinkedBlockingQueue queue ^AtomicBoolean running client
+                              ^ConcurrentHashMap inflight] :as link}]
   (let [opened (atom nil)]
     (try
-      (let [{c :client window :window :as o} (open! my-id peer-id peer)]
+      (let [{c :client window :window :as o} (open! my-id peer-id peer inflight)]
         (reset! opened o)
         (deliver client c)
         (loop []
@@ -307,11 +352,16 @@
       (finally
         (.set running false)
         (forget-link! peer-id link nil)
-        (let [lost (.size queue)]
-          (.clear queue)
-          (when (pos? lost)
-            (.add ^LongAdder MqttStat/droppedMessages lost)
-            (log/warn "bridge to" peer-id "gone with" lost "messages still queued for it")))
+        (let [queued  (java.util.ArrayList.)
+              _       (.drainTo queue queued)
+              unacked (vec (.values inflight))]
+          (.clear inflight)
+          (when (or (pos? (.size queued)) (seq unacked))
+            (log/warn "bridge to" peer-id "gone with" (.size queued) "messages queued and"
+                      (count unacked) "unacknowledged; handing them back")
+            (.add ^LongAdder MqttStat/droppedMessages (+ (.size queued) (count unacked))))
+          (doseq [{:keys [on-lost]} queued] (lost! peer-id on-lost))
+          (doseq [on-lost unacked] (lost! peer-id on-lost)))
         (release-holds! link)
         (when-let [o @opened]
           (try (client/close (:client o)) (catch Exception _ nil)))))))
@@ -320,7 +370,9 @@
   "A link to `peer-id`, its thread started. `:client` is delivered once the
    peer has accepted the connection."
   [my-id peer-id peer]
-  (let [link {:queue   (LinkedBlockingQueue.)
+  (let [link {:peer-id  peer-id
+              :queue    (LinkedBlockingQueue.)
+              :inflight (ConcurrentHashMap.)
               :held    (ConcurrentHashMap/newKeySet)
               :running (AtomicBoolean. true)
               :ids     (AtomicInteger. 0)
@@ -350,15 +402,27 @@
 
 (defn- enqueue!
   "Queue `packet` for `peer-id`, holding `publisher` if the queue has grown
-   past queue-pause-at. Refused and counted past queue-limit."
-  [my-id peer-id peer qos packet publisher]
-  (when-let [{:keys [^LinkedBlockingQueue queue] :as link} (link! my-id peer-id peer)]
+   past queue-pause-at. Not sent at all — the peer was unreachable a moment
+   ago, or its link is queue-limit behind — it is handed straight back
+   through `on-lost`."
+  [my-id peer-id peer qos packet publisher on-lost]
+  (if-let [{:keys [^LinkedBlockingQueue queue] :as link} (link! my-id peer-id peer)]
     (if (>= (.size queue) (long queue-limit))
       (do (.increment ^LongAdder MqttStat/droppedMessages)
-          (log/debug "bridge to" peer-id "is" queue-limit "behind; dropping a publish on" (:topic packet)))
-      (do (.put queue {:qos qos :packet packet})
+          (log/debug "bridge to" peer-id "is" queue-limit "behind; handing back a publish on" (:topic packet))
+          (lost! peer-id on-lost))
+      (let [item {:qos qos :packet packet :on-lost on-lost}]
+        (.put queue item)
+        ;; The link may have ended between being looked up and this put —
+        ;; a peer refusing the connection ends it within a millisecond —
+        ;; and its thread has then emptied the queue for the last time.
+        ;; Taken back out if it is still there, so it is handed back once:
+        ;; here, or by that thread if it got to it first.
+        (if (and (not (.get ^AtomicBoolean (:running link))) (.remove queue item))
+          (lost! peer-id on-lost)
           (when (and publisher (> (.size queue) (long queue-pause-at)))
-            (hold! link publisher))))))
+            (hold! link publisher)))))
+    (lost! peer-id on-lost)))
 
 (defn drop!
   "Close and forget the connection to `peer-id`, if any: the registry says
@@ -380,14 +444,16 @@
   "Publish `msg` to `peer-id` at `peer` — {:host :port} — as this broker,
    telling it which shared groups are its to serve. Queued for the link's
    thread; `:publisher` in `msg`, the Connection it came in on, is what is
-   held if the link falls behind.
+   held if the link falls behind, and `:on-lost`, a function of no
+   arguments, is called if a QoS 1 or 2 message does not reach the peer:
+   the peer is unreachable, or goes before acknowledging it.
 
    Retain is off on the way out: what is retained is recorded once, by the
    publisher's broker, and the other end must not store a copy under its own
    name. Version 5 on the wire whatever the publisher spoke, so the
    properties travel; the receiving broker strips them for its 3.1.1
    subscribers as it does for any publish."
-  [my-id peer-id peer group-keys topic {:keys [qos payload properties publisher]}]
+  [my-id peer-id peer group-keys topic {:keys [qos payload properties publisher on-lost]}]
   (let [qos (long (or qos 0))]
     (enqueue! my-id peer-id peer qos
               {:packet-type      :PUBLISH
@@ -398,7 +464,10 @@
                :retain?          false
                :duplicate?       false
                :properties       (with-shares (or properties {}) group-keys)}
-              publisher)))
+              publisher
+              ;; Only a message the peer acknowledges can be lost: at QoS 0
+              ;; there is nothing to hand back.
+              (when (pos? qos) on-lost))))
 
 (def control-prefix
   "Where an instruction to the other broker goes: a publish on a topic
@@ -422,7 +491,7 @@
              :duplicate?       false
              :properties       {:user-properties [["client-id" client-id]
                                                   ["connect-id" (str connect-id)]]}}
-            nil))
+            nil nil))
 
 (defonce forwarder
   ;; (fn [plan topic msg]) or nil, installed alongside `planner`: it knows

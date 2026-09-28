@@ -2,6 +2,14 @@
 
 In this file will go my thoughts and ramblings about this project and what I have done and what I might do next.
 
+## 20260928
+
+Run this to test a different broker, for instance Mosquitto. This is to also check if our tests are any good:
+
+```
+MQTT_BROKER_HOST=localhost MQTT_BROKER_PORT=1883 lein test :mosquitto
+```
+
 ## 20260925
 
 ### The v5 failure list, refreshed
@@ -12,21 +20,21 @@ where this was written. The failure list under 20260908 is stale — every one o
 the ten it names was fixed on 20260909 — and the "range, not a number" notes
 under 20260909 get one cause wrong. What is left:
 
-* **`test_subscribe_failure` — fails every run, by decision.** Needs a deny
+- **`test_subscribe_failure` — fails every run, by decision.** Needs a deny
   policy for `test/nosubscribe`; see 20260909. It also exits without
   disconnecting `aclient`, so the next test (`subscribe_identifiers`) always
   starts with a takeover of a socket the client has already closed.
-* **`test_subscribe_options` — flaky, the test's race.** Line 554 waits on
-  `callback.subscribeds` after subscribing *bclient*; it should be
+- **`test_subscribe_options` — flaky, the test's race.** Line 554 waits on
+  `callback.subscribeds` after subscribing _bclient_; it should be
   `callback2.subscribeds`. As written it never waits, and aclient's PUBLISH can
   reach the broker before bclient's SUBSCRIBE. Still unfixed upstream.
-* **`test_request_response` — flaky, the same race, not retained state.**
+- **`test_request_response` — flaky, the same race, not retained state.**
   Line 682 is the identical `callback.subscribeds` wait after `bclient.subscribe`.
   The retained-message explanation cannot be right: tests run alphabetically,
   and the only two that publish retained messages (`retained_message`,
-  `subscribe_options`) both run *after* it, and `setUpClass` clears retained
+  `subscribe_options`) both run _after_ it, and `setUpClass` clears retained
   messages first.
-* **`test_unsubscribe` — flaky in the run, passes alone.** It runs straight
+- **`test_unsubscribe` — flaky in the run, passes alone.** It runs straight
   after `subscribe_options`, and when that one loses its race it does so at the
   No Local step, before it publishes anything retained — so not retained state
   either. What it does leave behind is
@@ -45,7 +53,7 @@ connection's own teardown runs after its replacement has started delivering, it
 throws away the new connection's in-flight window, and the next delivery
 starts numbering packet identifiers again from 1.
 
-*Later:* fixed for a clean session. `remove-client!` now leaves `*outbound*` and
+_Later:_ fixed for a clean session. `remove-client!` now leaves `*outbound*` and
 `*inflight*` alone when another connection is already registered under the
 client-id, and `session_takeover_test` covers the late teardown. A persistent
 session takes a different path when it is parked, and whether a late expiry
@@ -55,41 +63,41 @@ there can empty a reconnected client's queue is still open.
 
 Fixed, each with a test:
 
-* **A will could go out twice.** Several paths reach `handle-will-if-present`
+- **A will could go out twice.** Several paths reach `handle-will-if-present`
   for one connection (the keep-alive reaper, the socket closing, a takeover),
   and the will stayed on the client after it fired, so a persistent session
   reaped by keep alive was parked with it. It is taken off in the same atomic
   step that reads it now, so it goes out at most once. The `TODO` in
   `check-timer` asking for exactly this is gone.
-* **QoS 2 spent two shared-group turns per message.** The PUBREC ran
+- **QoS 2 spent two shared-group turns per message.** The PUBREC ran
   `subscribers-for` only to pick its reason code, which advanced the rotation,
   and the PUBREL picked again. A two-member group sent every QoS 2 message to
   the same member. The PUBREC now asks whether anyone matches without choosing
   who. The No Local and coalescing gap under 20260908 was already closed;
   `v5_qos2_delivery_test` now pins all three rules on the QoS 2 path.
-* **A keep-alive timer could outlive its client.** See the struck entry under
+- **A keep-alive timer could outlive its client.** See the struck entry under
   "Found on the way, not fixed".
-* **UNSUBSCRIBE left queued messages to be delivered.** §3.10.4 allows either;
+- **UNSUBSCRIBE left queued messages to be delivered.** §3.10.4 allows either;
   the broker now drops pending, not yet sent, messages that only the removed
   subscriptions matched. Anything another subscription still matches, or that
   was already picked for a shared subscription, stays, and in-flight QoS 1 and
   2 still complete. Cluster-queued ones are settled so a resume does not
   resend them.
-* **The late-teardown race** above, for clean sessions.
-* **`lein test` runs in GitHub Actions** on every push and PR, Java 21, with the
+- **The late-teardown race** above, for clean sessions.
+- **`lein test` runs in GitHub Actions** on every push and PR, Java 21, with the
   `^:performance` simulations left out. The cloud sessions I work from cannot
   reach the Rama repository, so a PR's CI run is now the only way they can
   test anything.
 
 Still open:
 
-* The same late-teardown guard for persistent sessions.
-* `test_unsubscribe` in the Paho v5 suite, flaky in the run and unexplained.
-* The Paho conformance suites are not in CI, so a conformance regression only
+- The same late-teardown guard for persistent sessions.
+- `test_unsubscribe` in the Paho v5 suite, flaky in the run and unexplained.
+- The Paho conformance suites are not in CI, so a conformance regression only
   shows when someone runs them by hand.
-* `test_subscribe_failure`, by decision (see 20260909), and the two races in
+- `test_subscribe_failure`, by decision (see 20260909), and the two races in
   the suite itself, which are upstream's to fix.
-* From older lists, not chased: the 53 of 150 subscriber sockets with an empty
+- From older lists, not chased: the 53 of 150 subscriber sockets with an empty
   Send-Q, the regex split in triennium's `split-topic` on the publish path, and
   the median latency MQTT 5 cost.
 
@@ -110,7 +118,7 @@ already-broken behaviour that only became visible once something looked.
 §4.7.1.2: "the multi-level wildcard represents the parent and any number of
 child levels", so `sport/#` matches `sport` as well as `sport/tennis`.
 triennium's matcher walks a level at a time and consults the `#` child of each
-node it *passes through* — but never of the node the topic ends on. So the
+node it _passes through_ — but never of the node the topic ends on. So the
 parent level, the one the paragraph is specifically about, was the single case
 it got wrong:
 
@@ -124,7 +132,7 @@ itself. Nothing in the broker's own tests had ever subscribed to a filter that
 was a prefix of the topic, and nothing had noticed.
 
 Replaced with a recursive matcher of our own, four lines of actual logic, where
-the empty-segments case returns this node's values *and* any `#` beneath it.
+the empty-segments case returns this node's values _and_ any `#` beneath it.
 That is the whole fix, and it is the whole of §4.7.1.2.
 
 ### Overlapping subscriptions delivered twice
@@ -133,7 +141,7 @@ That is the whole fix, and it is the whole of §4.7.1.2.
 Subscription Identifier, or a single copy carrying all of them. The broker sent
 one per subscription. The Paho suite demands the coalesced form — stricter than
 the specification, but it is also the better answer, since the identifiers exist
-so a client can tell *why* a message reached it, and being told the same thing
+so a client can tell _why_ a message reached it, and being told the same thing
 twice with half the answer each time is not that.
 
 `coalesce-subscriptions` collapses each client's matching subscriptions into one
@@ -168,20 +176,20 @@ onward as ordinary.
 Yesterday it was QoS 2 deliveries and wills. The same defect, in four more
 places, all found by the same symptom in the Paho output:
 
-* **retained messages** stored only `{:qos :payload}`, so a subscriber arriving
+- **retained messages** stored only `{:qos :payload}`, so a subscriber arriving
   later got a message stripped of everything the publisher attached — which is
   precisely the difference a retained message exists to remove.
-* **the offline queue** stored `{:topic :payload :qos}`, so a message that
+- **the offline queue** stored `{:topic :payload :qos}`, so a message that
   waited for its session arrived stripped while an identical one delivered live
   did not. It also meant there was no Message Expiry Interval left to expire it
   by.
-* **redelivery on reconnect** built the PUBLISH by hand and never set the
+- **redelivery on reconnect** built the PUBLISH by hand and never set the
   protocol version, so no property block was written at all — and a version 5
   client reads the byte where that block should be as the first byte of the
   payload. The packet is malformed; the redelivery arrives as nonsense or not at
   all. This was the source of the `IndexError` tracebacks the Paho client had
   been printing all along, which I had been treating as harness noise.
-* **retained wills**, stored at CONNECT, the same way.
+- **retained wills**, stored at CONNECT, the same way.
 
 The pattern is always the same: a delivery map written out by hand as topic,
 payload and QoS, next to another path that passes the whole message through.
@@ -210,8 +218,8 @@ there the group is filtered by each client's limit rather than the buffer being
 rebuilt per client, since the buffer is identical and only the limit differs.
 
 **Message Expiry Interval (§3.3.2.3.3).** Both halves: discard a queued message
-whose interval has run out, and send on the interval *reduced by the time it
-spent waiting*. The subtraction is the half that is easy to leave out, and
+whose interval has run out, and send on the interval _reduced by the time it
+spent waiting_. The subtraction is the half that is easy to leave out, and
 without it a message queued for an hour arrives claiming its full lifetime still
 ahead of it, with every hop resetting the clock.
 
@@ -225,7 +233,7 @@ version 5, 0x80 for 3.1.1, which is the only failure code it knows.
 
 Maximum Packet Size, Message Expiry and the ordinary send all end at
 `send-publish!`, which now returns whether it sent. That matters because the
-packet identifier is reserved *before* the packet is built, so a discard has to
+packet identifier is reserved _before_ the packet is built, so a discard has to
 give it back — otherwise every oversized or expired message leaks one, and after
 enough of them the subscriber's window is full of things that were never sent
 and delivery stops for good. Three callers release on false.
@@ -245,7 +253,7 @@ than a defect. Worth writing down, because the failing line looks like a bug
 every time someone runs the suite: the broker answers a SUBSCRIBE for
 `test/nosubscribe` with granted QoS 2, the test wanted 0x80, and the whole
 difference is an authorisation policy that does not exist. The machinery to
-*report* a refusal is there and working — it is what returns 0x8F for a
+_report_ a refusal is there and working — it is what returns 0x8F for a
 malformed filter. What is absent is anything that decides a well-formed filter
 is not allowed.
 
@@ -258,7 +266,7 @@ retained message for a Topic expires, it is discarded and there will be no
 retained message for that topic."
 
 It matters more here than in the queue, because a retained message is the one
-thing in the broker *meant* to sit indefinitely. An interval on one is a
+thing in the broker _meant_ to sit indefinitely. An interval on one is a
 publisher saying how long its answer stays true, and a broker handing out a
 stale answer for ever is worse than one with no answer at all.
 
@@ -273,7 +281,7 @@ every hop that passes it on resets the clock.
 
 The store is also swept every ten seconds. Delivery is already safe without
 that — the accessor refuses an expired message whatever the map still holds —
-but `$SYS` and the console both *count* what is in the map, and an entry nobody
+but `$SYS` and the console both _count_ what is in the map, and an entry nobody
 ever subscribes to again would be held, and reported, for the life of the
 broker.
 
@@ -287,7 +295,7 @@ never expired.
 in isolation, which is the shape of a test problem. It was not one.
 
 Sending a client a DISCONNECT before closing its socket meant queueing the
-packet and then closing. `Connection.close` lands STOP_WRITING *behind*
+packet and then closing. `Connection.close` lands STOP_WRITING _behind_
 whatever is already queued, so the writer does send it — but
 `MqttServer.closeConnection` then shut the channel without waiting for the
 writer to get there. Whether the client saw its DISCONNECT was a race, and the
@@ -314,7 +322,7 @@ arrives before a close.
 
 Second time this session, and this one nearly went into the write-up. The
 broker I started failed to bind — an older instance was still on 1883 — so the
-conformance run I took afterwards was against the *previous* jar, and reported
+conformance run I took afterwards was against the _previous_ jar, and reported
 numbers that were not this code's.
 
 The tell was there in the log and I did not read it: no "Server starting on
@@ -351,16 +359,16 @@ QoS 0, unpaced — the same shape as the gathering-writes measurement, and a
 
 **The first answer, three pairs, every pair the same sign:**
 
-| | deliveries/s | median | p99 |
-|---|---|---|---|
-| pre-v5 | 539,879 | 950 ms | 1617 ms |
-| with v5 | 486,434 | 1507 ms | 2490 ms |
-| | **-9.9%** | **+59%** | **+54%** |
+|         | deliveries/s | median   | p99      |
+| ------- | ------------ | -------- | -------- |
+| pre-v5  | 539,879      | 950 ms   | 1617 ms  |
+| with v5 | 486,434      | 1507 ms  | 2490 ms  |
+|         | **-9.9%**    | **+59%** | **+54%** |
 
 Delivery ratio 1.0000 in every run of both arms, so this was cost, not loss.
 
 **Where it went.** Per subscriber, per publish, the QoS 0 fan-out was doing
-*three* derefs of `*clients*` and about seven map lookups — the protocol
+_three_ derefs of `*clients*` and about seven map lookups — the protocol
 version, the topic alias maximum, the maximum packet size — where before there
 had been one. At twenty subscribers a publish that is sixty lookups where there
 were twenty. It was also allocating a fresh `{:topic topic}` map per subscriber
@@ -369,12 +377,12 @@ every subscription map through `group-by` and a second pass.
 
 Three changes, none of them clever:
 
-* One deref of `*clients*` for the whole fan-out and one lookup per subscriber,
+- One deref of `*clients*` for the whole fan-out and one lookup per subscriber,
   with version, alias maximum and packet-size limit all read from the same
   entry.
-* One shared object for the "no alias" grouping key instead of an identical map
+- One shared object for the "no alias" grouping key instead of an identical map
   per subscriber. Identity also makes hashing it trivial.
-* Coalescing in a single pass, and — the real win — a fast path that returns the
+- Coalescing in a single pass, and — the real win — a fast path that returns the
   matches **untouched** when no client matched more than once, which is the
   overwhelmingly common case. That needs the consumers to read either the
   singular `:subscription-identifier` a stored subscription carries or the
@@ -382,10 +390,10 @@ Three changes, none of them clever:
 
 **Where it ended up**, pooling every paired run of the final build:
 
-| | deliveries/s | median | p99 |
-|---|---|---|---|
-| pre-v5 | 543,961 | 841 ms | 1529 ms |
-| v5, optimised | 538,847 | 1049 ms | 1769 ms |
+|               | deliveries/s | median  | p99     |
+| ------------- | ------------ | ------- | ------- |
+| pre-v5        | 543,961      | 841 ms  | 1529 ms |
+| v5, optimised | 538,847      | 1049 ms | 1769 ms |
 
 Throughput is back to parity — about -3% pooled across seven pairs, which is
 inside the ~6% run-to-run spread this machine gives, and one pair came out
@@ -405,7 +413,7 @@ measuring said otherwise: the neutralised jar failed at exactly the same rate,
 1 in 5.
 
 The drain fix had replaced a `Thread/sleep 25` with a wait on the writer. That
-is right as far as it goes — it guarantees the DISCONNECT is *written* — but
+is right as far as it goes — it guarantees the DISCONNECT is _written_ — but
 written is not read. The broker has stopped reading that socket, so a client
 still sending into it has data sitting unread in the receive buffer, and closing
 a socket in that state sends RST rather than FIN. The RST can discard the very
@@ -415,7 +423,7 @@ receive loop.
 
 So both waits are needed, and they are answering different questions. The drain
 answers "has the packet left". The pause that follows answers "has the peer had
-a chance to take it". Restoring the second, now *after* the first rather than
+a chance to take it". Restoring the second, now _after_ the first rather than
 instead of it, took the test back to 5 runs out of 5. It is only on the paths
 where the broker hangs up on a client and has told it why — not on every close,
 because an ordinary disconnect has nothing in flight to miss and paying it on
@@ -430,19 +438,19 @@ was in `client-generator-2`, and it was mine.
 
 Three hypotheses, all wrong, all cheap to check and worth checking:
 
-* The generator builds a topic from a filter by substituting for `+` and `#`,
+- The generator builds a topic from a filter by substituting for `+` and `#`,
   and I thought the substituted string might contain a `/` and break the match.
   It cannot: spec's generator for `string?` is alphanumeric. 0 of 200.
-* Then that my new topic-filter validation was refusing generated filters, which
+- Then that my new topic-filter validation was refusing generated filters, which
   the test records as subscribed regardless of the SUBACK. Also no: 0 of 200
   generated filters are invalid.
-* Then that coalescing had removed duplicate deliveries the test was quietly
+- Then that coalescing had removed duplicate deliveries the test was quietly
   relying on. Plausible, and still wrong.
 
 What settled it was bisecting instead of theorising. The pre-v5 commit passed
 three runs out of three; HEAD failed. Then a debug-logged capture of a failing
 run showed the whole exchange: CONNACK, SUBACK, one publish, silence. It failed
-on the *first* publish, and at QoS 1 or 2 — where a PUBACK or PUBREC is owed
+on the _first_ publish, and at QoS 1 or 2 — where a PUBACK or PUBREC is owed
 whatever the subscriptions are. The broker had not answered at all.
 
 The topic was 27 levels deep, because the filter it came from was
@@ -453,12 +461,12 @@ branch has no children, so it finds nothing and looks harmless — but each nil
 node recursed twice more, once per branch, and the cost is
 2^levels-remaining. Against a trie holding one short filter:
 
-| topic depth | mine | triennium |
-|---|---|---|
-| 10 levels | 7.5 ms | 0.055 ms |
-| 15 levels | 37.8 ms | 0.118 ms |
-| 20 levels | 493 ms | 0.086 ms |
-| 22 levels | **1807 ms** | 0.086 ms |
+| topic depth | mine        | triennium |
+| ----------- | ----------- | --------- |
+| 10 levels   | 7.5 ms      | 0.055 ms  |
+| 15 levels   | 37.8 ms     | 0.118 ms  |
+| 20 levels   | 493 ms      | 0.086 ms  |
+| 22 levels   | **1807 ms** | 0.086 ms  |
 
 Doubling per level. At 27 levels that is about a minute, which is why the
 broker never answered, and why the whole test sometimes ran past 400 seconds
@@ -528,7 +536,7 @@ than filtering.
 exit — `mqttkat.profiling`, resolved at run time rather than required, so the
 profiler stays a :dev dependency and never reaches the uberjar. `alloc` and
 `wall` work too; `wall` is the one worth remembering, because a broker that is
-*waiting* looks idle to a CPU profile.
+_waiting_ looks idle to a CPU profile.
 
 First real run: 2,200 clients, 42M packets received, peak 210,195/s, nothing
 dropped. 2.56M samples.
@@ -538,16 +546,16 @@ dropped. 2.56M samples.
 Attributing map lookups to the nearest frame of ours puts almost all of it in
 one place — the QoS 1/2 packet identifier bookkeeping:
 
-| | inclusive |
-|---|---|
-| `acquire-packet-identifier!` | 8.91% |
-| `release-packet-identifier!` | 6.13% |
-| `drain-pending!` | 2.27% |
-| — | |
-| `MqttPublish/encode` | 2.21% |
-| `matching-values` | 1.18% |
-| `coalesce-subscriptions` | 0.47% |
-| `alias-outbound` | 0.29% |
+|                              | inclusive |
+| ---------------------------- | --------- |
+| `acquire-packet-identifier!` | 8.91%     |
+| `release-packet-identifier!` | 6.13%     |
+| `drain-pending!`             | 2.27%     |
+| —                            |           |
+| `MqttPublish/encode`         | 2.21%     |
+| `matching-values`            | 1.18%     |
+| `coalesce-subscriptions`     | 0.47%     |
+| `alias-outbound`             | 0.29%     |
 
 Acquiring and releasing an identifier costs seven times what encoding the packet
 costs. `PersistentHashMap$ArrayNode.find`, `RT.get` and
@@ -583,7 +591,7 @@ publish and every PUBACK did `update-in [client-id :inflight]` on it: path
 copying through a map with an entry per client, and CAS retries because every
 connection thread wanted the same atom.
 
-It is now an atom *of* atoms. The registry is still keyed by client id — that
+It is now an atom _of_ atoms. The registry is still keyed by client id — that
 part was never the problem and is required, since §4.4 makes a persistent
 session's unacknowledged messages outlive the connection — but each client's
 state is its own atom. The registry is read on the hot path and written only
@@ -596,13 +604,13 @@ known in three namespaces; now it is known in one.
 
 **Profiled, same load, both builds:**
 
-| | base | per-client |
-|---|---|---|
-| total samples | 234,912 | **115,061** |
-| `Atom.swap` | 45.98% | **9.23%** |
-| `acquire-packet-identifier!` | 9.20% | 3.09% |
-| `release-packet-identifier!` | 15.19% | 3.77% |
-| `take-pending!` | 15.02% | 2.72% |
+|                              | base    | per-client  |
+| ---------------------------- | ------- | ----------- |
+| total samples                | 234,912 | **115,061** |
+| `Atom.swap`                  | 45.98%  | **9.23%**   |
+| `acquire-packet-identifier!` | 9.20%   | 3.09%       |
+| `release-packet-identifier!` | 15.19%  | 3.77%       |
+| `take-pending!`              | 15.02%  | 2.72%       |
 
 Absolute samples in `Atom.swap` fell 90%, and the broker did the same 2,400,000
 deliveries for **half the CPU**. The top frames are now G1 and
@@ -617,7 +625,7 @@ what sets the rate is the delivery path and the acknowledgement round trip, not
 cycles. Halving the CPU of something that was not the bottleneck changes the
 headroom, not the number.
 
-Where it does show is when CPU *is* scarce. Under the profiler — which taxes
+Where it does show is when CPU _is_ scarce. Under the profiler — which taxes
 every thread — the same load gave 145,490 deliveries/s on the old code and
 213,333 on the new, with median latency 3,146 ms against 1,442 ms. Same work,
 ratio 1.0000 both times.
@@ -643,7 +651,7 @@ change — and it is the same shape as the lead recorded on 20260903, where a
 a handful of messages then and is thousands now at 2,000 subscribers, which
 makes it far easier to chase. Still not chased.
 
-*Later:* chased and fixed, in the next section.
+_Later:_ chased and fixed, in the next section.
 
 ### The stall: a publisher paused for ever
 
@@ -683,7 +691,7 @@ removes it without ever resuming it. It is no longer a waiter, so no later
 `drained()` finds it either. That publisher's socket is never read again: it
 stops acknowledging, its own window fills, and it goes silent for good. The
 re-check at the end of `pauseUntilDrained` covers the case where the subscriber
-drained *before* the pause, but not this one, because by then the set is empty
+drained _before_ the pause, but not this one, because by then the set is empty
 and `drained()` returns on its first line.
 
 The fix is to take each waiter out before resuming it, and never blind-clear.
@@ -697,8 +705,8 @@ Three consecutive 400,000 message runs afterwards: 8,000,000 delivered,
 ### A test that passed against the bug it was written for
 
 The first version of the regression test hammered `drained()` and
-`pauseUntilDrained` from two threads and asserted the invariant — *a paused
-publisher must be somebody's waiter*. It passed against the broken code.
+`pauseUntilDrained` from two threads and asserted the invariant — _a paused
+publisher must be somebody's waiter_. It passed against the broken code.
 
 It could not have failed. Each round started with an empty waiter set, so
 `drained()` returned at `if (waiters.isEmpty())` and never reached the `clear()`
@@ -759,7 +767,7 @@ own docstring: a publish that is not retained is forwarded and forgotten, and
 keeping the payloads to answer "what is busy" would make the broker a store
 rather than a console.
 
-That reasoning is about payloads. Counting *names* costs neither — the broker
+That reasoning is about payloads. Counting _names_ costs neither — the broker
 already has the topic string in hand, and a counter per topic is a few bytes.
 So the page now has an Active topics table above the retained tree: the busiest
 dozen by rate, with the running total beside it.
@@ -862,7 +870,7 @@ tools.logging expands `(log/trace ...)` into
   (if (impl/enabled? logger level) ...))
 ```
 
-The logger is fetched *before* the level is checked, so a disabled statement
+The logger is fetched _before_ the level is checked, so a disabled statement
 still pays for the lookup. And the lookup is not a map read: the factory is
 slf4j over log4j2, and log4j2 works out the calling class by walking the stack.
 Every frame under tools.logging in the profile was stack-walking machinery —
@@ -879,9 +887,9 @@ still work — a log4j2 Logger is a live view of the configuration, which is wha
 The suite proves that: it passes unchanged, including the tests that turn
 loggers off mid-run.
 
-| | before | after |
-|---|---|---|
-| under tools.logging | 38.51% | **0.40%** |
+|                          | before  | after      |
+| ------------------------ | ------- | ---------- |
+| under tools.logging      | 38.51%  | **0.40%**  |
 | total samples, same work | 111,410 | **75,711** |
 
 A third of the broker's CPU, spent on messages nobody asked for. End to end,
@@ -891,7 +899,7 @@ the CPU saving, as ever, because this load is not purely CPU-bound — but this
 time it does move the number.
 
 Worth keeping in mind before adding a `log/trace` to anything that runs per
-message. The statement is free to *read* and was costing more than encoding the
+message. The statement is free to _read_ and was costing more than encoding the
 packets.
 
 ### What is left
@@ -908,7 +916,7 @@ the trie. Splitting on a single character does not need a regex. Not chased.
 
 `--churn` cycles whole connections. `--resubscribe N` is the other half: a
 client that stays connected and changes what it is subscribed to, N times a
-second, one by default. It unsubscribes and subscribes again on a *different*
+second, one by default. It unsubscribes and subscribes again on a _different_
 topic, so the broker's trie really does lose an entry and gain one somewhere
 else rather than replacing a value in place.
 
@@ -938,7 +946,7 @@ client that had gone quiet.
 **A sentinel that overflowed.** Disabled schedules started as a deadline of
 `Long/MAX_VALUE`, and `now + Long/MAX_VALUE` wraps to a negative number — so a
 disabled schedule looked permanently overdue, the loop spun on it, and the
-*enabled* one never fired. `--resubscribe 0` reported zero reconnects with churn
+_enabled_ one never fired. `--resubscribe 0` reported zero reconnects with churn
 switched on, which is what caught it. Disabled schedules are `nil` now, and
 "nothing scheduled" ends the loop rather than being a very distant time.
 
@@ -996,25 +1004,23 @@ early and producing an error about `did` not being a parameter vector.
 
 ### Notes to self
 
-* **mosquitto had quietly taken port 1883**, as a systemd service, and served
+- **mosquitto had quietly taken port 1883**, as a systemd service, and served
   an entire conformance run before I noticed — the giveaway was `backlog 100 on
-  127.0.0.1` where the broker listens `1024 on *`. Everything since runs on
-  1884. Check what is listening before believing a run.
-* `client_test.py` cannot be given `-p` at all: it reads the option but never
+127.0.0.1` where the broker listens `1024 on *`. Everything since runs on 1884. Check what is listening before believing a run.
+- `client_test.py` cannot be given `-p` at all: it reads the option but never
   removes it from `sys.argv`, so unittest sees it and dies. Same defect as the
   `-h` one in `client_test5.py`. Running the 3.1.1 suite anywhere but 1883 means
   running a copy with the default changed.
-* `session_takeover_test` flaked once under full-suite load and passed on a
+- `session_takeover_test` flaked once under full-suite load and passed on a
   re-run and in isolation. It settles for a fixed 400 ms.
-* Two of the remaining suite failures — `request_response`, `unsubscribe` —
+- Two of the remaining suite failures — `request_response`, `unsubscribe` —
   pass in isolation and fail in the run. The suite clears retained messages
   once, at startup, so anything a later test leaves behind is somebody else's
   problem. Worth remembering before treating a suite failure as a broker bug.
-  *Later:* the retained-state explanation does not hold for either; see
-  20260925. `request_response` is the same race as `subscribe_options`, and
+  _Later:_ the retained-state explanation does not hold for either; see 20260925. `request_response` is the same race as `subscribe_options`, and
   `unsubscribe` is still unexplained.
-* **`test_subscribe_options` races, and the race is in the test.** After
-  subscribing *bclient* it waits on `callback.subscribeds` — aclient's callback,
+- **`test_subscribe_options` races, and the race is in the test.** After
+  subscribing _bclient_ it waits on `callback.subscribeds` — aclient's callback,
   not `callback2` — and `waitfor` loops `while len(queue) < depth`, so with
   aclient's own SUBACK already sitting there `1 < 1` is false and it returns
   without waiting at all. aclient then publishes, possibly before the broker has
@@ -1022,7 +1028,7 @@ early and producing an error about `did` not being a parameter vector.
   three times it gave OK, OK, FAILED. That failure signature is identical to the
   one the No Local bug produced, which is worth knowing — I would otherwise have
   gone looking at `deliverable-subscribers` again.
-* So the suite score is a range, not a number: 25 or 26 of 27 depending on the
+- So the suite score is a range, not a number: 25 or 26 of 27 depending on the
   run, and 9 or 10 of 10 on the 3.1.1 side. Quote the range.
 
 ## 20260908
@@ -1035,16 +1041,16 @@ went in as slices — tests first for each, then the implementation.
 
 Three new files carry the whole of it:
 
-* **`MqttProperties.java`** — the property block (§2.2.2). All 27 identifiers
+- **`MqttProperties.java`** — the property block (§2.2.2). All 27 identifiers
   in one table of `record Prop(int id, Keyword key, Type type, boolean
-  repeatable)`, across seven wire encodings, with encode and decode driven off
+repeatable)`, across seven wire encodings, with encode and decode driven off
   that table rather than off 27 switch arms. Variable Byte Integers (§1.5.5)
   live here too, since the block is length-prefixed with one.
-* **`MqttReasonCode.java`** — every reason code as a byte constant, with
+- **`MqttReasonCode.java`** — every reason code as a byte constant, with
   `isError` reading the 0x80 top bit, which is the whole of §2.4's convention.
   `name(byte)` is built by reflecting over the class's own fields, so a code
   cannot be added without becoming printable.
-* **`MqttProtocolError.java`** — an `IOException` that carries the reason code
+- **`MqttProtocolError.java`** — an `IOException` that carries the reason code
   to send back. That is the point of it: in 3.1.1 a malformed packet can only
   be met with a closed socket, and in 5.0 the client is owed an explanation.
 
@@ -1131,12 +1137,12 @@ to be O(1) on the connect path rather than a scan.
 **Will Delay (§3.1.3.2.2).** The will fires at `min(delay, session expiry)`, not
 at the delay — a session expiry of 0, which is what a 3.1.1 client effectively
 has, means immediately however long a delay was asked for. There would be
-nothing left to come back to. And §3.1.2.5: a reconnection *deletes* the
+nothing left to come back to. And §3.1.2.5: a reconnection _deletes_ the
 pending will.
 
 That last one had an ordering bug in my first attempt. I cancelled the pending
 will and then did the takeover — but the takeover disconnects the old
-connection, which schedules a *new* will, and that one had nothing left to
+connection, which schedules a _new_ will, and that one had nothing left to
 cancel it. The order has to be takeover first, then cancel.
 
 **Session Expiry (§3.1.2.11.2).** Version 5 splits into two things what 3.1.1
@@ -1145,7 +1151,7 @@ long the session outlives the connection. Without a timer a session with a
 five-second expiry lived as long as the broker did.
 
 Also fixed while in there: a polite DISCONNECT was publishing the will. §3.14.4
-says the server discards it *without publishing*, so every clean goodbye was
+says the server discards it _without publishing_, so every clean goodbye was
 telling that client's subscribers it had crashed. No test caught it because
 both will tests drop the socket instead — which is the one case where the will
 genuinely should fire. Fixing it then broke `last-will-test`, because the
@@ -1162,7 +1168,7 @@ topic over and over: `sensors/building-4/floor-2/room-17/temperature` costs 49
 bytes every time and 2 after the first.
 
 Two independent mappings, one per direction, each bounded by what the
-*receiver* agreed to. The broker's Topic Alias Maximum in the CONNACK bounds
+_receiver_ agreed to. The broker's Topic Alias Maximum in the CONNACK bounds
 what a client may send it; the client's, in its CONNECT, bounds what the broker
 may send back. A client's alias 1 and the broker's alias 1 on the same
 connection are different things pointing at different topics.
@@ -1175,7 +1181,7 @@ literal `10` repeated in two files, since the code enforcing a limit has to be
 quoting the same number the client was promised.
 
 **Outbound** did not exist. `alias-outbound` decides, per subscriber, one of
-three things: no alias yet and room for one, so send the topic *and* the alias;
+three things: no alias yet and room for one, so send the topic _and_ the alias;
 already bound, so send the alias with an empty topic name; allowance spent, so
 send the topic in full. The first case has to send both, because an alias the
 receiver has never seen means nothing to it — the saving starts with the second
@@ -1201,7 +1207,7 @@ exactly the group it was in before.
 
 The alias tables live in an atom of their own keyed by connection, not in
 `*clients*` where the inbound half used to sit. `*clients*` is what a persistent
-session gets *parked* under when the socket drops, so aliases stored there
+session gets _parked_ under when the socket drops, so aliases stored there
 survived into a resumed session and the new connection would resolve numbers it
 had never declared. The lifetime is the connection's, so the storage should be
 too.
@@ -1244,7 +1250,7 @@ out of three.
 reason: the will was rebuilt as topic, QoS, payload and retain, and everything
 §3.1.3.2 attached to it was dropped. It goes through the same whitelist as a
 forwarded publish now, which is also what keeps the Will Delay Interval out of
-it — that one is an instruction to the broker about *when* to send this, and
+it — that one is an instruction to the broker about _when_ to send this, and
 means nothing to a subscriber.
 
 Two and three were the same symptom in the Paho output (`'Properties' object
@@ -1271,7 +1277,7 @@ Still failing: `maximum_packet_size`, `publication_expiry` (Message Expiry),
 `subscribe_identifiers`, `subscribe_options`, `assigned_clientid`,
 `retained_message`, `request_response`.
 
-*Later:* all ten fixed on 20260909, apart from `subscribe_failure` (left by
+_Later:_ all ten fixed on 20260909, apart from `subscribe_failure` (left by
 decision) and the flaky ones; see 20260925 for the list as it stands.
 
 One thing found and deliberately not fixed, since it is a behavioural change
@@ -1280,7 +1286,7 @@ well beyond aliases: `pubrel` calls `qos-2-send` with raw
 `select-shared`. So No Local and shared-subscription round-robin do not apply to
 QoS 2 messages at all. That probably bears on `subscribe_options`.
 
-*Later:* fixed since. `pubrel` now delivers through `subscribers-for`, the same
+_Later:_ fixed since. `pubrel` now delivers through `subscribers-for`, the same
 No Local, shared-group and coalescing steps every other publish takes, and
 `v5_qos2_delivery_test.clj` pins all three on the QoS 2 path.
 
@@ -1293,7 +1299,7 @@ for it to enhance.
 Smaller, and mostly presentation. The chart was rebuilt; more of the data the
 broker already had made it onto the page; the dummy Settings tab was taken out
 of the navigation but left in the source; the middle column scrolls on its own
-so the broker panel sits at the bottom of the *screen* rather than the bottom of
+so the broker panel sits at the bottom of the _screen_ rather than the bottom of
 the page; the `$SYS` twisty in the topic tree does something now. Two of these
 were real bugs rather than polish — the readings were not aligned with their
 headings, and values jumped as data arrived and left, which came down to the
@@ -1303,67 +1309,65 @@ snapshot and the tick go through it.
 
 ### What I got wrong, collected
 
-* Called a deterministic decoder failure "intermittent", twice, before working
+- Called a deterministic decoder failure "intermittent", twice, before working
   out it was the same 3.1.1-shaped-packet mistake both times.
-* Took a conformance measurement with the unit suite running concurrently and
+- Took a conformance measurement with the unit suite running concurrently and
   nearly reported 1 pass as a regression.
-* Cancelled a pending will before a takeover that then scheduled another one.
-* Wrote an alias assignment that re-sent the topic name for ever, and would
+- Cancelled a pending will before a takeover that then scheduled another one.
+- Wrote an alias assignment that re-sent the topic name for ever, and would
   have shipped it if the test had used one alias instead of two.
-* Assumed the QoS 2 property loss explained the will's missing properties too.
+- Assumed the QoS 2 property loss explained the will's missing properties too.
   It did not; they were two bugs.
 
 ## 20260906
 
 ────────────────────────────────────────────────────────────────
-  RESULTS   (duration-reached)
-  ────────────────────────────────────────────────────────────────
+RESULTS (duration-reached)
+────────────────────────────────────────────────────────────────
 
-  run
-    broker      localhost:1883
-    clients     2000 publishers, 20000 subscribers over 1000 topics
-    messages    QoS 1, 128 byte payloads, window 100
-    target      10000/s
-    asked for   100800 seconds
-    setup       20731 ms to connect and subscribe
-    ran for     100800.21 s publishing, 5.00 s draining
+run
+broker localhost:1883
+clients 2000 publishers, 20000 subscribers over 1000 topics
+messages QoS 1, 128 byte payloads, window 100
+target 10000/s
+asked for 100800 seconds
+setup 20731 ms to connect and subscribe
+ran for 100800.21 s publishing, 5.00 s draining
 
-  throughput
-    published  1008000566 in 100800.21 s  (    10000/s)
-    delivered  20160011320 in 100805.21 s  (   199990/s)
-    expected   20160011320               (1.0000 delivered)
-    payload    123046.94 MB out, 2460938.88 MB in  (1.22 MB/s, 24.41 MB/s)
+throughput
+published 1008000566 in 100800.21 s ( 10000/s)
+delivered 20160011320 in 100805.21 s ( 199990/s)
+expected 20160011320 (1.0000 delivered)
+payload 123046.94 MB out, 2460938.88 MB in (1.22 MB/s, 24.41 MB/s)
 
-  latency, milliseconds
-    service    n 20160011320  min     0.14  med   131.07  mean   135.21  sd    64.01  p95   237.57  p99   278.53  p99.9   360.45  max   777.61
-    response   n 20160011320  min     0.44  med   147.46  mean   151.11  sd    65.59  p95   253.95  p99   294.91  p99.9   376.83  max   797.01
-    ack        n 1008000566  min     0.12  med   131.07  mean   135.31  sd    64.30  p95   237.57  p99   278.53  p99.9   360.45  max   683.61
+latency, milliseconds
+service n 20160011320 min 0.14 med 131.07 mean 135.21 sd 64.01 p95 237.57 p99 278.53 p99.9 360.45 max 777.61
+response n 20160011320 min 0.44 med 147.46 mean 151.11 sd 65.59 p95 253.95 p99 294.91 p99.9 376.83 max 797.01
+ack n 1008000566 min 0.12 med 131.07 mean 135.31 sd 64.30 p95 237.57 p99 278.53 p99.9 360.45 max 683.61
 
-  was the generator the bottleneck?
-    achieved          10000/s against 10000/s asked for  (the target was met, so this is the broker's number)
-    mean lateness    15.903 ms per message   (added 15.905 ms to the average delivery)
-    window-blocked   100.68 s total  (waiting for acknowledgements)
-    send failures         0
-    unacknowledged        0 publishes still outstanding at the end
-    attempted 1008000566, published 1008000566
+was the generator the bottleneck?
+achieved 10000/s against 10000/s asked for (the target was met, so this is the broker's number)
+mean lateness 15.903 ms per message (added 15.905 ms to the average delivery)
+window-blocked 100.68 s total (waiting for acknowledgements)
+send failures 0
+unacknowledged 0 publishes still outstanding at the end
+attempted 1008000566, published 1008000566
 
-  counters
-    attempted                1008000566
-    published                1008000566
-    failed                            0
-    acked                    1008000566
-    received                20160011320
-    received-dup                      0
-    received-unparseable              0
-
-
+counters
+attempted 1008000566
+published 1008000566
+failed 0
+acked 1008000566
+received 20160011320
+received-dup 0
+received-unparseable 0
 
 ## 20260904
 
 ### A load generator of our own
 
 The whole line of work that started with mqttloader reporting 9.8 second
-latencies ended with the finding that the *client* was the bottleneck, not the
+latencies ended with the finding that the _client_ was the bottleneck, not the
 broker. Everything since has been about measuring the broker honestly — the
 queued/written/discarded/dropped split, the back-pressure counters, `$SYS`, the
 console — while the thing generating the load stayed borrowed and opaque. This
@@ -1383,23 +1387,23 @@ run can be pointed at mosquitto for a comparison that means something.
 
 ### The options
 
-| option | default | what it does |
-|---|---|---|
-| `--host HOST` | localhost | broker to connect to |
-| `--port PORT` | 1883 | broker port |
-| `--publishers N` | 10 | clients that only publish |
-| `--subscribers N` | 10 | clients that only subscribe |
-| `--topics N` | 5 | topics, shared between both pools |
-| `--messages N` | 100000 | total to publish; **0 runs until stopped** |
-| `--duration N` | 0 | stop after N seconds; 0 for no time limit |
-| `--rate N` | 10000 | target messages/second, aggregate; 0 for unlimited |
-| `--qos 0\|1\|2` | 0 | publish and subscribe QoS |
-| `--size N` | 128 | payload bytes, minimum 28 |
-| `--window N` | 100 | unacknowledged publishes allowed per publisher |
-| `--progress-ms N` | 5000 | how often to print a progress line |
-| `--drain-ms N` | 5000 | quiet period that counts as fully drained |
-| `--max-drain-ms N` | 300000 | cap on the whole drain |
-| `--source-ips N` | 0 | spread clients over N source addresses; 0 chooses |
+| option             | default   | what it does                                       |
+| ------------------ | --------- | -------------------------------------------------- |
+| `--host HOST`      | localhost | broker to connect to                               |
+| `--port PORT`      | 1883      | broker port                                        |
+| `--publishers N`   | 10        | clients that only publish                          |
+| `--subscribers N`  | 10        | clients that only subscribe                        |
+| `--topics N`       | 5         | topics, shared between both pools                  |
+| `--messages N`     | 100000    | total to publish; **0 runs until stopped**         |
+| `--duration N`     | 0         | stop after N seconds; 0 for no time limit          |
+| `--rate N`         | 10000     | target messages/second, aggregate; 0 for unlimited |
+| `--qos 0\|1\|2`    | 0         | publish and subscribe QoS                          |
+| `--size N`         | 128       | payload bytes, minimum 28                          |
+| `--window N`       | 100       | unacknowledged publishes allowed per publisher     |
+| `--progress-ms N`  | 5000      | how often to print a progress line                 |
+| `--drain-ms N`     | 5000      | quiet period that counts as fully drained          |
+| `--max-drain-ms N` | 300000    | cap on the whole drain                             |
+| `--source-ips N`   | 0         | spread clients over N source addresses; 0 chooses  |
 
 Most are obvious. The ones that are not:
 
@@ -1420,7 +1424,7 @@ millisecond and sends that millisecond's worth in a burst, because `parkNanos`
 has no finer pacing to give; the report says so when it is doing that.
 
 `--rate 0` means flat out, and the report is careful to call the resulting
-number a ceiling for the generator *and* the broker together rather than a
+number a ceiling for the generator _and_ the broker together rather than a
 measurement of the broker.
 
 **`--churn`** is how many subscribers are reconnected per second, and
@@ -1453,8 +1457,8 @@ report says the delivered count is a floor rather than a total.
 
 ### Two latencies, and why there are two
 
-The payload carries when the publisher was *scheduled* to send and when it
-*actually* sent, so the subscriber can compute both:
+The payload carries when the publisher was _scheduled_ to send and when it
+_actually_ sent, so the subscriber can compute both:
 
     service   now - actual    what the broker did with it
     response  now - intended  what a client would have experienced
@@ -1471,8 +1475,8 @@ the window, send failures, publishes never acknowledged.
 
 ### Four things I got wrong building it
 
-**The bottleneck verdict fired on a healthy run.** It compared lateness *summed
-over every message* against wall time, so 9.14 s looked alarming when it was
+**The bottleneck verdict fired on a healthy run.** It compared lateness _summed
+over every message_ against wall time, so 9.14 s looked alarming when it was
 457 us each — `parkNanos` granularity — on a run that held 5,001/s against a
 5,000/s target.
 
@@ -1494,7 +1498,7 @@ so a two million message run reported deliveries that were still arriving at
 opposite, that a slow run "is not cut off in the middle of the tail it is
 trying to measure". Fixed, a 300k message run drains for 13.79 s against 18.53 s
 of publishing, and reports 0.9999 delivered where it had been reporting far
-less. The delivery *rate* was wrong for the same reason: it divided deliveries
+less. The delivery _rate_ was wrong for the same reason: it divided deliveries
 that arrived during the drain by the publishing window alone.
 
 ### The console was counting packets and calling them messages
@@ -1513,7 +1517,7 @@ looked plausible, which is why it needed a test rather than an eye.
 
 The headline metric and both lines of the throughput chart are PUBLISH now.
 Packets have their own rows next to the PUBLISH ones, because the gap between
-them *is* the acknowledgement traffic, which at QoS 1 is most of what the broker
+them _is_ the acknowledgement traffic, which at QoS 1 is most of what the broker
 is doing and is invisible in a message count. `$SYS/broker/messages/received` is
 unchanged and still counts every packet — that is Mosquitto's definition, and
 anything pointed at both brokers should keep reading the same thing.
@@ -1522,8 +1526,8 @@ anything pointed at both brokers should keep reading the same thing.
 
 The question came the other way round — whether disabling Nagle trades latency
 for throughput — and it is worth writing down which way it actually goes.
-Nagle *on* coalesces small writes into fuller packets: better throughput per
-byte, worse latency. Nagle *off* sends every write immediately: better latency,
+Nagle _on_ coalesces small writes into fuller packets: better throughput per
+byte, worse latency. Nagle _off_ sends every write immediately: better latency,
 more packets. So turning it off buys latency at throughput's expense, not the
 reverse.
 
@@ -1574,10 +1578,10 @@ how the two were compared without swapping binaries.
 Five runs each, 50 publishers, 1,000 subscribers, 50 topics, QoS 0, unlimited
 rate:
 
-| | deliveries/s | sd | median | p99 | packets/write |
-|---|---|---|---|---|---|
-| one write per packet | 796,750 | 7,184 | 2202 ms | 4116 ms | 1.0 |
-| gathered | **853,458** | 15,783 | **1927 ms** | **2988 ms** | 13.5-17.6 |
+|                      | deliveries/s | sd     | median      | p99         | packets/write |
+| -------------------- | ------------ | ------ | ----------- | ----------- | ------------- |
+| one write per packet | 796,750      | 7,184  | 2202 ms     | 4116 ms     | 1.0           |
+| gathered             | **853,458**  | 15,783 | **1927 ms** | **2988 ms** | 13.5-17.6     |
 
 +7.1% throughput, -27% at p99, -12.5% at the median, and about 93% fewer
 syscalls. Better on both axes at once, which is the sign it is cheaper work
@@ -1627,14 +1631,14 @@ The question was how well QoS 1 and 2 are tested against a real broker, and
 cloverage answered it plainly. `mqttkat.handlers` was at 52.84% of forms, and
 the shape of what was missing mattered more than the number:
 
-| function | lines never executed |
-|---|---|
-| `qos-2` | 5 |
-| `qos-2-send` | 12 |
-| `pubrec` | 4 |
-| `pubrel` | 7 |
-| `pubcomp` | 5 |
-| `take-pending!` | 6 |
+| function        | lines never executed |
+| --------------- | -------------------- |
+| `qos-2`         | 5                    |
+| `qos-2-send`    | 12                   |
+| `pubrec`        | 4                    |
+| `pubrel`        | 7                    |
+| `pubcomp`       | 5                    |
+| `take-pending!` | 6                    |
 
 The one "covered" line on each QoS 2 function was its `defn` being evaluated at
 load. There was no `:qos 2` anywhere in the default suite, so the whole
@@ -1677,7 +1681,7 @@ it belongs to a session.
 Keyed by client-id now, and cleared in `remove-client!` for a clean session.
 The matched subscribers are no longer stored either — §4.3.3 publishes the
 message when PUBREL arrives, so the subscribers are whoever is subscribed
-*then*, and anything captured at PUBLISH time may point at a connection that
+_then_, and anything captured at PUBLISH time may point at a connection that
 has since gone.
 
 ### Messages jumping the queue
@@ -1719,7 +1723,7 @@ suite untrustworthy.
 client's own read thread. Opt-in rather than the default, because an inline put
 stalls the client's reader once the channel fills, which would change how every
 test that does not drain behaves. The tests that assert a sequence use it — and
-the ordering violation in the section above was only visible *because* one of
+the ordering violation in the section above was only visible _because_ one of
 them did.
 
 ### A bug I reported that was not there
@@ -1745,15 +1749,15 @@ tests, three failures, and every one of them something the unit suite had no
 opinion about. Worth doing much earlier: a suite written by people who did not
 write this broker asks questions I would not have thought to ask.
 
-First, what is *not* wrong with it. The suite is dormant — last commit January
+First, what is _not_ wrong with it. The suite is dormant — last commit January
 2024, and the local checkout is level with origin, so there is nothing newer to
 pull. On Python 3.14 it makes two kinds of noise, both its own:
 
-* `DeprecationWarning: It is deprecated to return a value that is not None from
-  a test case`. Every test ends `return succeeded`. Deprecated since 3.11, and
+- `DeprecationWarning: It is deprecated to return a value that is not None from
+a test case`. Every test ends `return succeeded`. Deprecated since 3.11, and
   one day an error.
-* `OSError(9, 'Bad file descriptor')` out of the client's receive thread.
-  Errno 9 is the giveaway: EBADF means *this process* closed the descriptor. A
+- `OSError(9, 'Bad file descriptor')` out of the client's receive thread.
+  Errno 9 is the giveaway: EBADF means _this process_ closed the descriptor. A
   peer closing a connection gives ECONNRESET or a clean EOF, never EBADF, so
   the broker cannot produce it. It is a teardown race in the suite's own client
   — `disconnect()` ends by resetting `stopping = False`, and `connect()` then
@@ -1766,11 +1770,10 @@ Neither explains a single failing assertion. Useful to have established, since
 ### $ topics, and four session bugs behind them
 
 **A wildcard filter matched a $ topic.** §4.7.2: a filter beginning with `#` or
-`+` must not match a topic name beginning with `$`. `+/+` was happily matching
-`$TopicA/B`. Triennium does not know the rule, so each subscription now records
+`+` must not match a topic name beginning with `$`. `+/+`was happily matching`$TopicA/B`. Triennium does not know the rule, so each subscription now records
 the filter it was made with and `matching-subscribers` sieves the matches. The
-rule is about the first level of the *filter*, not about `$` appearing
-anywhere: `$SYS/#` still matches `$SYS/foo`, and a blunt "drop anything
+rule is about the first level of the *filter*, not about `$`appearing
+anywhere:`$SYS/#` still matches `$SYS/foo`, and a blunt "drop anything
 starting with $" would have passed the first test and broken that one.
 
 **Session Present was reported on a clean connect.** §3.2.2.2 requires 0
@@ -1779,7 +1782,7 @@ under the client-id, so a client asking for a fresh session was told it had
 resumed one — and a client that believes that does not re-subscribe.
 
 **A clean connect did not discard the stored session.** §3.1.2.4. The parked
-entry, its subscriptions and its queued messages all survived, so the *next*
+entry, its subscriptions and its queued messages all survived, so the _next_
 persistent connect resumed a session the client had explicitly asked to be rid
 of, and nothing ever cleaned it up.
 
@@ -1805,13 +1808,13 @@ it.
 
 `test_unsubscribe` started failing after the session fixes, having passed
 before. It was not a regression. `test_retained_messages` had been failing at
-its *first* assertion, before it published anything; with Session Present fixed
+its _first_ assertion, before it published anything; with Session Present fixed
 it got further, published three retained messages, and then failed at a later
 assertion — so it never reached its own cleanup and left them set for the next
 test to trip over. Fixing the retained replay fixed both.
 
 Worth remembering the shape of that: in a suite of order-dependent tests
-sharing two clients and a broker, a test getting *further* can break the one
+sharing two clients and a broker, a test getting _further_ can break the one
 after it. The second failure was information about the first, not a new
 problem.
 
@@ -1846,19 +1849,19 @@ lein cloverage --ns-regex 'mqttkat\..*' \
   --test-ns-regex 'mqttkat\.(flow|connection|connect|ping|smoke|keep-alive|core|backpressure|packet-identifier|qos2|session)-test'
 ```
 
-|                   Namespace | % Forms | % Lines |
-|-----------------------------|---------|---------|
-|              mqttkat.client |   41.25 |   69.01 |
-|            mqttkat.handlers |   67.36 |   95.48 |
-|    mqttkat.handlers.connack |    9.52 |   66.67 |
-|    mqttkat.handlers.connect |   71.33 |   98.11 |
-| mqttkat.handlers.disconnect |   71.43 |  100.00 |
-|                   mqttkat.s |   90.91 |  100.00 |
-|              mqttkat.server |   52.87 |   76.74 |
-|                mqttkat.spec |   78.20 |  100.00 |
-|                mqttkat.util |    3.79 |   20.45 |
-|-----------------------------|---------|---------|
-|                   ALL FILES |   66.43 |   87.68 |
+| Namespace                     | % Forms   | % Lines   |
+| ----------------------------- | --------- | --------- |
+| mqttkat.client                | 41.25     | 69.01     |
+| mqttkat.handlers              | 67.36     | 95.48     |
+| mqttkat.handlers.connack      | 9.52      | 66.67     |
+| mqttkat.handlers.connect      | 71.33     | 98.11     |
+| mqttkat.handlers.disconnect   | 71.43     | 100.00    |
+| mqttkat.s                     | 90.91     | 100.00    |
+| mqttkat.server                | 52.87     | 76.74     |
+| mqttkat.spec                  | 78.20     | 100.00    |
+| mqttkat.util                  | 3.79      | 20.45     |
+| ----------------------------- | --------- | --------- |
+| ALL FILES                     | 66.43     | 87.68     |
 
 `mqttkat.handlers` started the day at **52.84% of forms and 81.93% of lines**
 and is now at 67.36% and 95.48%. That is the QoS 2 handshake, the pending-queue
@@ -1874,15 +1877,15 @@ others.
 
 Two namespaces are worth naming rather than averaging away:
 
-* **`mqttkat.util` at 3.79%** is not really a gap. It is the stats loop, which
+- **`mqttkat.util` at 3.79%** is not really a gap. It is the stats loop, which
   runs forever by design and is the thing keeping `-main` alive, so no test
   calls it. The parts worth testing — the rate arithmetic, the backlog
   clamping, the connected-versus-parked counting — are pure functions sitting
   inside a `loop` nothing can enter. Pulling `stats` out of `info` far enough
   to call it with two snapshots would cover most of it.
-* **`mqttkat.handlers.connack` at 9.52%** is the client's side of the
+- **`mqttkat.handlers.connack` at 9.52%** is the client's side of the
   handshake. The broker sends CONNACKs constantly, but nothing in the suite
-  makes the broker *receive* one, which is what that namespace handles.
+  makes the broker _receive_ one, which is what that namespace handles.
 
 The percentages are worth exactly as much as knowing which lines they are. 95%
 of `handlers` reads well and still leaves the entire QoS 1 congestion path
@@ -1911,9 +1914,9 @@ of it was this broker's code, and the accept path was the only thing left.
 
 Two things there, and they compound:
 
-* `bind()` was called with no backlog, so Java asked for its default of 50.
+- `bind()` was called with no backlog, so Java asked for its default of 50.
   `/proc/sys/net/core/somaxconn` on this machine is 4096.
-* `handleAccept` took exactly one connection per `select()` return. Readiness
+- `handleAccept` took exactly one connection per `select()` return. Readiness
   is reported once for however many are queued, so the rest waited for the next
   wake-up.
 
@@ -1926,8 +1929,8 @@ queue in a loop, which also removes a latent NPE: `accept()` on a non-blocking
 channel returns null when there is nothing there, and the old code would have
 dereferenced it.
 
-| | before | after |
-|---|---|---|
+|                    | before            | after                  |
+| ------------------ | ----------------- | ---------------------- |
 | 10,000 connections | 63,418 ms — 158/s | **1,328 ms — 7,530/s** |
 
 Forty-seven times faster, and the interoperability suite is unchanged at 9 of
@@ -1942,16 +1945,16 @@ worth doing.
 
 Three limits showed up and none of them is the broker:
 
-* **28,232 ephemeral ports** (32768-60999). Every connection to one listener
+- **28,232 ephemeral ports** (32768-60999). Every connection to one listener
   from one address needs one, so that is the ceiling for a loopback test
   whatever the broker does.
-* **TIME-WAIT between ramp steps.** Closing ten thousand connections holds ten
+- **TIME-WAIT between ramp steps.** Closing ten thousand connections holds ten
   thousand ports for a minute — measured 26,169 sockets in TIME-WAIT holding
-  26,023 of the 28,232. So only the *first* step of a ramp measures a clean
+  26,023 of the 28,232. So only the _first_ step of a ramp measures a clean
   accept rate; the 1,334/s at 20,000 is port starvation, not the broker
   slowing down. Worth remembering before reading anything into a ramp that
   gets slower as it climbs.
-* **25,000 got the JVM killed** by the kernel's OOM reaper — SIGKILL, not an
+- **25,000 got the JVM killed** by the kernel's OOM reaper — SIGKILL, not an
   OutOfMemoryError. The heap was 443 MB at 20,000, so it was never heap: both
   ends run in the one process, so 25,000 connections is 50,000 sockets, and the
   kernel's buffers for those are native memory the JVM never accounts for.
@@ -1974,25 +1977,25 @@ only its own half.
 
 Three things that made it work:
 
-* **Source addresses across 127.0.0.0/8.** A connection is the whole
+- **Source addresses across 127.0.0.0/8.** A connection is the whole
   four-tuple, so every source address brings its own range of local ports and
   the ~28,232 ephemeral ports stop being the ceiling. Linux lets any user bind
   to any 127.x.y.z with nothing configured first — checked before relying on
   it, along with whether the JVM could read /proc for the numbers. It cannot,
   so broker memory comes from `ps`.
-* **No thread and no reader per connection.** The CONNACKs are left unread in
+- **No thread and no reader per connection.** The CONNACKs are left unread in
   the socket buffers. What proves the broker took them is the broker's own
   stats line, parsed out of its stdout — a better witness than the client's
   opinion, since it comes from the process under test.
-* **`-main` takes a port now**, so a second broker can run beside one that
+- **`-main` takes a port now**, so a second broker can run beside one that
   already has 1883. A broker that cannot be told where to listen was a real
   limitation, not just an inconvenience for a test.
 
-| connections | in-process | out-of-process |
-|---|---|---|
-| 10,000 | 1,328 ms — 7,530/s | **1,031 ms — 9,699/s**, broker RSS 245 MB |
-| 25,000 | **SIGKILLed** | 28,042 ms, broker RSS 328 MB |
-| 50,000 | — | 56,832 ms, **broker RSS 484 MB** |
+| connections | in-process         | out-of-process                            |
+| ----------- | ------------------ | ----------------------------------------- |
+| 10,000      | 1,328 ms — 7,530/s | **1,031 ms — 9,699/s**, broker RSS 245 MB |
+| 25,000      | **SIGKILLed**      | 28,042 ms, broker RSS 328 MB              |
+| 50,000      | —                  | 56,832 ms, **broker RSS 484 MB**          |
 
 Fifty thousand connections for 484 MB. The same total socket count that killed
 one JVM is comfortable across two.
@@ -2062,20 +2065,20 @@ Identifiers came from one global core.async channel holding 1024 values, taken
 with a blocking `<!!`. Four things wrong with that, and the first two are
 permanent hangs rather than slowdowns:
 
-* **It leaked.** `put-packet-identifier` was called from exactly two places,
+- **It leaked.** `put-packet-identifier` was called from exactly two places,
   PUBACK and PUBCOMP. Nothing returned identifiers when a client disconnected,
   and `*outbound*` deliberately keeps unacknowledged messages for redelivery.
   So every ungraceful disconnect with messages in flight burned its identifiers
   for good. There were 1024. After enough of those the take blocks forever and
   QoS 1/2 delivery stops broker-wide, silently. A long-running broker did not
   have a throughput problem here, it had a countdown.
-* **Any client could break it.** PUBACK returned whatever identifier the client
+- **Any client could break it.** PUBACK returned whatever identifier the client
   sent, unchecked. An unsolicited one overfilled a channel sized exactly 1024,
   so `>!!` blocked that connection's reader thread for good; a duplicate put a
   live identifier back into circulation for the next delivery to reuse.
-* **It was global**, where §2.3.1 scopes identifiers to a connection: 1024
+- **It was global**, where §2.3.1 scopes identifiers to a connection: 1024
   shared out rather than 65535 each.
-* **The take blocked the fan-out thread**, which deadlocks a client that both
+- **The take blocked the fan-out thread**, which deadlocks a client that both
   publishes and subscribes — it waits on an identifier that only its own
   unread PUBACKs could release.
 
@@ -2114,7 +2117,7 @@ that 475k "ceiling" was partly the pool after all.
 
 But it dropped 11.9 million QoS 1 messages. QoS 1 is at-least-once; dropping is
 not a policy, it is a broken promise. The old blocking pool never dropped
-anything precisely *because* it blocked: a global semaphore is back-pressure
+anything precisely _because_ it blocked: a global semaphore is back-pressure
 all the way to the publisher, arrived at by accident.
 
 ### Back-pressure where it belongs: the publisher's socket
@@ -2131,17 +2134,17 @@ What is available is refusing to read. `Connection.pauseReading` clears
 receive window closes, and the publisher blocks in its own `write`. TCP does
 the work, and no thread of ours is holding anything.
 
-* A subscriber whose pending queue passes `pause-threshold` (512) pauses the
+- A subscriber whose pending queue passes `pause-threshold` (512) pauses the
   publisher feeding it, and remembers it.
-* Every acknowledgement drains one pending message and, below
+- Every acknowledgement drains one pending message and, below
   `resume-threshold` (128), releases everyone waiting. Hysteresis, or the
   interest ops flap once per packet.
-* A connection never pauses itself — a client subscribed to a topic it
+- A connection never pauses itself — a client subscribed to a topic it
   publishes to would otherwise stop reading the very acknowledgements that
   would free it.
-* `close()` calls `drained()`, so nobody is left throttled on a subscriber
+- `close()` calls `drained()`, so nobody is left throttled on a subscriber
   that has gone.
-* `pending-limit` (4096) survives as a memory backstop. Under back-pressure it
+- `pending-limit` (4096) survives as a memory backstop. Under back-pressure it
   should never fire, and in the run below it did not.
 
 The gap between 512 and 4096 is deliberate: clearing `OP_READ` stops new bytes
@@ -2157,15 +2160,15 @@ idle one.
 
 Same 150×150 QoS 1 config as the run that started this:
 
-| | pool of 1024 | per-client ids + back-pressure |
-|---|---|---|
-| publish rate | 1,238/s | **1,671/s** |
-| total packets/s | 373,916 | **547,061** |
-| publishes ingested | 80,200 | **113,616** |
-| messages delivered | ~12.1M | **16.2M** |
-| dropped | 0 | **0** |
-| average latency | — | 212 ms |
-| throttle events | n/a | 74,239 |
+|                    | pool of 1024 | per-client ids + back-pressure |
+| ------------------ | ------------ | ------------------------------ |
+| publish rate       | 1,238/s      | **1,671/s**                    |
+| total packets/s    | 373,916      | **547,061**                    |
+| publishes ingested | 80,200       | **113,616**                    |
+| messages delivered | ~12.1M       | **16.2M**                      |
+| dropped            | 0            | **0**                          |
+| average latency    | —            | 212 ms                         |
+| throttle events    | n/a          | 74,239                         |
 
 35% more publishes, 46% more packets, nothing dropped, and the four hangs gone.
 `:throttled` climbing steadily is what back-pressure looks like when it is
@@ -2201,11 +2204,11 @@ default on, and `Connection/setQos0BackPressure` at runtime.
 
 It works, and it does not rescue this load:
 
-| run | dropped | delivered | throttled |
-|---|---|---|---|
-| off | 38,421,062 | 6,579,547 | 0 |
-| on | 37,963,336 | 7,037,273 | 361 |
-| on, plus the read-ahead bound below | 38,102,946 | 6,897,650 | 481 |
+| run                                 | dropped    | delivered | throttled |
+| ----------------------------------- | ---------- | --------- | --------- |
+| off                                 | 38,421,062 | 6,579,547 | 0         |
+| on                                  | 37,963,336 | 7,037,273 | 361       |
+| on, plus the read-ahead bound below | 38,102,946 | 6,897,650 | 481       |
 
 About 1%. It is not that nothing happens — ingest over the first interval falls
 from 29,997/s to 5,663/s, and the throttle counter climbs — but the publishers
@@ -2215,7 +2218,7 @@ The reason is that **dropping relieves the very congestion the throttling keys
 on**. The queue reaches the congestion mark, the publishers are paused, and the
 queue then discards its way back below the resume mark and lets them straight
 through again. The two mechanisms undo each other. QoS 1 does not have this
-problem because its pending queue *retains* what it cannot send yet, so the
+problem because its pending queue _retains_ what it cannot send yet, so the
 pressure persists until something is acknowledged.
 
 At 7x overload — 45M deliveries against roughly 500k/s — that is close to
@@ -2234,7 +2237,7 @@ both are pinned by a test, so neither can be changed by accident.
 ### Two things found while doing it
 
 **A pause that could never be released.** `pauseUntilDrained` added the
-publisher to the subscriber's waiters and *then* paused it. Those are two
+publisher to the subscriber's waiters and _then_ paused it. Those are two
 steps: a `drained()` running in between saw an empty set, and the publisher was
 paused a moment later with nobody left to wake it. On the QoS 1 path that heals
 on the next acknowledgement. QoS 0 has no acknowledgement, and a subscriber that
@@ -2269,7 +2272,7 @@ shape obvious — a hard floor with almost no variance, and only on the QoS
 levels that need a reply:
 
 | median round trip | Nagle (before) | TCP_NODELAY |
-|-------------------|----------------|-------------|
+| ----------------- | -------------- | ----------- |
 | QoS 0 (1 packet)  | 0.55 ms        | 0.42 ms     |
 | QoS 1 (2 packets) | 41.43 ms       | 0.47 ms     |
 | QoS 2 (4 packets) | 41.65 ms       | 0.82 ms     |
@@ -2292,19 +2295,19 @@ each packet to a 4-thread pool (`prefix1..4`); replies and fan-out went through
 a separate 16-thread pool (`senders-1..16`). Four things followed from that,
 all of them fixed together because they are the same structural problem:
 
-* **A packet split across two TCP reads killed the broker.** `handleRead`
+- **A packet split across two TCP reads killed the broker.** `handleRead`
   decoded straight out of an 8 KB buffer with no reassembly, so a partial
   packet raised `BufferUnderflowException` — a RuntimeException, caught by
   neither `handleRead` (catches IOException) nor `run()` — which escaped and
   terminated `server-loop`, taking every connection with it. This is the
   exception the 20180211 entry below saw under JMeter.
-* **Partial writes were silently dropped.** `MqttSender` called `ch.write(buf)`
+- **Partial writes were silently dropped.** `MqttSender` called `ch.write(buf)`
   and discarded the return value; a non-blocking write returns short when the
   socket buffer is full, and the remainder was never sent.
-* **Order was lost twice** — once submitting each packet to the handler pool,
+- **Order was lost twice** — once submitting each packet to the handler pool,
   and again submitting each outgoing packet to the sender pool, so a PUBACK
   could overtake the PUBLISH it acknowledged.
-* **Decoding ran on the selector thread**, so one slow decode stalled reads for
+- **Decoding ran on the selector thread**, so one slow decode stalled reads for
   every connection.
 
 Now the selector thread only reads bytes and hands them to the connection they
@@ -2364,10 +2367,10 @@ wire, asked for inside a 60-second window. The 2020 run in the entry below was
 
 What it is not:
 
-* **Not GC.** 69 young collections and 5.4s of GC across two whole runs. The
+- **Not GC.** 69 young collections and 5.4s of GC across two whole runs. The
   heap grew to 7.4 GB but G1 never struggled, and a forced full collection on
   an idle broker leaves a 12 MB live set — nothing leaks.
-* **Not a starved write path.** Thread dumps in the collapse window put ~149 of
+- **Not a starved write path.** Thread dumps in the collapse window put ~149 of
   the 150 subscriber writer threads in `parkNanos` — the `Thread.sleep(1)` in
   `writeFully` — and one or two in `write0`. That reads like a broker that
   cannot write, until you look at the sockets:
@@ -2400,18 +2403,18 @@ hunting in the wrong place.
 The outbound side is counted in four places now, because a packet the broker
 accepts is not a packet the client receives:
 
-| counter | meaning |
-|---|---|
-| `sentMessages` | queued for a client; nothing on a socket yet |
-| `writtenMessages` | written to the socket, in full |
-| `discardedMessages` | queued, then abandoned when the connection died |
-| `droppedMessages` | never queued: refused because the client is behind |
+| counter             | meaning                                            |
+| ------------------- | -------------------------------------------------- |
+| `sentMessages`      | queued for a client; nothing on a socket yet       |
+| `writtenMessages`   | written to the socket, in full                     |
+| `discardedMessages` | queued, then abandoned when the connection died    |
+| `droppedMessages`   | never queued: refused because the client is behind |
 
 `sent — written — discarded` is the live backlog. `dropped` is deliberately
 separate: it is the design working, whereas a non-zero `discarded` is a bug.
 
 `mqttkat.util/info` reports all of it, on real elapsed time rather than the
-nominal ten seconds, and warns when the backlog *grows* over an interval -
+nominal ten seconds, and warns when the backlog _grows_ over an interval -
 threshold-free, because growth is itself the failure condition. It counts
 connected clients apart from parked `clean-session? false` sessions, which live
 in the same `*clients*` map and made the old count only ever go up.
@@ -2427,12 +2430,12 @@ ingesting **15,000 publishes/second**, while mqttloader believed it had
 published 300k in three seconds. The gap sat in kernel buffers and in
 `Connection.inbound`. And the ratio that mattered:
 
-| phase | queued/s | written/s |
-|---|---|---|
-| burst, readers busy | 2,318,397 | 438,502 |
-| after publishing stops | — | 1,099,313 |
+| phase                  | queued/s  | written/s |
+| ---------------------- | --------- | --------- |
+| burst, readers busy    | 2,318,397 | 438,502   |
+| after publishing stops | —         | 1,099,313 |
 
-The broker wrote 2.5× faster with *less* work to do. It was never
+The broker wrote 2.5× faster with _less_ work to do. It was never
 write-limited. Fan-out runs inline on the publisher's reader thread, so 150
 reader threads enqueueing at 2.3M/s compete with 150 writer threads for 23
 carriers — and the readers always win, because they never block. Nothing pushed
@@ -2458,18 +2461,18 @@ subscriber's feed; dropping a CONNACK, SUBACK, PUBACK or a QoS 1/2 PUBLISH
 breaks the protocol instead. QoS 0 fan-out goes through its own
 `send-buffer-droppable`; everything else is queued unconditionally.
 
-One detail worth keeping: the drop check happens *before* `buffer.duplicate()`.
+One detail worth keeping: the drop check happens _before_ `buffer.duplicate()`.
 Duplicating and then discarding was 40M ByteBuffers of pure garbage, and most
 of the GC.
 
-| | unbounded | bounded @ 10k |
-|---|---|---|
-| publish ingest | ~15,000/s | 30,003/s |
-| subscriber throughput | 19,887/s | 98,904/s |
-| average latency | 12,783 ms | 2,645 ms |
-| max latency | 53,264 ms | 7,839 ms |
-| peak backlog | 32,279,864 | 0 |
-| GC time | ~2.7 s | 0.65 s |
+|                       | unbounded  | bounded @ 10k |
+| --------------------- | ---------- | ------------- |
+| publish ingest        | ~15,000/s  | 30,003/s      |
+| subscriber throughput | 19,887/s   | 98,904/s      |
+| average latency       | 12,783 ms  | 2,645 ms      |
+| max latency           | 53,264 ms  | 7,839 ms      |
+| peak backlog          | 32,279,864 | 0             |
+| GC time               | ~2.7 s     | 0.65 s        |
 
 The backlog never forms now — the fan-out refuses at the limit rather than
 queueing and draining later. The trade is honest: mqttloader counts 791,228
@@ -2497,7 +2500,7 @@ MQTT's own limit is the 268,435,455 bytes a four-byte remaining length can
 express, so we were three orders of magnitude short of the spec and silent
 about it.
 
-`MESSAGE_LENGTH` is now where those arrays *start* rather than where they stop.
+`MESSAGE_LENGTH` is now where those arrays _start_ rather than where they stop.
 `MqttUtil.fit(bytes, length, needed)` grows the scratch array when a
 variable-length field will not fit, and each encoder allocates its final
 `ByteBuffer` at the end, from the length it actually produced, instead of
@@ -2515,7 +2518,7 @@ remaining length.
 ### The broker only really worked in English
 
 Found while testing the encoder fix. Every decoder advanced past a decoded
-string with `offset += someString.length() + 2` — the *character* count of the
+string with `offset += someString.length() + 2` — the _character_ count of the
 String it had just built, not the UTF-8 byte count it had actually read off the
 wire. MQTT strings are UTF-8 (3.1.1 §1.5.3), so those two numbers agree only
 for ASCII.
@@ -2550,20 +2553,20 @@ case pass and the other three fail, which is the check worth having.
 
 ### Found on the way, not fixed
 
-* ~~**A keep-alive timer fires against a parked session.**~~ Fixed on 20260925.
+- ~~**A keep-alive timer fires against a parked session.**~~ Fixed on 20260925.
   The `ClassCastException` itself came from tests handing `check-timer` a
   String for a key, gone since they use a real `SelectionKey`. What it pointed
   at was real: a timer is stopped only by `remove-timer!` finding it in the
   entry, so one whose entry went without it fired forever. Each tick now checks
   it is still the timer filed under its key and cancels itself if not, and
   `add-timer!` stops any timer already there.
-* ~~**`writeFully` still polls.**~~ Fixed on 20260904, and the suspicion that
+- ~~**`writeFully` still polls.**~~ Fixed on 20260904, and the suspicion that
   prompted it was wrong: a counter on that branch measured **zero** stalls
   under every load tried, up to 806,000 deliveries a second. It was not the
   bottleneck because it never ran. Replaced with a 50 us backoff anyway, for
   the case a loopback benchmark cannot produce — a client on a real network
   that stops reading.
-* **53 of 150 subscriber sockets had an empty Send-Q** while the rest were
+- **53 of 150 subscriber sockets had an empty Send-Q** while the rest were
   saturated. With uniform fan-out to one topic they should look alike. Never
   explained.
 
@@ -2591,6 +2594,7 @@ Per second throughput[msg/s]: 45000
 Maximum latency[ms]: 231
 Average latency[ms]: 116.81
 ```
+
 And when I run the same command against Mosquitto I get the following results:
 
 ```
@@ -2611,7 +2615,8 @@ Per second throughput[msg/s]: 45000
 Maximum latency[ms]: 159
 Average latency[ms]: 71.26
 ```
-We see that the latency lower is  on average and the max latency is lower as well. Something to investigate.
+
+We see that the latency lower is on average and the max latency is lower as well. Something to investigate.
 
 ## 20190204
 
@@ -2643,7 +2648,6 @@ Actually I just did... but with a single topic... so I need to implement multipl
 
 https://clojure.github.io/test.check/generator-examples.html
 
-
 ## 20190116
 
 I can send hundreds of message from my client to a real broker and then receive loads of them when I subscribe to '#' as a topic. I can also send a few messages to my own broker with the real clients and forward any publishes to a real client. I can also send quite a message with my own client to my own broker and I haven't seen any major errors, but this needs more testing. I may need to add triennium now and see if I can use that for packet routing... that would be a good point to start.
@@ -2652,7 +2656,7 @@ hmmm maybe make a generator for topic filters and proper topics first...
 
 ## 20190114
 
-So lately I have been making loads of additions to this... first of all there is a 'client' now... partly because I managed to write some spec's for most packages (all packages needed for QOS 0 are specced now) and I needed a client to send the packages over the wire to the server and the contents of each package is generated via the spec. So the code encodes and decodes that various packages and all the data is generated via spec... the one thing where it fails at the moment is the two packages that have byte-arrays in them (Connect with username/password and Publish). These fail the ```(is ...)``` test in the ```deftest``` code and I think this is due to the fact that the values don't get compared, but the location.
+So lately I have been making loads of additions to this... first of all there is a 'client' now... partly because I managed to write some spec's for most packages (all packages needed for QOS 0 are specced now) and I needed a client to send the packages over the wire to the server and the contents of each package is generated via the spec. So the code encodes and decodes that various packages and all the data is generated via spec... the one thing where it fails at the moment is the two packages that have byte-arrays in them (Connect with username/password and Publish). These fail the `(is ...)` test in the `deftest` code and I think this is due to the fact that the values don't get compared, but the location.
 
 Also the server code is no longer 100% compliant as the 'server' will now accept packages that are normally only send by the server, but this was added so that encode/decode code can be tested.
 

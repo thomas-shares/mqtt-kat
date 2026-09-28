@@ -67,7 +67,8 @@
                            [:session-expiry-interval]}   ; a DISCONNECT may change it
      {:event :subscribe    :connect-id :client-id :filter :entry :at}
      {:event :unsubscribe  :connect-id :client-id :filter :at}
-     {:event :enqueue      :client-id :key :message :at}
+     {:event :enqueue      :client-id :key :message :at
+                           [:if-kept?]}                 ; only for a session that is kept
      {:event :dequeue      :client-id :keys :at}
      {:event :retain       :topic :message :at}
      {:event :unretain     :topic :at}
@@ -170,6 +171,19 @@
                (pos? interval)
                (not= interval never-expires))
       (+ (long at) (* 1000 interval)))))
+
+(defn enqueue-allowed?
+  "Whether an :enqueue is to be kept. Always, unless it says :if-kept? —
+   a message a broker could not get to the broker holding the client, sent
+   here for the client to have on its return — and then only if the
+   client's session outlives its connection: a clean session on a broker
+   that died ended with it, and nothing would ever take its queue."
+  [record session]
+  (or (not (:if-kept? record))
+      (boolean (and session
+                    (kept? (:protocol-version session)
+                           (:clean-session? session)
+                           (:session-expiry-interval session))))))
 
 (def lost-per-sweep
   "How many of a dead run's clients one sweep lets go — and one run per
@@ -422,7 +436,8 @@
         ;; ── what is queued for a session that is away ──────────────────
         (case> :enqueue)
         (local-select> [(keypath *client-id) (view count)] $$queued :> *n)
-        (<<if (< *n queue-limit)
+        (local-select> [(keypath *client-id)] $$sessions :> *session)
+        (<<if (and> (< *n queue-limit) (enqueue-allowed? *record *session))
           (local-transform> [(keypath *client-id (get *record :key)) (termval (get *record :message))]
                             $$queued))
 
