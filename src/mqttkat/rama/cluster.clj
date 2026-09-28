@@ -546,8 +546,14 @@
                                               matches)
         {shared true ordinary false} (group-by #(some? (:share-group %)) present)
         remote  (into #{} (comp (map :broker-id) (remove #(= broker-id %))) ordinary)
-        chosen  (for [[gk members] (group-by (juxt :share-group :topic-filter) shared)]
-                  [gk (choose-broker gk (distinct (map :broker-id members)))])
+        ;; Each group's brokers — those with a member present — kept with
+        ;; the plan: if the one chosen cannot be reached, the group is served
+        ;; by another of them instead (see forward-publish!).
+        groups  (into {}
+                      (map (fn [[gk members]] [gk (vec (distinct (map :broker-id members)))]))
+                      (group-by (juxt :share-group :topic-filter) shared))
+        chosen  (for [[gk bs] groups]
+                  [gk (choose-broker gk bs)])
         skip    (into #{} (comp (remove #(= broker-id (second %))) (map first)) chosen)
         brokers (reduce (fn [m [gk b]]
                           (if (= broker-id b) m (update m b (fnil conj []) gk)))
@@ -568,7 +574,7 @@
                               (when-not (= broker-id b) [b (per-client entries)])))
                       (group-by :broker-id ordinary))]
     (when (or (seq brokers) (seq skip) (seq queue))
-      {:brokers brokers :skip skip :queue queue :holders holders})))
+      {:brokers brokers :skip skip :queue queue :holders holders :groups groups})))
 
 (defn forward-publish!
   "What the bridge's forwarder does when this broker is attached: `plan`,
@@ -590,18 +596,48 @@
                                                                   :properties properties
                                                                   :qos        (min qos (long sub-qos))})
                                       if-kept? (assoc :if-kept? true)))))]
-    (doseq [[peer-id group-keys] (:brokers plan)]
-      (let [holders (get-in plan [:holders peer-id])
-            ;; What was for this broker's clients, queued for them if it does
-            ;; not get there — only for those whose sessions outlive their
-            ;; connection, which the cluster checks against its own record: a
-            ;; clean session on a broker that died died with it.
-            on-lost (when (and (pos? qos) (seq holders))
-                      #(queue-for holders true))]
-        (if-let [peer (get @brokers peer-id)]
-          (bridge/send-to! broker-id peer-id peer group-keys topic (assoc msg :on-lost on-lost))
-          (do (log/debug "no address for broker" peer-id "- queuing" topic "for its sessions")
-              (when on-lost (on-lost))))))
+    (letfn [(reroute! [group-keys tried]
+              ;; The shared groups a lost copy was to serve, served by another
+              ;; of their brokers: this one if it has a member, which takes
+              ;; it at once, or the next in the rotation, which gets a copy
+              ;; for those groups alone — and the same again if that one
+              ;; cannot be reached either. A group with nobody left anywhere
+              ;; has nobody to give it to.
+              (doseq [gk group-keys]
+                (let [candidates (remove tried (get-in plan [:groups gk]))]
+                  (if (empty? candidates)
+                    (log/info "shared group" gk "has no member left to serve" topic)
+                    ;; Not choose-broker: that moves the group's rotation on,
+                    ;; and the next publishes would pay for this one's detour.
+                    ;; This broker first, if it has a member — its delivery is
+                    ;; certain — then the others in a fixed order.
+                    (let [b (if (some #{broker-id} candidates) broker-id (first (sort candidates)))]
+                      (cond
+                        (= broker-id b)
+                        (when-not (handlers/serve-groups! topic msg [gk])
+                          (reroute! [gk] (conj tried b)))
+
+                        (get @brokers b)
+                        (bridge/send-to! broker-id b (get @brokers b) [gk] topic
+                                         (assoc msg :groups-only? true
+                                                    :on-lost #(reroute! [gk] (conj tried b))))
+
+                        :else (reroute! [gk] (conj tried b))))))))]
+      (doseq [[peer-id group-keys] (:brokers plan)]
+        (let [holders (get-in plan [:holders peer-id])
+              ;; What was for this broker's clients, queued for them if it does
+              ;; not get there — only for those whose sessions outlive their
+              ;; connection, which the cluster checks against its own record: a
+              ;; clean session on a broker that died died with it — and its
+              ;; shared groups served elsewhere.
+              on-lost (when (and (pos? qos) (or (seq holders) (seq group-keys)))
+                        (fn []
+                          (queue-for holders true)
+                          (reroute! group-keys #{peer-id})))]
+          (if-let [peer (get @brokers peer-id)]
+            (bridge/send-to! broker-id peer-id peer group-keys topic (assoc msg :on-lost on-lost))
+            (do (log/debug "no address for broker" peer-id "- queuing" topic "for its sessions")
+                (when on-lost (on-lost)))))))
     (when (pos? qos)
       (queue-for (:queue plan) false))))
 

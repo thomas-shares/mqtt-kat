@@ -4,6 +4,77 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20260928
 
+### What is still open
+
+Everything known and not done, in one place. The "Still open" list under
+20260925 is out of date: the late-teardown guard for persistent sessions went in
+that day (e4dec76), the late expiry below closes the other half of it, and the
+Paho MQTT 5 suite now runs in CI (`paho-v5` in `test.yml`).
+
+Several brokers, after today. A broker killed with persistent subscribers
+connected no longer loses their messages. What it could not hand to the dead
+broker is queued in Rama for them, and a client that comes back on another
+broker gets it there. A shared group whose chosen broker is dead is served by
+another member's broker. Left over:
+
+- **Messages at the dead broker when it died are lost.** A message the dead
+  broker had acknowledged over the bridge, and was still sending to its
+  subscriber, died with it. Nothing else holds a copy. Fixing it means the
+  publisher's broker keeps each message until the end subscriber has
+  acknowledged it, not just the next broker.
+- **A dead broker is listed for ten minutes.** `broker-forgotten-after-millis`
+  is 600000, against a report every five seconds. Nothing is lost in that
+  window any more, but the other brokers try its bridge every five seconds, its
+  clients' session expiry only starts once it is forgotten, and the console
+  shows it as `stale`. Shortening it is only safe once the next point is done.
+- **A live broker cut off from Rama is treated as dead.** If its reports stop
+  for ten minutes it is forgotten, and the sweep marks all its clients as lost
+  while they are still connected to it. It announces itself again once it can,
+  but its clients stay recorded as disconnected, so the other brokers queue
+  messages for them instead of forwarding. It should record its connected
+  clients again when it re-announces.
+- **A queued fallback is late when the client is actually still connected.**
+  The fallback queues for a peer's persistent sessions whenever that peer does
+  not acknowledge. If the peer is alive but this broker cannot reach it (the
+  brokers are partitioned from each other, not from Rama), or the client moved
+  in the moment before, the message waits in Rama until the client's next
+  reconnect. It arrives late and out of order, but it arrives.
+- **QoS 2 through the fallback can be delivered twice.** A QoS 2 message whose
+  PUBREC was lost in the crash is queued anyway, and the dead broker may
+  already have delivered it. Exactly-once does not hold across a broker crash.
+- **A shared group with no member left anywhere drops the message** (logged).
+  It could be queued for one of the group's persistent members instead.
+- **The v5 reason code ignores subscribers on other brokers and offline
+  sessions.** The PUBACK's 0x10 No Matching Subscribers is decided on `keys`,
+  the subscribers connected to this broker (`qos-1`, and
+  `anyone-to-deliver-to?` for the PUBREC). A publish that only subscribers on
+  another broker match, or only an offline session, was forwarded or kept, and
+  the publisher is still told nobody matched.
+- **QoS 1 between brokers is slower in the tail.** At 5,000/s with 300
+  publishers and 3,000 subscribers, the median is 205 ms over three brokers
+  against 119 ms on one, but the p95 is 1.6 s against 0.4 s. There is one link
+  per pair of brokers, and each queues behind itself.
+- **The multi-broker failure tests are manual.** Killing a broker under
+  persistent-session load was done by hand with `mosquitto_sub -c` and
+  `brokers.bb kill`. The load runner has no persistent-session option, and CI
+  cannot reach a real Rama cluster, so only the InProcessCluster tests in
+  `rama_test` guard this. A bb script that starts three brokers, kills one
+  under load and checks every message arrived would keep it honest.
+- **`scripts/rama.bb` has no wipe.** The cure the README gives for a wedged dev
+  cluster (destroy and relaunch the module, or clear `local-rama-data` and
+  `local-zk`) is still done by hand.
+
+From before, not re-checked today:
+
+- `test_unsubscribe` in the Paho v5 suite, flaky in the run and unexplained
+  (see 20260925). Now that the suite runs in CI, its history there will show
+  whether it still happens.
+- `test_subscribe_failure`, by decision (see 20260909), and the two races in the
+  Paho suite itself, which are upstream's to fix.
+- The 53 of 150 subscriber sockets with an empty Send-Q, the regex split in
+  triennium's `split-topic` on the publish path, and the median latency MQTT 5
+  cost.
+
 ### A session expiry that had already fired could empty a resumed session
 
 The last open half of the late-teardown race from 20260925. Parking was already

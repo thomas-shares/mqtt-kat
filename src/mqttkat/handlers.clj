@@ -1883,10 +1883,14 @@
    skipped all three, so No Local and shared subscriptions simply did not apply
    to QoS 2 messages, and a will skipped them too."
   ([topic publisher-key] (subscribers-for topic publisher-key (constantly true)))
-  ([topic publisher-key serve-group?]
+  ([topic publisher-key serve-group?] (subscribers-for topic publisher-key serve-group? false))
+  ([topic publisher-key serve-group? groups-only?]
    (coalesce-subscriptions
     (select-shared
-     (deliverable-subscribers (matching-subscribers topic) publisher-key)
+     (cond->> (deliverable-subscribers (matching-subscribers topic) publisher-key)
+       ;; A copy sent only for shared groups: the ordinary subscribers here
+       ;; had theirs already (see mqttkat.bridge/groups-only-property).
+       groups-only? (filter :share-group))
      serve-group?))))
 
 (defn- anyone-to-deliver-to?
@@ -1897,16 +1901,17 @@
    member moves the group's rotation on, so asking at PUBLISH and asking again
    at PUBREL spent two turns per message, and with two members every QoS 2
    message went to the same one."
-  [topic publisher-key serve-group?]
+  [topic publisher-key serve-group? groups-only?]
   (boolean
-   (some #(or (nil? (:share-group %))
-              (serve-group? [(:share-group %) (:topic-filter %)]))
+   (some #(if (nil? (:share-group %))
+            (not groups-only?)
+            (serve-group? [(:share-group %) (:topic-filter %)]))
          (deliverable-subscribers (matching-subscribers topic) publisher-key))))
 
 (defn- route
   "Where a publish on `topic` goes, when there are other brokers.
 
-   Returns {:plan :serve-group?}. A publish that arrived over a bridge came
+   Returns {:plan :serve-group? :groups-only?}. A publish that arrived over a bridge came
    from another broker for this one's subscribers and goes no further —
    every subscription is held by exactly one broker, so one hop is the whole
    route — and it serves only the shared groups its sender named (see
@@ -1917,7 +1922,9 @@
    behaved on its own."
   [topic {:keys [client-key] :as msg}]
   (if (bridge/bridge? (:client-id (get @*clients* client-key)))
-    {:plan nil :serve-group? (or (::shares msg) #{})}
+    {:plan         nil
+     :serve-group? (or (::shares msg) #{})
+     :groups-only? (boolean (::groups-only? msg))}
     (let [plan (bridge/plan topic)]
       {:plan         plan
        :serve-group? (if-let [skip (seq (:skip plan))]
@@ -1970,10 +1977,10 @@
   ;; on delivery (§4.3.2, §4.3.3), so they must not be conditional on there
   ;; being subscribers. A `matching-vals` that returned nil for no match would
   ;; otherwise have left a QoS 1 publisher retrying for ever.
-  (let [{:keys [plan serve-group?]} (route topic msg)
+  (let [{:keys [plan serve-group? groups-only?]} (route topic msg)
         ;; Not chosen at all for QoS 2 — see anyone-to-deliver-to?.
         keys (when-not (= 2 (long qos))
-               (subscribers-for topic (:client-key msg) serve-group?))]
+               (subscribers-for topic (:client-key msg) serve-group? groups-only?))]
     (case (long qos)
       0 (do (qos-0 keys topic msg false)
             (forward-to-brokers! plan topic msg))
@@ -1988,7 +1995,7 @@
       ;; arrives (§4.3.3), so it is kept for offline sessions there — and
       ;; routed there, for the same reason: the subscribers are whoever
       ;; matches then.
-      2 (qos-2 (anyone-to-deliver-to? topic (:client-key msg) serve-group?) topic msg))))
+      2 (qos-2 (anyone-to-deliver-to? topic (:client-key msg) serve-group? groups-only?) topic msg))))
 
 (defn resolve-topic-alias
   "Turn a topic alias back into the topic it stands for (§3.3.2.3.4).
@@ -2088,8 +2095,9 @@
   [{:keys [client-key properties] :as msg}]
   (if (and (:user-properties properties)
            (bridge/bridge? (:client-id (get @*clients* client-key))))
-    (let [[shares properties'] (bridge/take-shares properties)]
-      (assoc msg :properties properties' ::shares shares))
+    (let [only?                (bridge/groups-only? properties)
+          [shares properties'] (bridge/take-shares properties)]
+      (assoc msg :properties properties' ::shares shares ::groups-only? only?))
     msg))
 
 (def control-prefix
@@ -2207,6 +2215,29 @@
                              :subscription-identifiers (identifiers-of subscription)}
                             publisher-key))))))
 
+(defn serve-groups!
+  "Deliver a publish of `msg` on `topic` to one member here of each shared
+   group in `group-keys`, and to nobody else — the group was to be served
+   by another broker, and the copy for it never got there. Ordinary
+   subscribers here had the message already, when it was first published.
+
+   Returns whether there was a member here to take it. The publisher is not
+   known to this path, which matters only for No Local, and §3.8.3.1 makes
+   No Local on a shared subscription a Protocol Error."
+  [topic {:keys [qos] :as msg} group-keys]
+  (let [gks  (set group-keys)
+        keys (coalesce-subscriptions
+              (select-shared
+               (filter #(contains? gks [(:share-group %) (:topic-filter %)])
+                       (matching-subscribers topic))
+               gks))]
+    (when (seq keys)
+      (case (long (or qos 0))
+        0 (qos-0 keys topic msg false)
+        1 (qos-1-send keys topic msg)
+        2 (qos-2-send keys topic msg))
+      true)))
+
 ;;there is no need to do
 (defn pubrel
   [{:keys [packet-identifier client-key]}]
@@ -2216,8 +2247,8 @@
     (when topic
       ;; §4.3.3 publishes on the PUBREL, so the subscribers are whoever matches
       ;; now — but they are chosen the same way as on any other publish.
-      (let [{:keys [plan serve-group?]} (route topic msg)]
-        (qos-2-send (subscribers-for topic (:client-key msg) serve-group?) topic msg)
+      (let [{:keys [plan serve-group? groups-only?]} (route topic msg)]
+        (qos-2-send (subscribers-for topic (:client-key msg) serve-group? groups-only?) topic msg)
         (queue-for-offline-sessions! topic msg)
         (forward-to-brokers! plan topic msg)))
     (when (contains? @*inflight* [client-id packet-identifier])

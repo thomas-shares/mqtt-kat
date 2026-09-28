@@ -115,7 +115,10 @@ In `src/mqttkat/rama/` and around it:
   on the forwarded copy; the others leave the group alone. A QoS 1 or 2 message the peer never
   acknowledged (it is down, or went down with the message queued or in flight)
   is not dropped: it is queued in Rama for the persistent sessions it was for, so
-  a client that comes back on another broker gets it there.
+  a client that comes back on another broker gets it there, and a shared group it
+  was to serve is served by another broker with a member, which is sent a copy
+  marked for that group alone (`mqttkat-groups-only`), so its ordinary
+  subscribers are not sent the message twice.
 - Sessions roam. A persistent session's subscriptions and whatever is owed to
   it — queued while it was away by whichever broker saw the publish, or left
   unacknowledged when it went — live in Rama; a client coming back on any
@@ -183,6 +186,14 @@ the `rama.yaml` there needs `conductor.host` and `zookeeper.servers` pointing at
 ./rama devZookeeper
 ./rama conductor
 ./rama supervisor
+```
+
+or all three in the background with `scripts/rama.bb`, which also stops every Rama
+process on the machine however it was started (workers included), and waits for
+the module to come back up after a start:
+
+```
+bb scripts/rama.bb start | stop | kill | restart | status   # --rama-dir, or $RAMA_HOME, default ~/projects/rama
 ```
 
 The module goes to the cluster as the thin jar — `lein jar`, not `lein uberjar`:

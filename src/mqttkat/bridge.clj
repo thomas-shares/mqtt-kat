@@ -74,6 +74,18 @@
    is visible, on the publisher's broker, and every other broker is told."
   "mqttkat-share")
 
+(def groups-only-property
+  "The user property, value \"1\", on a copy sent only for the shared groups
+   it names: a group whose chosen broker could not be reached, served by
+   another. That broker's ordinary subscribers had their own copy already,
+   when the message was first forwarded, and must not have it twice."
+  "mqttkat-groups-only")
+
+(defn groups-only?
+  "Whether a bridged publish's `properties` say it is for its groups only."
+  [properties]
+  (boolean (some (fn [[k _]] (= groups-only-property k)) (:user-properties properties))))
+
 (defn- group-key->string [[group topic-filter]]
   (str group "/" topic-filter))
 
@@ -97,7 +109,7 @@
   [properties]
   (let [ups    (:user-properties properties)
         shares (into #{} (keep (fn [[k v]] (when (= share-property k) (string->group-key v)))) ups)
-        rest   (remove (fn [[k _]] (= share-property k)) ups)]
+        rest   (remove (fn [[k _]] (or (= share-property k) (= groups-only-property k))) ups)]
     [shares (if (seq rest)
               (assoc properties :user-properties (vec rest))
               (dissoc properties :user-properties))]))
@@ -453,7 +465,7 @@
    name. Version 5 on the wire whatever the publisher spoke, so the
    properties travel; the receiving broker strips them for its 3.1.1
    subscribers as it does for any publish."
-  [my-id peer-id peer group-keys topic {:keys [qos payload properties publisher on-lost]}]
+  [my-id peer-id peer group-keys topic {:keys [qos payload properties publisher on-lost groups-only?]}]
   (let [qos (long (or qos 0))]
     (enqueue! my-id peer-id peer qos
               {:packet-type      :PUBLISH
@@ -463,7 +475,9 @@
                :payload          payload
                :retain?          false
                :duplicate?       false
-               :properties       (with-shares (or properties {}) group-keys)}
+               :properties       (cond-> (with-shares (or properties {}) group-keys)
+                                   groups-only? (update :user-properties (fnil conj [])
+                                                        [groups-only-property "1"]))}
               publisher
               ;; Only a message the peer acknowledges can be lost: at QoS 0
               ;; there is nothing to hand back.
