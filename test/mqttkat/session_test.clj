@@ -153,6 +153,34 @@
             "and nothing should arrive on reconnect")
         (tu/close! back)))))
 
+(deftest a-qos-0-subscription-keeps-nothing-for-an-offline-session
+  (testing "the lesser QoS decides, so a QoS 1 publish to a QoS 0 subscriber is not kept"
+    ;; It was kept at QoS 0, which nothing acknowledges: it stayed in the
+    ;; session's window and went out again on every reconnect. Found by the
+    ;; chaos run (mqttkat.chaos.runner) as the same QoS 0 message arriving
+    ;; three times.
+    (let [id    (tu/client-id "offline-sub-qos0")
+          topic (tu/topic "offline-sub-qos0")
+          sub   (tu/connect! nil :id id :clean-session? false)]
+      (client/send-message (:client sub) (subscribe-msg topic 0 1))
+      (tu/expect! (:ch sub) :SUBACK)
+      (client/send-message (:client sub) {:packet-type :DISCONNECT})
+      (tu/close! sub)
+      (tu/wait-for-parked-session! id)
+
+      (let [pub (tu/connect! "offline-sub-qos0-pub")]
+        (client/send-message (:client pub) (publish-msg topic "not kept" 1 21))
+        (tu/expect-eventually! (:ch pub) :PUBACK 2000)
+        (tu/close! pub))
+      (is (zero? (h/pending-count id)))
+
+      (dotimes [_ 2]
+        (let [back (tu/connect! nil :id id :clean-session? false)]
+          (is (nil? (tu/take! (:ch back) 500)) "nothing on this reconnect, nor the next")
+          (client/send-message (:client back) {:packet-type :DISCONNECT})
+          (tu/close! back)
+          (tu/wait-for-parked-session! id))))))
+
 ;; ── retained replay ──────────────────────────────────────────────────────
 
 (deftest ^:portable retained-messages-are-replayed-at-every-qos

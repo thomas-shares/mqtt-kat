@@ -494,9 +494,17 @@
       ;; went away: the console shows how long this connection has been up.
       ;; The new connection's name too, not the one that parked the session:
       ;; that connection is over, and its disconnect has been reported.
-      (swap! *clients* assoc client-key (assoc client
-                                               :connected-at (System/currentTimeMillis)
-                                               :connect-id   (:connect-id msg)))
+      ;; The session from the parked entry, the connection from this CONNECT:
+      ;; its protocol version, keep alive, will and properties (Session
+      ;; Expiry, Receive Maximum, Maximum Packet Size) are this connection's
+      ;; terms, not the last one's. A session adopt-session! parked from the
+      ;; cluster has only its subscriptions, so resuming it as it was left
+      ;; the connection with no version — answered in 3.1.1, which a version
+      ;; 5 client cannot parse — and no Session Expiry, so the session was
+      ;; discarded on the next disconnect.
+      (swap! *clients* assoc client-key (merge client
+                                               (dissoc msg :packet-type :client-key)
+                                               {:connected-at (System/currentTimeMillis)}))
       (swap! *clients* dissoc client-id))
     (let [client (-> (dissoc msg :packet-type :client-key)
                      ;; When this connection was accepted. The console has no
@@ -1562,14 +1570,18 @@
    QoS 0 is deliberately not kept. §4.1 requires this of QoS 1 and 2 only, and
    at-most-once means a message for a client that is not there has already been
    delivered as well as it is going to be. The QoS stored is the lesser of the
-   publish and the subscription, as it would be on delivery."
+   publish and the subscription, as it would be on delivery — so a QoS 0
+   subscription keeps nothing either, whatever the publish's QoS. It used to
+   keep it at QoS 0, which nothing ever acknowledges: the message stayed in
+   the session's window and went out again on every reconnect."
   [topic {:keys [qos payload properties]}]
   ;; Not when attached to a cluster: sessions that are away are queued for
   ;; there, by whichever broker saw the publish, from the cluster's own copy
   ;; of the subscriptions — see mqttkat.rama.cluster/plan. Queuing here as
   ;; well would deliver twice on resume.
   (when (and (pos? (long qos)) (nil? @session-source))
-    (doseq [{:keys [client-id] sub-qos :qos} (matching-offline-sessions topic)]
+    (doseq [{:keys [client-id] sub-qos :qos} (matching-offline-sessions topic)
+            :when (pos? (long (or sub-qos 0)))]
       (when client-id
         ;; With its properties. They used to be dropped here, so a message that
         ;; waited for its session arrived stripped of the content type, response
