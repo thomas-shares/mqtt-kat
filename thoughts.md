@@ -26,13 +26,19 @@ another member's broker. Left over:
   is 600000, against a report every five seconds. Nothing is lost in that
   window any more, but the other brokers try its bridge every five seconds, its
   clients' session expiry only starts once it is forgotten, and the console
-  shows it as `stale`. Shortening it is only safe once the next point is done.
-- **A live broker cut off from Rama is treated as dead.** If its reports stop
-  for ten minutes it is forgotten, and the sweep marks all its clients as lost
-  while they are still connected to it. It announces itself again once it can,
-  but its clients stay recorded as disconnected, so the other brokers queue
-  messages for them instead of forwarding. It should record its connected
-  clients again when it re-announces.
+  shows it as `stale`. The next point is done, so a broker forgotten by
+  mistake no longer loses its clients for good; but every mistake now costs
+  the gap in the point after it, so a shorter timeout wants that one done
+  first.
+- ~~**A live broker cut off from Rama is treated as dead.**~~ Fixed, see
+  "A broker forgotten while it lived gets its clients back" below. What it left
+  behind is the next point.
+- **Messages queued for a broker's clients while it was forgotten wait for their
+  next reconnect.** Between the sweep letting them go and the broker restating
+  them, the other brokers queue QoS 1 and 2 messages for its persistent
+  sessions in Rama, and nobody takes them off while the client stays
+  connected. A clean session's subscriptions are gone for that window, so what
+  was published for it then is not kept at all.
 - **A queued fallback is late when the client is actually still connected.**
   The fallback queues for a peer's persistent sessions whenever that peer does
   not acknowledge. If the peer is alive but this broker cannot reach it (the
@@ -74,6 +80,39 @@ From before, not re-checked today:
 - The 53 of 150 subscriber sockets with an empty Send-Q, the regex split in
   triennium's `split-topic` on the publish path, and the median latency MQTT 5
   cost.
+
+### A broker forgotten while it lived gets its clients back
+
+A broker cut off from Rama for longer than `broker-forgotten-after-millis` is
+dropped from the registry and its run goes on `$$dead-runs`, and the sweep then
+tells every client of that run `:lost`. When the broker could reach Rama again
+it announced itself under the same run, but its clients stayed recorded as
+disconnected, so the other brokers queued for them instead of forwarding.
+
+Three changes. `:broker-up` takes the announcing run off `$$dead-runs`, so the
+sweep stops letting its clients go. A `:lost` asks the registry's partition
+whether its run is still dead before it touches anything, so one still on its
+way after the announcement does nothing. And the broker, when its own copy of
+the registry shows it listed again after it had been dropped, sends a
+`:still-connected` for every connection it holds, with the CONNECT's terms and
+its subscriptions. On seeing itself listed rather than on announcing, because
+by then the run is live again in Rama, and a `:lost` processed after that
+finds it so.
+
+The module takes a `:still-connected` only for the connection the sweep let go
+(`:lost?` on the record, which a `:lost` sets and a disconnect clears) or for a
+client with no record left, whose session expired in the meantime. A client
+that disconnected for real while the broker was cut off, or has connected again
+anywhere, is left as it is. A lost clean session gets its subscriptions back
+from the broker's copy; a kept one is no longer due to expire. Two tests in
+`rama_test`, one on the module with a made-up broker, one through this broker
+with a real client.
+
+One narrow race is left. A `:lost` that read the registry just before the
+announcement was processed, and gets back to the client's partition only after
+the broker's restate was processed there, still lets the client go. That needs
+a registry round trip on a cluster worker to take longer than a proxy push to
+the broker plus an append back, which the tests have never shown.
 
 ### A session expiry that had already fired could empty a resumed session
 
