@@ -177,3 +177,85 @@
             (is (tu/wait-until #(not (.isReadingPaused publisher)))
                 "a publisher held by a link that is gone would never be read again"))
           (finally (bridge/drop! "peer-8") (.stop ^MqttServer (:server p) 100)))))))
+
+(deftest what-does-not-reach-the-peer-is-handed-back
+  (testing "a peer that cannot be reached: on-lost, for every QoS 1 message"
+    (let [dead-port (with-open [s (java.net.ServerSocket. 0)] (.getLocalPort s))
+          lost      (atom 0)]
+      (try
+        (dotimes [i 3]
+          (bridge/send-to! "me" "peer-9" {:host "127.0.0.1" :port dead-port} [] (str "t/" i)
+                           {:qos 1 :payload (.getBytes "x") :properties {} :on-lost #(swap! lost inc)}))
+        (is (tu/wait-until #(= 3 @lost) 5000))
+        (finally (bridge/drop! "peer-9")))))
+
+  (testing "written and not acknowledged when the link goes: handed back; acknowledged: not"
+    (let [p    (peer connack-2)
+          lost (atom #{})]
+      (try
+        (doseq [i (range 4)]
+          (bridge/send-to! "me" "peer-10" {:host "127.0.0.1" :port (:port p)} [] (str "t/" i)
+                           {:qos 1 :payload (.getBytes (str i)) :properties {}
+                            :on-lost #(swap! lost conj i)}))
+        (is (tu/wait-until #(= 2 (count (publishes p)))))
+        (answer! p (MqttPubAck/encode {:packet-type :PUBACK :protocol-version 5
+                                       :packet-identifier (:packet-identifier (first (publishes p)))
+                                       :reason-code 0}))
+        (is (tu/wait-until #(= 3 (count (publishes p)))))
+        (bridge/drop! "peer-10")
+        (is (tu/wait-until #(= #{1 2 3} @lost))
+            "the two in flight and the one still queued; not the one acknowledged")
+        (finally (bridge/drop! "peer-10") (.stop ^MqttServer (:server p) 100)))))
+
+  (testing "QoS 0 has nothing to hand back"
+    (let [dead-port (with-open [s (java.net.ServerSocket. 0)] (.getLocalPort s))
+          lost      (atom 0)]
+      (try
+        (bridge/send-to! "me" "peer-11" {:host "127.0.0.1" :port dead-port} [] "t/0"
+                         {:qos 0 :payload (.getBytes "x") :properties {} :on-lost #(swap! lost inc)})
+        (Thread/sleep 500)
+        (is (zero? @lost))
+        (finally (bridge/drop! "peer-11"))))))
+
+(deftest a-peer-that-refuses-is-left-alone-for-a-while
+  (testing "one failed connect marks it down; what follows is handed back without trying again"
+    ;; The mark was never set: the link's thread compared itself with the
+    ;; stored link by identity, and the stored one was a different map. Every
+    ;; message then opened a connection of its own to a broker that was gone.
+    (let [dead-port (with-open [s (java.net.ServerSocket. 0)] (.getLocalPort s))
+          lost      (atom 0)]
+      (try
+        (bridge/send-to! "me" "peer-12" {:host "127.0.0.1" :port dead-port} [] "t/0"
+                         {:qos 1 :payload (.getBytes "x") :properties {} :on-lost #(swap! lost inc)})
+        (is (tu/wait-until #(= 1 @lost)))
+        (is (tu/wait-until #(some? (:down-until (get @@#'bridge/connections "peer-12"))))
+            "marked down")
+        (bridge/send-to! "me" "peer-12" {:host "127.0.0.1" :port dead-port} [] "t/1"
+                         {:qos 1 :payload (.getBytes "x") :properties {} :on-lost #(swap! lost inc)})
+        (is (= 2 @lost) "handed back at once, without a connection attempt")
+        (finally (bridge/drop! "peer-12"))))))
+
+(deftest nothing-sent-at-a-dead-peer-goes-missing
+  (testing "sends racing the link's end are each handed back exactly once"
+    ;; A send that found the link still running, and queued after its thread
+    ;; had emptied the queue for the last time, sat in a dead queue: one
+    ;; message in ten, sent every half second at a killed broker.
+    (dotimes [round 20]
+      (let [dead-port (with-open [s (java.net.ServerSocket. 0)] (.getLocalPort s))
+            peer-id   (str "peer-race-" round)
+            lost      (atom 0)
+            sends     50]
+        (try
+          (->> (range 4)
+               (mapv (fn [_]
+                       (future
+                         (dotimes [_ (quot sends 4)]
+                           (bridge/send-to! "me" peer-id {:host "127.0.0.1" :port dead-port} [] "t"
+                                            {:qos 1 :payload (.getBytes "x") :properties {}
+                                             :on-lost #(swap! lost inc)})))))
+               (run! deref))
+          (is (tu/wait-until #(= (* 4 (quot sends 4)) @lost) 5000)
+              (str "round " round ": " @lost " of " (* 4 (quot sends 4)) " handed back"))
+          (Thread/sleep 50)
+          (is (= (* 4 (quot sends 4)) @lost) "and none twice")
+          (finally (bridge/drop! peer-id)))))))

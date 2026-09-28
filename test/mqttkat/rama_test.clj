@@ -480,7 +480,7 @@
             (record! conn (cluster/->disconnect c))
             (is (tu/wait-until #(and (contains? (matches conn "away/t") "away-1")
                                      (not (present-in-trie? conn "away/t" "away-1")))))
-            (is (= {:brokers {} :skip #{} :queue [{:client-id "away-1" :qos 1}]}
+            (is (= {:brokers {} :skip #{} :queue [{:client-id "away-1" :qos 1}] :holders {}}
                    (cluster/plan conn "away/t"))
                 "away: queued here, forwarded nowhere")
 
@@ -792,6 +792,47 @@
                         (is (= 3 (count (publishes)))))
                       (finally
                         (tu/close! pub local))))
+
+                  (testing "a broker that cannot be reached: its persistent sessions' messages are queued, not lost"
+                    ;; A broker killed with clients connected is recorded as
+                    ;; holding them until it is forgotten, ten minutes on, and
+                    ;; every message for them until then went to a broker that
+                    ;; was not there. A persistent subscriber coming back on
+                    ;; another broker a few seconds later found nothing.
+                    (let [dead-port (with-open [s (java.net.ServerSocket. 0)] (.getLocalPort s))]
+                      (record! conn {:event :broker-up :broker-id "peer-dead" :incarnation "d1"
+                                     :host "127.0.0.1" :port dead-port :at (System/currentTimeMillis)})
+                      (doseq [[id clean?] [["stranded-kept" false] ["stranded-clean" true]]]
+                        (let [c (assoc (cluster/->connect (connect-map id :clean? clean?))
+                                       :broker-id "peer-dead" :incarnation "d1")]
+                          (record! conn c)
+                          (record! conn (cluster/->subscribe {:connect-id (:connect-id c) :client-id id
+                                                              :filter "stranded/#" :entry (entry "stranded/#" 1)}))))
+                      (is (tu/wait-until #(and (contains? (cluster/remote-brokers conn "stranded/t") "peer-dead")
+                                               (= 2 (count (matches conn "stranded/t"))))))
+                      (let [pub (tu/connect-v5! "stranded-pub")]
+                        (try
+                          (client/send-message (:client pub) (publish-msg "stranded/t" "kept" 1 41))
+                          (tu/expect-eventually! (:ch pub) :PUBACK)
+                          (is (tu/wait-until #(= 1 (count (cluster/queued conn "stranded-kept"))) 10000)
+                              "queued for the persistent session, for when it comes back")
+                          (let [[_ m] (first (cluster/queued conn "stranded-kept"))]
+                            (is (= "kept" (String. ^bytes (:payload m))))
+                            (is (= 1 (:qos m))))
+                          (Thread/sleep 300)
+                          (is (empty? (cluster/queued conn "stranded-clean"))
+                              "not for a clean session: it ended with the broker")
+                          (testing "and again while the broker is known to be down, without trying it"
+                            (client/send-message (:client pub) (publish-msg "stranded/t" "again" 1 42))
+                            (tu/expect-eventually! (:ch pub) :PUBACK)
+                            (is (tu/wait-until #(= 2 (count (cluster/queued conn "stranded-kept"))) 5000)))
+                          (client/send-message (:client pub) (publish-msg "stranded/t" "zero" 0 nil))
+                          (Thread/sleep 300)
+                          (is (= 2 (count (cluster/queued conn "stranded-kept"))) "QoS 0 is not kept")
+                          (finally
+                            (tu/close! pub)
+                            (record! conn {:event :broker-down :broker-id "peer-dead"
+                                           :at (System/currentTimeMillis)}))))))
 
                   (testing "a retained publish here is retained in Rama, an expiry clears it there too"
                     (let [pub   (tu/connect-v5! "retainer")
