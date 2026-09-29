@@ -267,7 +267,9 @@
           (h/connack-sent! key)
           (tu/close! sub))))))
 
-(deftest ^:portable a-qos-2-message-the-client-has-received-is-not-sent-again
+(deftest ^{:portable true
+           :diverges-on-mosquitto "Mosquitto 2.0.22 can send the resumed PUBREL before the CONNACK (seen in CI, PR #32)"}
+  a-qos-2-message-the-client-has-received-is-not-sent-again
   (testing "after a PUBREC, a resumed session is sent the PUBREL, not the PUBLISH"
     ;; §4.4. The broker resent the PUBLISH, and a client that had the PUBREL
     ;; already and let the identifier go took it for a new message. Found by
