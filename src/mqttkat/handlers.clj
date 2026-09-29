@@ -748,7 +748,36 @@
   (log/trace "REMOVE: Subscriber trie POST:" @*subscriber-trie*)
   (log/trace "REMOVE: Clients:" @*clients*))
 
+(def view-lag-millis
+  "How long another broker's copy of the cluster may still have a client
+   connected here after it has gone: a copy of a publish that broker sends
+   here for it in that time is queued here instead. See route."
+  2000)
+
+(declare session-source)
+
+(defonce ^:private recently-gone
+  ;; client-id -> when its persistent session left this broker, while
+  ;; attached; only the last view-lag-millis matter.
+  (atom {}))
+
+(defn- gone! [client-id]
+  (let [now (System/currentTimeMillis)]
+    (swap! recently-gone
+           (fn [m]
+             (let [m (assoc m client-id now)]
+               (if (> (count m) 256)
+                 (into {} (filter #(< (- now (long (val %))) (long view-lag-millis))) m)
+                 m))))))
+
+(defn- recently-gone? [client-id]
+  (when-let [at (get @recently-gone client-id)]
+    (< (- (System/currentTimeMillis) (long at)) (long view-lag-millis))))
+
 (defn remove-client! [key]
+  (let [client (get @*clients* key)]
+    (when (and @session-source (:client-id client) (keep-session? client))
+      (gone! (:client-id client))))
   (remove-timer! key)
   ;; Both alias tables go with the connection, not with the session (§3.3.2.3.4).
   (forget-topic-aliases! key)
@@ -1002,8 +1031,10 @@
   (atom {}))
 
 (def dequeue-batch-millis
-  "How long take-offs of live deliveries gather before they are recorded."
-  250)
+  "How long take-offs of live deliveries gather before they are recorded:
+   one append per client per batch. At 250 ms, under a chaos run that kills
+   publishers as well as subscribers, Rama's depot buffer filled."
+  1000)
 
 (defn- flush-dequeues! []
   (let [[batch _] (reset-vals! dequeue-batch {})]
@@ -2235,11 +2266,17 @@
     ;; Its sender planned from its own copy of the cluster, which may have a
     ;; client here that has just left, or away that is here. So this broker
     ;; queues, under the message's key, for the clients its own copy has
-    ;; away or leaving and it did not deliver to: the sender queued for
+    ;; leaving or just away, and it did not deliver to: the sender queued for
     ;; those it had away, and the same key makes the two one entry. Not a
     ;; copy for groups only: the first copy did this already.
+    ;; Only those that left here in the last moment, though, or that its
+    ;; copy has still here: queuing for every client last seen here doubled
+    ;; the writes to Rama, and filled its buffer.
     {:plan         (when (and (::msg-key msg) (not (::groups-only? msg)))
-                     (bridge/plan topic {:away-only? true}))
+                     (when-let [p (bridge/plan topic {:away-only? true})]
+                       (let [p (update p :queue #(filterv (comp recently-gone? :client-id) %))]
+                         (when (or (seq (:queue p)) (seq (:leaving p)))
+                           p))))
      :serve-group? (or (::shares msg) #{})
      :groups-only? (boolean (::groups-only? msg))}
     (let [plan (bridge/plan topic)]

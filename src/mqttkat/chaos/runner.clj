@@ -260,7 +260,7 @@
   (fn [rng _]
     (when-let [cl (choose rng (filterv c/connected? (:subscribers state)))]
       (when-let [what (c/toggle-subscription! cl)]
-        (ledger/event! (:ledger state) {:type what :client (:id cl)})
+        (ledger/event! (:ledger state) {:type what :client (:id cl) :broker (c/broker-of cl)})
         true))))
 
 (defn- start-broker! [state n]

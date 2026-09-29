@@ -41,7 +41,11 @@
                still on its way when a clean session dropped is legitimately
                gone.
      possible  anything published between the SUBSCRIBE going out and the
-               UNSUBACK coming back. Arriving outside that is :unexpected.
+               UNSUBACK coming back, or acknowledged no more than
+               :subscribe-settle before the SUBSCRIBE went: an acknowledgement
+               is not the moment the broker matched the message, which is
+               after the PUBACK, and on another broker after the copy
+               forwarded there arrives. Arriving outside that is :unexpected.
 
    and what counts as wrong:
 
@@ -118,11 +122,20 @@
            (:drop :session-lost)
            (< (+ (long acked) (long clean-grace)) (long to))))))
 
+(defn- latest-match
+  "The last moment a broker may still have been matching `m` against the
+   subscriptions: :subscribe-settle after it was acknowledged."
+  ^long [{:keys [subscribe-settle]} m]
+  (if-let [acked (:acked m)]
+    (+ (long acked) (long subscribe-settle))
+    (long forever)))
+
 (defn- possible?
   "Whether `sub` could account for a delivery of `m`: the subscription existed
-   at some moment between the publish going out and being acknowledged."
-  [m sub]
-  (and (<= (long (:sub-sent sub)) (long (or (:acked m) forever)))
+   at some moment between the publish going out and the brokers being done
+   matching it."
+  [opts m sub]
+  (and (<= (long (:sub-sent sub)) (latest-match opts m))
        (<= (long (:sent m)) (long (or (:to sub) forever)))))
 
 (defn- broker-event? [e]
@@ -222,15 +235,15 @@
   "The highest QoS any subscription in `idx` could have handed `m` on at, nil
    if none could have. Only those that ended after it was sent, and only until
    the rest all started after it was acknowledged."
-  [match? {:keys [xs ^longs ends ^longs earliest]} m]
+  [opts match? {:keys [xs ^longs ends ^longs earliest]} m]
   (let [sent  (long (:sent m))
-        acked (long (or (:acked m) forever))
+        acked (latest-match opts m)
         cap   (long (:qos m))
         n     (alength ends)]
     (loop [i (first-at-or-after ends sent) best nil]
       (if (and (< i n) (<= (aget earliest i) acked))
         (let [sub (nth xs i)]
-          (if (and (match? (:filter sub) (:topic m)) (possible? m sub))
+          (if (and (match? (:filter sub) (:topic m)) (possible? opts m sub))
             (let [q (effective-qos m sub)]
               (if (= q cap) q (recur (inc i) (max q (long (or best 0))))))
             (recur (inc i) best)))
@@ -295,14 +308,19 @@
       (let [possible (when m
                        (if (and required (= (long required) (long (:qos m))))
                          required
-                         (possible-qos match? idx m)))]
+                         (possible-qos opts match? idx m)))]
         (cond
           (nil? m)
           (add! {:kind :unexpected :client client :msg id :why "no such publish"})
 
           (nil? possible)
           (add! {:kind :unexpected :client client :msg id :qos (:qos m) :topic (:topic m)
-                 :sent (:sent m) :at at})
+                 :sent (:sent m) :acked (:acked m) :pub-broker (:pub-broker m) :at at
+                 ;; The SUBSCRIBE nearest after it: most of these were
+                 ;; published just before one.
+                 :next-sub-sent (some #(when (> (long (:sub-sent %)) (long (:sent m))) (:sub-sent %))
+                                      (sort-by :sub-sent subs))
+                 :context (context events client m before after)})
 
           :else
           (do

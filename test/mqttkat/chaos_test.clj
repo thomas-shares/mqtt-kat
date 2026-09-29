@@ -112,6 +112,14 @@
                   :deliveries {[0 1] [{:at 560 :qos 1}] [0 2] [{:at 2900 :qos 1}]}})]
       (is (= {:unexpected 1} (kinds r)))))
 
+  (testing "acknowledged longer than the settle before the SUBSCRIBE went"
+    (let [r (run {:sub (assoc sub :sub-sent 1000 :from 1010)
+                  :publishes {[0 1] (msg 1 700 800) [0 2] (msg 1 900 950) [0 3] (msg 1 1500 1600)}
+                  :deliveries {[0 1] [{:at 1020 :qos 1}] [0 2] [{:at 1020 :qos 1}]
+                               [0 3] [{:at 1610 :qos 1}]}})]
+      (is (= {:unexpected 1} (kinds r))
+          "the one acknowledged within it may have been matched after the SUBSCRIBE")))
+
   (testing "a topic the subscription does not match"
     (let [r (run {:sub sub
                   :publishes {[0 1] (msg 1 500 550) [0 2] (assoc (msg 1 500 550) :topic "t/2")}
@@ -209,4 +217,4 @@
             idx  (#'check/sub-index subs)]
         (doseq [[id m] pubs]
           (is (= (slowly #(required? opts %1 %2) subs m) (:required (get owed id))))
-          (is (= (slowly possible? subs m) (#'check/possible-qos check/matches? idx m))))))))
+          (is (= (slowly #(possible? opts %1 %2) subs m) (#'check/possible-qos opts check/matches? idx m))))))))
