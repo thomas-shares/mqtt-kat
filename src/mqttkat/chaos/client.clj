@@ -31,7 +31,8 @@
 
 (defn make
   "A client that is not connected yet. `opts`: :id :kind (:pub or :sub) :idx
-   :mqtt5? :persistent? :filter :sub-qos :window :session-expiry-s."
+   :mqtt5? :persistent? :filter :sub-qos :window :session-expiry-s
+   :follow-redirects?."
   [ledger {:keys [window] :or {window 32} :as opts}]
   (merge opts
          {:ledger       ledger
@@ -42,6 +43,9 @@
           :had-session? (atom false)
           :last-drop    (atom nil)
           :want-sub?    (atom (= :sub (:kind opts)))
+          ;; "host:port" a broker sent this client on to (§4.13), for the
+          ;; next connect; see take-redirect!.
+          :redirect-to  (atom nil)
           :sub          (atom {:state :none})
           :awaiting-rel (ConcurrentHashMap/newKeySet)
           :inflight     (ConcurrentHashMap.)
@@ -51,7 +55,8 @@
           :counters     {:unparseable (LongAdder.)
                          :refused     (LongAdder.)
                          :drops       (LongAdder.)
-                         :connects    (LongAdder.)}}))
+                         :connects    (LongAdder.)
+                         :redirected  (LongAdder.)}}))
 
 (defn- bump! [c k] (.increment ^LongAdder (get-in c [:counters k])))
 
@@ -180,16 +185,46 @@
       (when (and p q)
         (try [(Long/parseLong p) (Long/parseLong q)] (catch Exception _ nil))))))
 
+(def ^:private redirect-codes
+  "Use another server, Server moved (§4.13): the two reason codes that come
+   with a Server Reference, on a CONNACK or a DISCONNECT."
+  #{0x9C 0x9D})
+
+(defn- redirected!
+  "Sent elsewhere by `msg`, a CONNACK or DISCONNECT: when this client follows
+   redirects and the broker named a server, note it for the next connect and
+   let this connection go. Returns whether it did."
+  [c msg]
+  (let [code (bit-and 0xFF (long (or (:reason-code msg) 0)))
+        ref  (:server-reference (:properties msg))]
+    (when (and (:follow-redirects? c) (contains? redirect-codes code) ref)
+      (reset! (:redirect-to c) ref)
+      ;; A DISCONNECT sending the client on follows a CONNACK that accepted
+      ;; it without making it a session: the broker touched nothing. So the
+      ;; client knows of a session only if it did before that CONNACK, or
+      ;; the next broker's Session Present 0 would read as a lost one.
+      (when-some [before (:had-session-before @(:conn c))]
+        (reset! (:had-session? c) before))
+      (bump! c :redirected)
+      (on-drop! c (ledger/now (:ledger c)))
+      true)))
+
+(defn take-redirect!
+  "The \"host:port\" the last broker sent this client on to, once."
+  [c]
+  (first (reset-vals! (:redirect-to c) nil)))
+
 (defn- on-connack [c msg]
   (locking (:lock c)
     (let [code (bit-and 0xFF (long (or (:reason-code msg) (:connect-return-code msg) 0)))
           lg   (:ledger c)]
       (if (pos? code)
-        (do (bump! c :refused)
-            (log/debug (:id c) "refused with" code)
-            (on-drop! c (ledger/now lg)))
+        (when-not (redirected! c msg)
+          (bump! c :refused)
+          (log/debug (:id c) "refused with" code)
+          (on-drop! c (ledger/now lg)))
         (let [present? (boolean (:session-present? msg))]
-          (swap! (:conn c) assoc :connected? true)
+          (swap! (:conn c) assoc :connected? true :had-session-before @(:had-session? c))
           (bump! c :connects)
           (when (and (:persistent? c) @(:had-session? c) (not present?))
             (let [at (or @(:last-drop c) (ledger/now lg))]
@@ -291,6 +326,8 @@
                   (send! c (MqttPubRel/encode (v5 c {:packet-type :PUBREL
                                                      :packet-identifier (:packet-identifier msg)}))))
       :PUBCOMP  (retire! c (:packet-identifier msg) true)
+      ;; The other form of a redirect: accepted, then told to go.
+      :DISCONNECT (locking (:lock c) (redirected! c msg))
       nil)))
 
 ;; ── connecting ────────────────────────────────────────────────────────
