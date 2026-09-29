@@ -2,4 +2,8 @@
 ;;
 ;;   bb scripts/chaos.bb chaos/three-brokers.edn chaos/long.edn
 ;;   bb scripts/chaos.bb chaos/single-broker.edn chaos/long.edn   no cluster needed
-{:load {:publishers 50 :subscribers 300 :rate 2000 :duration-s 600}}
+;;
+;; The brokers get more heap: at this rate a broker with an in-process Rama
+;; ran out of 1g within a minute.
+{:setup {:brokers {:heap "2g"}}
+ :load  {:publishers 50 :subscribers 300 :rate 2000 :duration-s 600}}

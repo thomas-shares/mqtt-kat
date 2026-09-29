@@ -5,8 +5,16 @@
    Times are microseconds since the run started, from one monotonic clock: the
    publishers, the subscribers and the chaos are all in this JVM, so \"the
    SUBACK came before the PUBLISH went\" is a comparison of two numbers here,
-   not a guess across machines."
-  (:import [java.util.concurrent ConcurrentHashMap ConcurrentLinkedQueue]))
+   not a guess across machines.
+
+   Sized for long runs: ten minutes at 2000 publishes a second to 300
+   subscribers is over a hundred million deliveries, so a delivery is a few
+   bits, not a map entry. Keeping one [msg at qos broker] per delivery ran the
+   runner out of heap three minutes into chaos/long.edn."
+  (:require [mqttkat.chaos.check :as check])
+  (:import [java.util BitSet HashMap]
+           [java.util.concurrent ConcurrentHashMap]
+           [java.util.concurrent.atomic AtomicLong]))
 
 (set! *warn-on-reflection* true)
 
@@ -16,8 +24,14 @@
    :publishes     (ConcurrentHashMap.)
    ;; client-id -> [subscription ...], the last one open while :to is nil
    :subscriptions (atom {})
-   ;; client-id -> queue of [msg-id at qos broker]
+   ;; client-id -> HashMap pub -> BitSets by seq, see delivered!
    :deliveries    (ConcurrentHashMap.)
+   ;; [client-id msg-id] -> [{:at :qos :broker}], for the second and later
+   ;; deliveries of a message only, and only the first `repeats-kept` of
+   ;; those: the detail a :duplicate is reported with.
+   :repeats       (ConcurrentHashMap.)
+   :delivered     (AtomicLong.)
+   :acked         (AtomicLong.)
    :clients       (atom {})
    :sessions-lost (atom [])
    ;; Things the broker did that MQTT says it must not, whatever the QoS.
@@ -41,10 +55,19 @@
   (.put ^ConcurrentHashMap (:publishes ledger) id (assoc m :sent (now ledger))))
 
 (defn acked! [ledger id]
-  (let [t (now ledger)]
+  (let [t      (now ledger)
+        first? (volatile! false)]
     (.computeIfPresent ^ConcurrentHashMap (:publishes ledger) id
                        (reify java.util.function.BiFunction
-                         (apply [_ _ m] (assoc m :acked t))))))
+                         (apply [_ _ m]
+                           (if (:acked m)
+                             m
+                             (do (vreset! first? true) (assoc m :acked t))))))
+    (when @first?
+      (.incrementAndGet ^AtomicLong (:acked ledger)))))
+
+(defn acked-count ^long [ledger]
+  (.get ^AtomicLong (:acked ledger)))
 
 ;; ── subscribing ────────────────────────────────────────────────────────
 
@@ -80,31 +103,85 @@
   (swap! (:sessions-lost ledger) conj {:client client :at at}))
 
 ;; ── receiving ──────────────────────────────────────────────────────────
+;;
+;; Per client, per publisher, four BitSets indexed by the message's sequence
+;; number (a publisher numbers its messages 1, 2, 3...): handed on once,
+;; more than once, at QoS 1 or above, at QoS 2. That is all the check needs
+;; of a delivery — whether, how often, and at most which QoS — in four bits.
 
-(defn delivered! [ledger client id qos broker]
-  (let [q (.computeIfAbsent ^ConcurrentHashMap (:deliveries ledger) client
-                            (reify java.util.function.Function
-                              (apply [_ _] (ConcurrentLinkedQueue.))))]
-    (.add ^ConcurrentLinkedQueue q [id (now ledger) qos broker])))
+(def ^:private repeats-kept 10000)
+
+(defn- bits-of ^objects [^HashMap by-pub pub]
+  (or (.get by-pub pub)
+      (let [a (object-array [(BitSet.) (BitSet.) (BitSet.) (BitSet.)])]
+        (.put by-pub pub a)
+        a)))
+
+(defn delivered! [ledger client [pub sq :as id] qos broker]
+  (let [^HashMap by-pub (.computeIfAbsent ^ConcurrentHashMap (:deliveries ledger) client
+                                          (reify java.util.function.Function
+                                            (apply [_ _] (HashMap.))))
+        i       (int sq)
+        qos     (long qos)
+        repeat? (locking by-pub
+                  (let [a (bits-of by-pub pub)
+                        ^BitSet once (aget a 0)
+                        again? (.get once i)]
+                    (if again?
+                      (.set ^BitSet (aget a 1) i)
+                      (.set once i))
+                    (when (>= qos 1) (.set ^BitSet (aget a 2) i))
+                    (when (= qos 2) (.set ^BitSet (aget a 3) i))
+                    again?))]
+    (.incrementAndGet ^AtomicLong (:delivered ledger))
+    (when repeat?
+      (let [^ConcurrentHashMap repeats (:repeats ledger)
+            k [client id]]
+        (when (or (.containsKey repeats k) (< (.size repeats) (int repeats-kept)))
+          (.merge repeats k [{:at (now ledger) :qos qos :broker broker}]
+                  (reify java.util.function.BiFunction
+                    (apply [_ a b] (into a b)))))))))
 
 (defn delivery-count ^long [ledger]
-  (reduce + 0 (map #(.size ^ConcurrentLinkedQueue %)
-                   (.values ^ConcurrentHashMap (:deliveries ledger)))))
+  (.get ^AtomicLong (:delivered ledger)))
+
+(deftype ClientDeliveries [^HashMap by-pub ^ConcurrentHashMap repeats client]
+  check/Delivered
+  (delivered-ids [_]
+    (locking by-pub
+      (vec (for [[pub ^objects a] by-pub
+                 :let [^BitSet once (aget a 0)]
+                 sq (take-while #(>= (long %) 0)
+                                (iterate #(.nextSetBit once (int (inc (long %))))
+                                         (.nextSetBit once 0)))]
+             [pub (long sq)]))))
+  (delivery [_ [pub sq :as id]]
+    (let [i (int sq)]
+      (locking by-pub
+        (when-let [^objects a (.get by-pub pub)]
+          (when (.get ^BitSet (aget a 0) i)
+            (let [extra (.get repeats [client id])]
+              {:n       (cond extra                          (inc (count extra))
+                              (.get ^BitSet (aget a 1) i)     2
+                              :else                           1)
+               :max-qos (cond (.get ^BitSet (aget a 3) i) 2
+                              (.get ^BitSet (aget a 2) i) 1
+                              :else                       0)
+               ;; Of the repeats only: the first delivery's moment is not kept.
+               :at      (mapv :at extra)
+               :brokers (mapv :broker extra)})))))))
 
 ;; ── reading it back ────────────────────────────────────────────────────
 
 (defn snapshot
   "The ledger as the plain data mqttkat.chaos.check/check takes."
   [ledger]
-  {:publishes     (into {} (:publishes ledger))
+  {;; The map itself, not a copy: a long run has over a million publishes.
+   :publishes     (:publishes ledger)
    :subscriptions @(:subscriptions ledger)
    :deliveries    (into {}
-                        (for [[client q] (:deliveries ledger)]
-                          [client (reduce (fn [acc [id at qos broker]]
-                                            (update acc id (fnil conj [])
-                                                    {:at at :qos qos :broker broker}))
-                                          {}
-                                          q)]))
+                        (for [[client by-pub] (:deliveries ledger)]
+                          [client (->ClientDeliveries by-pub (:repeats ledger) client)]))
    :clients       @(:clients ledger)
    :sessions-lost @(:sessions-lost ledger)
    :protocol      @(:protocol ledger)

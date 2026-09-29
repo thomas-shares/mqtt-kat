@@ -3,6 +3,7 @@
    broker: each case is a hand-written account of what the clients saw."
   (:require [clojure.test :refer [deftest is testing]]
             [mqttkat.chaos.check :as check]
+            [mqttkat.chaos.ledger :as ledger]
             [mqttkat.chaos.runner :as runner]))
 
 (defn- run
@@ -64,12 +65,15 @@
       (is (:ok? r))
       (is (= 1 (get-in r [:stats :required])))))
 
-  (testing "acknowledged after the UNSUBSCRIBE went: not owed"
-    (let [r (run {:sub (assoc sub :unsub-sent 590 :to 700 :ended-by :unsubscribe)
-                  :publishes {[0 1] (msg 1 500 600) [0 2] (msg 1 520 580)}
-                  :deliveries {[0 2] [{:at 585 :qos 1}]}})]
+  (testing "acknowledged after the UNSUBSCRIBE went, or too shortly before: not owed"
+    ;; §3.10.4 lets the broker drop what it still had queued for the
+    ;; subscription, and under load that queue is seconds long.
+    (let [r (run {:sub (assoc sub :unsub-sent 3000 :to 3100 :ended-by :unsubscribe)
+                  :publishes {[0 1] (msg 1 2500 3050) [0 2] (msg 1 2500 2900)
+                              [0 3] (msg 1 500 600)}
+                  :deliveries {[0 3] [{:at 650 :qos 1}]}})]
       (is (:ok? r))
-      (is (= 1 (get-in r [:stats :required]))))))
+      (is (= 1 (get-in r [:stats :required])) "only the one acked the grace before it"))))
 
 (deftest what-a-clean-session-is-owed
   (testing "a clean session's messages die with its connection"
@@ -103,9 +107,9 @@
 
 (deftest what-should-not-arrive
   (testing "published after the UNSUBACK"
-    (let [r (run {:sub (assoc sub :unsub-sent 590 :to 700 :ended-by :unsubscribe)
-                  :publishes {[0 1] (msg 1 500 550) [0 2] (msg 1 800 850)}
-                  :deliveries {[0 1] [{:at 560 :qos 1}] [0 2] [{:at 900 :qos 1}]}})]
+    (let [r (run {:sub (assoc sub :unsub-sent 2590 :to 2700 :ended-by :unsubscribe)
+                  :publishes {[0 1] (msg 1 500 550) [0 2] (msg 1 2800 2850)}
+                  :deliveries {[0 1] [{:at 560 :qos 1}] [0 2] [{:at 2900 :qos 1}]}})]
       (is (= {:unexpected 1} (kinds r)))))
 
   (testing "a topic the subscription does not match"
@@ -125,6 +129,30 @@
                 :deliveries {[0 1] [{:at 650 :qos 1}]}
                 :sessions-lost [{:client "s" :at 2500}]})]
     (is (= {:session-lost 1} (kinds r)))))
+
+(deftest the-ledger-keeps-what-the-check-needs
+  (testing "a delivery is a few bits, and the verdict is the same as from the plain record"
+    ;; One map entry per delivery ran chaos/long.edn out of heap: a hundred
+    ;; million of them. The ledger keeps bits per publisher and sequence.
+    (let [lg (ledger/ledger)]
+      (ledger/subscribed! lg "s" "t/1" 2 (ledger/now lg))
+      (Thread/sleep 2)
+      (doseq [[sq qos] [[1 1] [2 2] [3 2] [4 1]]]
+        (ledger/published! lg [7 sq] {:topic "t/1" :qos qos :pub-broker 1})
+        (ledger/acked! lg [7 sq]))
+      (ledger/delivered! lg "s" [7 1] 1 1)
+      (ledger/delivered! lg "s" [7 1] 1 1)           ; QoS 1 may repeat
+      (ledger/delivered! lg "s" [7 2] 2 1)
+      (ledger/delivered! lg "s" [7 2] 2 1)           ; QoS 2 may not
+      (ledger/delivered! lg "s" [7 3] 2 1)           ; [7 4] never arrives
+      (is (= 5 (ledger/delivery-count lg)))
+      (is (= 4 (ledger/acked-count lg)))
+      (let [r (check/check (ledger/snapshot lg) {})]
+        (is (= {:duplicate 1 :lost 1} (:counts r)))
+        (is (= [7 4] (:msg (first (filter (comp #{:lost} :kind) (:violations r))))))
+        (is (= 2 (:times (first (filter (comp #{:duplicate} :kind) (:violations r))))))
+        (is (= 1 (get-in r [:stats :qos1-repeats])))
+        (is (= 5 (get-in r [:stats :deliveries])))))))
 
 (deftest configuration
   (testing "files merge over the defaults, maps deeply, and nil takes an action out"

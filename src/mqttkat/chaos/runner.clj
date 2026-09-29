@@ -51,7 +51,9 @@
    ;; after killing it. Broker n listens on :port + n - 1.
    :setup {:brokers {:count 1 :host "127.0.0.1" :port 1885 :http 8085
                      :heap "1g" :rama "external"}
-           :rama    {:start? false :stop? false}}
+           :rama    {:start? true :stop? false}
+           ;; This process: chaos.bb starts it with -Xmx :heap.
+           :runner  {:heap "4g"}}
 
    ;; How a broker is killed, stopped and started: brokers.bb unless said
    ;; otherwise. "{n}" is the broker's number; start gets the flags from
@@ -85,7 +87,7 @@
    :chaos {}
 
    :check {:subscribe-settle-ms 1000    ; how long a subscription takes to reach every broker
-           :clean-grace-ms      10000   ; how long a clean session must outlive an ack for it to count
+           :clean-grace-ms      10000   ; how long a clean session, or a subscription before its UNSUBSCRIBE, must outlive an ack for it to count
            :drain-ms            5000
            :max-drain-ms        120000
            :final-reconnect?    true
@@ -292,7 +294,7 @@
           {:t-s        (quot (ledger/now ledger) 1000000)
            :published  (:sent @tally 0)
            :skipped    (:skipped @tally 0)
-           :acked      (count (filter (comp :acked val) (:publishes ledger)))
+           :acked      (ledger/acked-count ledger)
            :delivered  (ledger/delivery-count ledger)
            :connected  (str (count (filter c/connected? clients)) "/" (count clients))
            :brokers-up (mapv :n (up-brokers state))
@@ -310,7 +312,7 @@
   (let [{:keys [drain-ms max-drain-ms]} (get-in state [:cfg :check])
         lg       (:ledger state)
         observe  #(vector (ledger/delivery-count lg)
-                          (count (filter (comp :acked val) (:publishes lg))))
+                          (ledger/acked-count lg))
         deadline (+ (System/currentTimeMillis) (long max-drain-ms))]
     (loop [last (observe) quiet-since (System/currentTimeMillis)]
       (Thread/sleep 250)
@@ -403,7 +405,8 @@
       (.join ^Thread dog))
     (let [snap   (ledger/snapshot lg)
           result (check/check snap {:subscribe-settle (* 1000 (long (:subscribe-settle-ms chk)))
-                                    :clean-grace      (* 1000 (long (:clean-grace-ms chk)))})
+                                    :clean-grace      (* 1000 (long (:clean-grace-ms chk)))
+                                    :max-violations   (:max-violations chk)})
           path   (str (io/file dir (str run-id ".edn")))
           counters (apply merge-with + (map c/counters (:clients state)))]
       (run! c/close! (:clients state))
@@ -424,7 +427,7 @@
     (println "usage: clojure -m mqttkat.chaos.runner config.edn [more.edn ...]")
     (System/exit 2))
   (let [result (run-scenario! (config paths))]
-    (pp/pprint (select-keys result [:ok? :stats :counts :lost-by :clients :report]))
+    (pp/pprint (select-keys result [:ok? :stats :counts :lost-by :lost-by-client :clients :report]))
     (doseq [v (take 10 (:violations result))]
       (println " " (pr-str (dissoc v :context))))
     (shutdown-agents)
