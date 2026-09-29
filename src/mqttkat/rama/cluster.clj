@@ -130,7 +130,10 @@
      :brokers        atom, the in-memory copy of the registry:
                      broker-id -> {:host :port :at}; empty until watch!
      :settings       atom, the cluster's settings: name -> value
-     :proxies        atom, the proxies feeding both
+     :stats-state    PState client, the module's counts: `$$rama-stats`
+     :stats          atom, the in-memory copy of them:
+                     task -> {\"sessions\" n … \"at\" millis}
+     :proxies        atom, the proxies feeding the atoms
 
    Blocks until the module is reachable. In-process that means launching it,
    which takes a few seconds."
@@ -156,9 +159,11 @@
      :settings-state (r/foreign-pstate cluster module-name "$$settings")
      :retained-state (r/foreign-pstate cluster module-name "$$retained")
      :queued-state  (r/foreign-pstate cluster module-name "$$queued")
+     :stats-state   (r/foreign-pstate cluster module-name "$$rama-stats")
      :trie          (atom (trie/make-trie))
      :brokers       (atom {})
      :settings      (atom {})
+     :stats         (atom {})
      :proxies       (atom [])}))
 
 (defn unwatch!
@@ -547,7 +552,8 @@
    each carries the value as it stands, so this is also how both are built
    on start: no scan, no separate load, the same code path as any later
    change. Idempotent."
-  [{:keys [subscriptions brokers-state retained-state settings-state trie brokers settings proxies] :as conn}]
+  [{:keys [subscriptions brokers-state retained-state settings-state stats-state
+           trie brokers settings stats proxies] :as conn}]
   (when (empty? @proxies)
     (reset! proxies
             (doall
@@ -559,7 +565,16 @@
                (r/foreign-proxy (keypath module/settings-key) settings-state
                                 {:callback-fn (guarded "the settings"
                                                        (fn [new _diff _old]
-                                                         (reset! settings (or new {}))))})]
+                                                         (reset! settings (or new {}))))})
+               ;; What the module holds and has processed, for the console.
+               ;; Pushed, so the console is told rather than asks: the
+               ;; running broker's own connection says so on the event bus.
+               (r/foreign-proxy (keypath module/stats-key) stats-state
+                                {:callback-fn (guarded "the module's counts"
+                                                       (fn [new _diff _old]
+                                                         (reset! stats (or new {}))
+                                                         (when (identical? conn @*connection*)
+                                                           (events/emit! {:event :rama-stats}))))})]
               (for [shard (range module/shard-count)]
                 (r/foreign-proxy (keypath shard) subscriptions
                                  {:callback-fn (guarded (str "subscriptions shard " shard)
@@ -791,6 +806,28 @@
   "Whether the running broker has a cluster."
   []
   (some? @*connection*))
+
+(def gauges
+  "The counts in `$$counts` that go up and down with what the module
+   holds, as against the event counts, which only go up."
+  ["sessions" "connected" "parked" "subscriptions" "retained" "queued"])
+
+(defn module-stats
+  "What the module holds and has processed, as its proxy last pushed it:
+   {:mode :module :tasks :at :counts}, the counts summed over the tasks —
+   the gauges, \"expired\", and \"event/<kind>\" per kind of event — and
+   :per-task, each task's counts with the \"at\" it copied them. nil when
+   not attached. Of `conn`, a connection watch! has been called on, when
+   given."
+  ([] (some-> @*connection* module-stats))
+  ([{:keys [stats mode module-name]}]
+   (let [per-task @stats]
+     {:mode     mode
+      :module   module-name
+      :tasks    (count per-task)
+      :at       (when (seq per-task) (reduce max (map #(get % "at" 0) (vals per-task))))
+      :counts   (apply merge-with + {} (map #(dissoc % "at") (vals per-task)))
+      :per-task per-task})))
 
 ;; ── redirecting connections ──────────────────────────────────────────────
 

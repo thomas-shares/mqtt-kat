@@ -44,6 +44,10 @@
   (icon [:rect {:x 3 :y 4 :width 18 :height 6}] [:rect {:x 3 :y 14 :width 18 :height 6}]
         [:path {:d "M7 7h.01M7 17h.01"}]))
 
+(def icon-rama
+  (icon [:ellipse {:cx 12 :cy 5 :rx 8 :ry 3}] [:path {:d "M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"}]
+        [:path {:d "M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"}]))
+
 (def icon-clients
   (icon [:circle {:cx 9 :cy 8 :r 3}] [:path {:d "M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"}]
         [:path {:d "M17 11h4M17 16h4"}]))
@@ -79,7 +83,8 @@
     ;; Settings is not in the nav and is not routed. settings-page below still
     ;; builds it — see the note there.
     (nav-item {:href "/clients"  :label "Clients"  :glyph icon-clients :active? (= active :clients)})
-    (nav-item {:href "/brokers"  :label "Brokers"  :glyph icon-brokers :active? (= active :brokers)})]
+    (nav-item {:href "/brokers"  :label "Brokers"  :glyph icon-brokers :active? (= active :brokers)})
+    (nav-item {:href "/rama"     :label "Rama"     :glyph icon-rama    :active? (= active :rama)})]
    [:div.side-foot foot]])
 
 (defn- page-head [{:keys [eyebrow title tools]}]
@@ -482,6 +487,63 @@
               [:div.event-empty
                "Not attached to a Rama cluster: start with -Dmqttkat.rama=in-process or external."]]]
             (map broker-row rows))]]]]])))
+
+(defn rama-page
+  "What the Rama module holds and has been through, as its own counts have
+   it: `$$counts`, gathered once a second into `$$rama-stats`, pushed to
+   this broker by a proxy and on to the page the moment it arrives. Not
+   this broker's view of the cluster — the brokers page is that — but the
+   module's."
+  []
+  (let [now    (state/current)
+        fields (merge (state/fields now) (state/rama-fields))]
+    (layout
+     {:title "Rama — MQTT Console"
+      :active :rama
+      :sidebar-foot (broker-foot fields)}
+     [:div.main.main--rama
+      (page-head
+       {:eyebrow "Durable state"
+        :title "Rama"
+        :tools [:div.page-stamp.num {:id "r-stamp"} (fields "r-stamp")]})
+
+      [:div.stat-row.stat-row--five
+       [:div.stat [:div.label "Sessions stored"] [:div.stat-value.num {:id "r-sessions"} (fields "r-sessions")]]
+       [:div.stat [:div.label "Connected"] [:div.stat-value.num {:id "r-connected"} (fields "r-connected")]]
+       [:div.stat [:div.label "Parked"] [:div.stat-value.num {:id "r-parked"} (fields "r-parked")]]
+       [:div.stat [:div.label "Brokers registered"] [:div.stat-value.num {:id "r-brokers"} (fields "r-brokers")]]
+       [:div.stat [:div.label "Events / s"] [:div.stat-value.num {:id "r-events-rate"} (fields "r-events-rate")]]]
+
+      [:div.panels
+      [:div.panel.panel--ruled
+       [:div.panel-head
+        [:h2.panel-title "Held in Rama"]
+        [:div.chart-scale.num {:id "r-note"} (fields "r-note")]]
+       [:div.table-wrap
+        [:table.table
+         [:thead [:tr [:th "What"] [:th.cell-right "Count"]]]
+         [:tbody
+          (for [{:keys [id name]} state/rama-gauges]
+            [:tr [:td name] [:td.cell-right.num {:id (str "r-g-" id)} (fields (str "r-g-" id))]])
+          [:tr [:td "Module"] [:td.cell-right.cell-dim {:id "r-module"} (fields "r-module")]]
+          [:tr [:td "Mode"] [:td.cell-right.cell-dim {:id "r-mode"} (fields "r-mode")]]
+          [:tr [:td "Tasks reporting"] [:td.cell-right.num {:id "r-tasks"} (fields "r-tasks")]]]]]]
+
+      [:div.panel.panel--flush
+       [:div.panel-head
+        [:h2.panel-title "Through the depot"]
+        [:div.chart-scale.num "session events processed, by kind"]]
+       [:div.table-wrap
+        [:table.table
+         [:thead [:tr [:th "Event"] [:th.cell-right "Total"] [:th.cell-right "Rate"]]]
+         [:tbody
+          (for [{:keys [kind name]} state/rama-events]
+            [:tr [:td name]
+             [:td.cell-right.num {:id (str "r-ev-" kind)} (fields (str "r-ev-" kind))]
+             [:td.cell-right.num.cell-dim {:id (str "r-ev-" kind "-rate")} (fields (str "r-ev-" kind "-rate"))]])
+          [:tr [:td [:strong "All events"]]
+           [:td.cell-right.num {:id "r-events"} (fields "r-events")]
+           [:td]]]]]]]])))
 
 (defn topics-page []
   (let [now    (state/current)

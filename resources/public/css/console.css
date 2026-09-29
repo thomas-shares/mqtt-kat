@@ -78,6 +78,8 @@ body { font-size: 14px; }
 .main--settings { grid-template-rows: auto minmax(min-content, 1fr) auto; }
 /* Head, stats, the redirect form, then the table takes the rest. */
 .main--brokers { grid-template-rows: auto auto auto minmax(min-content, 1fr); }
+/* Head, stats, then the two tables side by side, taking the rest. */
+.main--rama { grid-template-rows: auto auto minmax(min-content, 1fr); }
 
 /* ── page head ─────────────────────────────────────────────────────── */
 
@@ -158,6 +160,7 @@ body { font-size: 14px; }
 }
 .stat { padding: var(--space-4) var(--space-6); display: flex; flex-direction: column; gap: var(--space-1); }
 .stat + .stat { border-left: 2px solid var(--color-divider); }
+.stat-row--five { grid-template-columns: repeat(5, 1fr); }
 .stat-value {
   font-family: var(--font-heading); font-weight: var(--font-heading-weight);
   font-size: 24px; line-height: 1; font-variant-numeric: tabular-nums;

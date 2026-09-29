@@ -19,7 +19,8 @@
 (defn- console-markup
   "Every page that is kept live, as one string."
   []
-  (str (console/overview-page) (console/topics-page) (console/clients-page)))
+  (str (console/overview-page) (console/topics-page) (console/clients-page)
+       (console/rama-page)))
 
 (defn- listener [^LinkedBlockingQueue received]
   (reify WebSocket$Listener
@@ -148,7 +149,7 @@
     ;; browser assigns it. An id in the markup with no field behind it is a
     ;; reading frozen at page load, which looks live and is not — the failure
     ;; this is here to catch, because nothing else would.
-    (let [fields (state/fields (state/current))
+    (let [fields (merge (state/fields (state/current)) (state/rama-fields))
           markup (str (console-markup))
           ;; Only the ids that are readings. The charts and their wrappers are
           ;; addressed by id too, and are drawn rather than assigned.

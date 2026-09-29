@@ -48,6 +48,13 @@
    session expires on the cluster's clock whether or not the broker that
    parked it is still there.
 
+   `$$counts` — what the module holds and has been through, per task: how
+   many sessions, connected, parked, subscriptions, retained messages and
+   queued messages, and how many events of each kind it has processed. Kept
+   on the task that makes each change, beside it, so counting costs a read
+   and a write and no hop. `$$rama-stats` gathers them under one key, once a
+   second, for the console's proxy — see `stats-sample-millis`.
+
    The sharding is for the proxies: a proxied value is read, sent and
    rewritten whole, so it must stay small, and Rama cannot proxy the root of
    a partition or a subindexed structure — only a plain value under a key.
@@ -122,10 +129,66 @@
   (mod (hash s) shard-count))
 
 (def REPLACE-TICK-DEPOT
-  "Tests set this true, with-redefs, before launching: the expiry sweep then
-   runs off an ordinary depot the test appends `{:now millis}` to, instead
-   of a tick depot on a timer. Read at launch."
+  "Tests set this true, with-redefs, before launching: the expiry sweep and
+   the stats roll-up then run off ordinary depots the test appends
+   `{:now millis}` to, instead of tick depots on a timer. Read at launch."
   false)
+
+(def stats-sample-millis
+  "How often each task copies its `$$counts` to `$$rama-stats`, where the
+   console's proxy sees them. A second, the console's own interval: one
+   write per task per second, and the proxy is sent the diff."
+  1000)
+
+(def stats-key
+  "The one key `$$rama-stats` uses: task -> that task's counts, plus \"at\",
+   when the task last copied them. One key, so one proxy sees the lot."
+  "stats")
+
+(defn add-counts
+  "`counts` with `deltas` added, key by key. A delta of zero changes
+   nothing and adds no key, so an event that moved no gauge writes back
+   what it read."
+  [counts deltas]
+  (reduce-kv (fn [m k d]
+               (if (zero? (long d))
+                 m
+                 (assoc m k (+ (long (get m k 0)) (long d)))))
+             (or counts {})
+             deltas))
+
+(defn event-count
+  "The delta for having processed one `event`: the per-kind count, under
+   \"event/<kind>\"."
+  [event]
+  {(str "event/" (name event)) 1})
+
+(defn presence-delta
+  "How gauge `k` moves when a value goes from `before` to `after`: up one
+   for a value that appeared, down one for one that went, else nothing. Read
+   before and after the write, never worked out from the event: a record
+   run a second time finds the write already made, and counts nothing."
+  [k before after]
+  {k (- (if (some? after) 1 0) (if (some? before) 1 0))})
+
+(defn with-at
+  "A task's counts as `$$rama-stats` holds them: stamped with when they were
+   copied, so the console can work out a rate over the time that really
+   passed."
+  [counts at]
+  (assoc (or counts {}) "at" (long at)))
+
+(defmacro ^:private count>
+  "Add `deltas` to this task's `$$counts`. A macro, not a ramaop: a ramaop
+   cannot see the topology's PStates. <<atomic keeps the three segments one
+   block, and the vars are fresh each time so two uses never meet."
+  [deltas]
+  (let [task (symbol (str "*count-task" (gensym)))
+        old  (symbol (str "*count-old" (gensym)))]
+    `(<<atomic
+       (ops/current-task-id :> ~task)
+       (local-select> [(keypath ~task)] ~'$$counts :> ~old)
+       (local-transform> [(keypath ~task) (termval (add-counts ~old ~deltas))] ~'$$counts))))
 
 (def expiry-sweep-millis
   "How often parked sessions are checked for ones whose time has come.
@@ -179,6 +242,25 @@
                (pos? interval)
                (not= interval never-expires))
       (+ (long at) (* 1000 interval)))))
+
+(defn parked?
+  "Whether a `$$sessions` record is a session parked while its client is
+   away, rather than a connected one or the history of a clean one."
+  [session]
+  (boolean (and session
+                (not (:connected? session))
+                (kept? (:protocol-version session)
+                       (:clean-session? session)
+                       (:session-expiry-interval session)))))
+
+(defn session-deltas
+  "How the session gauges move when a client's record goes from `before` to
+   `after`: stored, connected, parked."
+  [before after]
+  (let [n (fn [pred] (- (if (pred after) 1 0) (if (pred before) 1 0)))]
+    {"sessions"  (n some?)
+     "connected" (n #(boolean (:connected? %)))
+     "parked"    (n parked?)}))
 
 (defn enqueue-allowed?
   "Whether an :enqueue is to be kept. Always, unless it says :if-kept? —
@@ -300,6 +382,9 @@
   (if REPLACE-TICK-DEPOT
     (declare-depot setup *expiry-tick :random {:global? true})
     (declare-tick-depot setup *expiry-tick expiry-sweep-millis))
+  (if REPLACE-TICK-DEPOT
+    (declare-depot setup *stats-tick :random {:global? true})
+    (declare-tick-depot setup *stats-tick stats-sample-millis))
 
   ;; A stream topology, so a record is in the PStates by the time an append
   ;; with :ack returns. See the namespace doc for what stream's at-least-once
@@ -323,8 +408,30 @@
     ;; time and client id, so what is due is one range.
     (declare-pstate s $$expiring {Long (map-schema String String {:subindex? true})}
                     {:key-partitioner task-is-partition})
+    ;; Keyed by task, like $$expiring and for the same reason: every count is
+    ;; kept where the change it counts is made.
+    (declare-pstate s $$counts {Long (map-schema String Long)}
+                    {:key-partitioner task-is-partition})
+    (declare-pstate s $$rama-stats {String (map-schema Object Object)})
 
     (<<sources s
+      ;; ── the counts, gathered for the console ───────────────────────
+      ;; Every task copies its own counts under the one key a proxy watches.
+      ;; Whole, not added up: the sum is the reader's, and a task's copy is
+      ;; right however many seconds it missed.
+      (source> *stats-tick :> *stats-tick)
+      (<<if (map? *stats-tick)
+        (get *stats-tick :now :> *stats-now)
+        (else>)
+        (System/currentTimeMillis :> *stats-now))
+      (|all)
+      (ops/current-task-id :> *stats-task)
+      (local-select> [(keypath *stats-task)] $$counts :> *mine)
+      (identity stats-key :> *stats-key)
+      (|hash *stats-key)
+      (local-transform> [(keypath *stats-key *stats-task) (termval (with-at *mine *stats-now))]
+                        $$rama-stats)
+
       ;; ── the sweep ──────────────────────────────────────────────────
       (source> *expiry-tick :> *tick)
       (<<if (map? *tick)
@@ -389,16 +496,24 @@
       (<<if (and> (not (get *current :connected?))
                   (= *due-connect-id (get *current :connect-id)))
         (get *current :subscriptions {} :> *subs)
+        (local-select> [(keypath *client-id) (view count)] $$queued :> *dropped)
         (local-transform> [(keypath *client-id) NONE>] $$queued)
         (local-transform> [(keypath *client-id) NONE>] $$sessions)
+        (count> (merge (session-deltas *current nil)
+                       {"queued" (- *dropped) "expired" 1}))
         (ops/explode (vec (keys *subs)) :> *filter)
         (shard-of *filter :> *shard)
         (|hash *shard)
+        (local-select> [(keypath *shard *filter *client-id)] $$subscriptions :> *had)
         (local-transform> [(keypath *shard *filter *client-id) NONE>] $$subscriptions)
+        (count> (presence-delta "subscriptions" *had nil))
         (local-transform> [(keypath *shard *filter) (pred empty?) NONE>] $$subscriptions))
 
       ;; ── the events ─────────────────────────────────────────────────
       (source> *session-events :> {:keys [*event *client-id *connect-id *at] :as *record})
+      ;; Counted where it arrives. At least once, like everything here: a
+      ;; record run twice is counted twice, which a throughput can bear.
+      (count> (event-count *event))
       (<<switch *event
 
         ;; ── the brokers ────────────────────────────────────────────────
@@ -471,25 +586,33 @@
         (get *record :topic :> *topic)
         (shard-of *topic :> *shard)
         (|hash *shard)
+        (local-select> [(keypath *shard *topic)] $$retained :> *had)
         (local-transform> [(keypath *shard *topic) (termval (get *record :message))] $$retained)
+        (count> (presence-delta "retained" *had true))
 
         (case> :unretain)
         (get *record :topic :> *topic)
         (shard-of *topic :> *shard)
         (|hash *shard)
+        (local-select> [(keypath *shard *topic)] $$retained :> *had)
         (local-transform> [(keypath *shard *topic) NONE>] $$retained)
+        (count> (presence-delta "retained" *had nil))
 
         ;; ── what is queued for a session that is away ──────────────────
         (case> :enqueue)
         (local-select> [(keypath *client-id) (view count)] $$queued :> *n)
         (local-select> [(keypath *client-id)] $$sessions :> *session)
         (<<if (and> (< *n queue-limit) (enqueue-allowed? *record *session))
+          (local-select> [(keypath *client-id (get *record :key))] $$queued :> *had)
           (local-transform> [(keypath *client-id (get *record :key)) (termval (get *record :message))]
-                            $$queued))
+                            $$queued)
+          (count> (presence-delta "queued" *had true)))
 
         (case> :dequeue)
         (ops/explode (get *record :keys) :> *key)
+        (local-select> [(keypath *client-id *key)] $$queued :> *had)
         (local-transform> [(keypath *client-id *key) NONE>] $$queued)
+        (count> (presence-delta "queued" *had nil))
 
         ;; ── the sessions ───────────────────────────────────────────────
         (default>)
@@ -545,12 +668,15 @@
               (ops/current-task-id :> *task)
               (local-transform> [(keypath *task (expiry-key (get *current :expires-at) *client-id)) NONE>]
                                 $$expiring))
+            (local-select> [(keypath *client-id)] $$sessions :> *after)
+            (count> (session-deltas *current *after))
             (run-key *b (get *record :incarnation) :> *run)
             (|hash *run)
             (local-transform> [(keypath *run) NONE-ELEM (termval *client-id)] $$broker->clients)
             (ops/explode (vec (keys *subs)) :> *filter)
             (shard-of *filter :> *shard)
             (|hash *shard)
+            (local-select> [(keypath *shard *filter *client-id)] $$subscriptions :> *had)
             (<<if *clean?
               (local-transform> [(keypath *shard *filter *client-id) NONE>] $$subscriptions)
               (local-transform> [(keypath *shard *filter) (pred empty?) NONE>] $$subscriptions)
@@ -559,7 +685,9 @@
               (local-transform> [(keypath *shard *filter *client-id)
                                  (multi-path [:connected? (termval true)]
                                              [:broker-id (termval *b)])]
-                                $$subscriptions)))
+                                $$subscriptions))
+            (local-select> [(keypath *shard *filter *client-id)] $$subscriptions :> *has)
+            (count> (presence-delta "subscriptions" *had *has)))
 
           ;; A connection ends: the client said so, the socket went, or the
           ;; broker it was on is gone. The last is trusted only if the record
@@ -614,12 +742,15 @@
               (local-transform> [(keypath *client-id) :lost? (termval true)] $$sessions)
               (else>)
               (local-transform> [(keypath *client-id) :lost? NONE>] $$sessions))
+            (local-select> [(keypath *client-id)] $$sessions :> *after)
+            (count> (session-deltas *current *after))
             (run-key *b (get *current :incarnation) :> *run)
             (|hash *run)
             (local-transform> [(keypath *run) (set-elem *client-id) NONE>] $$broker->clients)
             (ops/explode (vec (keys *subs)) :> *filter)
             (shard-of *filter :> *shard)
             (|hash *shard)
+            (local-select> [(keypath *shard *filter *client-id)] $$subscriptions :> *had)
             (<<if *clean?
               (local-transform> [(keypath *shard *filter *client-id) NONE>] $$subscriptions)
               (local-transform> [(keypath *shard *filter) (pred empty?) NONE>] $$subscriptions)
@@ -627,7 +758,9 @@
               ;; Still subscribed, not here: a publish that matches is for
               ;; the queue, not the wire.
               (local-transform> [(keypath *shard *filter *client-id :connected?) (termval false)]
-                                $$subscriptions)))
+                                $$subscriptions))
+            (local-select> [(keypath *shard *filter *client-id)] $$subscriptions :> *has)
+            (count> (presence-delta "subscriptions" *had *has)))
 
           ;; A broker that was forgotten, alive after all, stating a
           ;; connection it still holds. Taken only for the connection the
@@ -646,22 +779,29 @@
               (ops/current-task-id :> *task)
               (local-transform> [(keypath *task (expiry-key (get *current :expires-at) *client-id)) NONE>]
                                 $$expiring))
+            (local-select> [(keypath *client-id)] $$sessions :> *after)
+            (count> (session-deltas *current *after))
             (run-key *b (get *record :incarnation) :> *run)
             (|hash *run)
             (local-transform> [(keypath *run) NONE-ELEM (termval *client-id)] $$broker->clients)
             (ops/explode (still-connected-shards *subs *now-subs *client-id *b) :> [*shard *filter *entry])
             (|hash *shard)
+            (local-select> [(keypath *shard *filter *client-id)] $$subscriptions :> *had)
             (<<if *entry
               (local-transform> [(keypath *shard *filter *client-id) (termval *entry)] $$subscriptions)
               (else>)
               (local-transform> [(keypath *shard *filter *client-id) NONE>] $$subscriptions)
-              (local-transform> [(keypath *shard *filter) (pred empty?) NONE>] $$subscriptions)))
+              (local-transform> [(keypath *shard *filter) (pred empty?) NONE>] $$subscriptions))
+            (count> (presence-delta "subscriptions" *had *entry)))
 
           ;; Sent to another broker (§4.13): noted on the record so that
           ;; broker takes the client rather than sending it on again. The
           ;; connect that follows replaces the record, note and all.
           (case> (= *event :redirected))
           (local-transform> [(keypath *client-id) :sent-to (termval (get *record :to))] $$sessions)
+          ;; Onto a client with no record, this makes one.
+          (local-select> [(keypath *client-id)] $$sessions :> *after)
+          (count> (session-deltas *current *after))
 
           (case> (= *event :subscribe))
           (<<if (= *connect-id *last-id)
@@ -671,9 +811,11 @@
                               $$sessions)
             (shard-of *filter :> *shard)
             (|hash *shard)
+            (local-select> [(keypath *shard *filter *client-id)] $$subscriptions :> *had)
             (local-transform> [(keypath *shard *filter *client-id)
                                (termval (cluster-entry *entry *client-id (get *current :broker-id) true))]
-                              $$subscriptions))
+                              $$subscriptions)
+            (count> (presence-delta "subscriptions" *had true)))
 
           (case> (= *event :unsubscribe))
           (<<if (= *connect-id *last-id)
@@ -682,7 +824,9 @@
                               $$sessions)
             (shard-of *filter :> *shard)
             (|hash *shard)
+            (local-select> [(keypath *shard *filter *client-id)] $$subscriptions :> *had)
             (local-transform> [(keypath *shard *filter *client-id) NONE>] $$subscriptions)
+            (count> (presence-delta "subscriptions" *had nil))
             ;; A filter nobody holds any more goes too, so the shard does not
             ;; fill with empty maps and a broker's copy does not either.
             (local-transform> [(keypath *shard *filter) (pred empty?) NONE>] $$subscriptions)))))))

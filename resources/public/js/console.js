@@ -711,6 +711,8 @@
       redraw();
       return;
     }
+    // Rama's proxy pushed the module's counts: readings only, nothing to log.
+    if (message.event === "rama") return;
     // client-connected / client-disconnected: the readings, ahead of the next
     // sample. The charts wait for the sample so their points stay evenly
     // spaced in time — a connect drawn as a point of its own would put a
@@ -725,6 +727,7 @@
     var page = location.pathname === "/topics" ? "topics"
              : location.pathname === "/clients" ? "clients"
              : location.pathname === "/brokers" ? "brokers"
+             : location.pathname === "/rama" ? "rama"
              : "overview";
     var socket = new WebSocket(scheme + "//" + location.host + "/ws?page=" + page);
 

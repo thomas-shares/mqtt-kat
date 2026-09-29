@@ -266,6 +266,8 @@
                  (vec))}))
 
 (defonce ^:private previous (atom nil))
+(defonce ^:private previous-rama (atom nil))
+(defonce ^:private rama-rates-by-task (atom {}))
 (defonce ^:private latest-rates (atom {}))
 (defonce ^:private latest-cpu (atom nil))
 (defonce ^:private previous-topics (atom nil))
@@ -353,7 +355,9 @@
   (reset! previous-topics nil)
   (reset! latest-rates {})
   (reset! latest-topics [])
-  (reset! latest-cpu nil))
+  (reset! latest-cpu nil)
+  (reset! previous-rama nil)
+  (reset! rama-rates-by-task {}))
 
 ;; ── what goes in the page ─────────────────────────────────────────────
 
@@ -502,3 +506,106 @@
      :out     (Math/round (double (get r "out" 0.0)))
      :queued  (:queued reading)
      :heap    (:heap reading)}))
+
+;; ── Rama ──────────────────────────────────────────────────────────────
+
+(def rama-gauges
+  "The Rama page's table of what the module holds: element id, label, and
+   the count in `$$counts` it shows."
+  [{:id "sessions"      :name "Sessions stored"     :key "sessions"}
+   {:id "connected"     :name "Connected"           :key "connected"}
+   {:id "parked"        :name "Parked, kept"        :key "parked"}
+   {:id "subscriptions" :name "Subscriptions"       :key "subscriptions"}
+   {:id "retained"      :name "Retained messages"   :key "retained"}
+   {:id "queued"        :name "Queued for the away" :key "queued"}
+   {:id "expired"       :name "Sessions expired"    :key "expired"}])
+
+(def rama-events
+  "The kinds of `*session-events` record the Rama page counts, in the order
+   it lists them, with what each is to someone reading the page."
+  [{:kind "connect"         :name "Connects"}
+   {:kind "disconnect"      :name "Disconnects"}
+   {:kind "subscribe"       :name "Subscribes"}
+   {:kind "unsubscribe"     :name "Unsubscribes"}
+   {:kind "enqueue"         :name "Messages queued"}
+   {:kind "dequeue"         :name "Dequeues"}
+   {:kind "retain"          :name "Retained set"}
+   {:kind "unretain"        :name "Retained cleared"}
+   {:kind "lost"            :name "Lost with their broker"}
+   {:kind "still-connected" :name "Taken back"}
+   {:kind "redirected"      :name "Redirected"}
+   {:kind "broker-up"       :name "Broker announcements"}
+   {:kind "broker-stats"    :name "Broker reports"}
+   {:kind "broker-down"     :name "Broker withdrawals"}
+   {:kind "setting"         :name "Settings"}])
+
+(defn- event-key? [k]
+  (str/starts-with? (str k) "event/"))
+
+(defn rama-task-rates
+  "Events per second by kind, per task, from two copies of the per-task
+   counts. Over the time between the two copies as Rama stamped them, not
+   between two samples here: the copies arrive once a second on Rama's clock
+   and are read once a second on this one, and dividing by this one's would
+   read a copy that arrived late as a second with nothing in it and the next
+   as two. A task whose copy has not moved keeps the rate it had."
+  [before now last-rates]
+  (into {}
+        (for [[task counts] now
+              :let [prev (get before task)
+                    dt   (- (long (get counts "at" 0)) (long (get prev "at" 0)))]]
+          [task (if (and prev (pos? dt))
+                  (into {}
+                        (for [[k v] counts :when (event-key? k)]
+                          [k (max 0.0 (/ (- (long v) (long (get prev k 0))) (/ dt 1000.0)))]))
+                  (get last-rates task {}))])))
+
+(defn rama-sample!
+  "Work out the module's event rates from the counts its proxy last pushed.
+   Called from the websocket's tick, beside sample!."
+  []
+  (let [per-task (:per-task (cluster/module-stats))]
+    (swap! rama-rates-by-task #(rama-task-rates @previous-rama per-task %))
+    (reset! previous-rama per-task)))
+
+(defn rama-rates
+  "Events per second by \"event/<kind>\", summed over the tasks."
+  []
+  (apply merge-with + {} (vals @rama-rates-by-task)))
+
+(defn rama-fields
+  "Display strings for the Rama page, keyed by element id — the page's own,
+   sent only to it."
+  []
+  (let [{:keys [mode module tasks at counts] :as stats} (cluster/module-stats)
+        counts  (or counts {})
+        rates   (if stats (rama-rates) {})
+        count-of (fn [k] (if stats (commas (get counts k 0)) "—"))
+        rate-of  (fn [k] (if stats (rate-str (get rates k 0.0)) "—"))
+        total    (reduce + 0 (keep (fn [[k v]] (when (event-key? k) v)) counts))
+        total-r  (reduce + 0.0 (vals rates))]
+    (into
+     {"r-stamp"       (cond
+                        (nil? stats) "Not attached"
+                        at           (str "Pushed by Rama " (clock-str at))
+                        :else        "Waiting for Rama")
+      "r-mode"        (cond (nil? stats) "off" mode (name mode) :else "attached")
+      "r-module"      (or module "—")
+      "r-tasks"       (if stats (commas tasks) "—")
+      "r-brokers"     (if stats (commas (count (cluster/brokers))) "—")
+      "r-sessions"    (count-of "sessions")
+      "r-connected"   (count-of "connected")
+      "r-parked"      (count-of "parked")
+      "r-events"      (if stats (commas total) "—")
+      "r-events-rate" (if stats (rate-str total-r) "—")
+      "r-note"        (if stats
+                        (str tasks " tasks · counted as the topology writes")
+                        "Not attached to a Rama cluster: start with -Dmqttkat.rama=in-process or external.")}
+     (concat
+      (for [{:keys [id key]} rama-gauges]
+        [(str "r-g-" id) (count-of key)])
+      (mapcat (fn [{:keys [kind]}]
+                (let [k (str "event/" kind)]
+                  [[(str "r-ev-" kind) (count-of k)]
+                   [(str "r-ev-" kind "-rate") (rate-of k)]]))
+              rama-events)))))

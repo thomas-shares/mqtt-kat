@@ -51,12 +51,20 @@
     ;; client put in a topic name.
     (is (= "<p>a &amp; b</p>" (str (hiccup2.core/html [:p "a & b"]))))))
 
+(deftest the-rama-page-says-when-there-is-no-cluster
+  (testing "a broker on its own has no module to count, and says so"
+    (let [page (console/rama-page)]
+      (is (str/includes? page "Not attached to a Rama cluster"))
+      (is (str/includes? page "id=\"r-g-sessions\""))
+      (is (= "—" (get (state/rama-fields) "r-sessions"))))))
+
 (deftest handler-routes-and-refuses
   (testing "each console page is served, and nothing else is"
     (doseq [[uri title] [["/"         "Overview — MQTT Console"]
                          ["/topics"   "Topics — MQTT Console"]
                          ["/clients"  "Clients — MQTT Console"]
                          ["/brokers"  "Brokers — MQTT Console"]
+                         ["/rama"     "Rama — MQTT Console"]
                          ["/status"   "mqtt-kat"]]]
       (let [ok (web/handler {:request-method :get :uri uri})]
         (is (= 200 (:status ok)) (str uri " should be served"))
@@ -128,7 +136,8 @@
   (testing "each page marks its own nav entry, for CSS and for screen readers"
     (doseq [[page href] [[(console/overview-page) "/"]
                          [(console/topics-page) "/topics"]
-                         [(console/brokers-page) "/brokers"]]]
+                         [(console/brokers-page) "/brokers"]
+                         [(console/rama-page) "/rama"]]]
       (is (re-find (re-pattern (str "aria-current=\"page\"[^>]*href=\"" href "\"|"
                                     "href=\"" href "\"[^>]*aria-current=\"page\"")) page)
           (str href " should be the current page")))
@@ -202,7 +211,7 @@
     ;; kept for when it is wired up, and this is what stops those rules being
     ;; dropped as unused in the meantime.
     (let [markup   (str (console/overview-page) (console/topics-page) (console/brokers-page)
-                        (console/settings-page))
+                        (console/rama-page) (console/settings-page))
           used     (into #{} (mapcat #(str/split % #"\s+"))
                          (map second (re-seq #"class=\"([^\"]+)\"" markup)))
           css      (str (slurp (io/resource "public/css/modernist.css"))
