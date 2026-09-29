@@ -4,6 +4,23 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20260929
 
+### The chaos check took longer than the run
+
+After chaos/long.edn drained, the runner seemed to hang. It was checking, with
+nothing on screen. The check tried every subscription against every message on
+its topics. A subscriber resubscribes all run long, so both grow with the
+run's length and the check with its square: a 150 s run took 3.5 minutes to
+check, ten minutes would have taken the better part of an hour.
+
+A message can only be owed to a subscription if it was sent while the
+subscription lasted, so messages are now sorted by when they were sent and
+each subscription looks at its own stretch. Whether a delivery could be
+explained at all is asked only of the messages actually delivered, of the
+subscriptions that had not ended when it went out. Clients are checked in
+parallel, and the runner says it is checking. The same 150 s run now checks in
+under a minute on four cores, and a test holds the new lookups to the rules
+applied the slow way.
+
 ### The chaos runner ran out of heap
 
 `chaos/long.edn` (50 publishers, 300 subscribers, 2000 a second) took the

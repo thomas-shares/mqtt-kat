@@ -404,9 +404,12 @@
       (.set ^AtomicBoolean (:running state) false)
       (.join ^Thread dog))
     (let [snap   (ledger/snapshot lg)
+          _      (println "checking" (ledger/delivery-count lg) "deliveries")
+          t0     (System/nanoTime)
           result (check/check snap {:subscribe-settle (* 1000 (long (:subscribe-settle-ms chk)))
                                     :clean-grace      (* 1000 (long (:clean-grace-ms chk)))
                                     :max-violations   (:max-violations chk)})
+          _      (println (format "  checked in %.1f s" (/ (- (System/nanoTime) t0) 1e9)))
           path   (str (io/file dir (str run-id ".edn")))
           counters (apply merge-with + (map c/counters (:clients state)))]
       (run! c/close! (:clients state))

@@ -128,96 +128,174 @@
 (defn- broker-event? [e]
   (contains? #{:kill-broker :stop-broker :broker-up} (:type e)))
 
+;; ── looking things up by time ──────────────────────────────────────────
+;;
+;; A long run has over a million publishes and a subscriber resubscribes all
+;; run long, so every subscription against every message grows with the
+;; square of the run's length: ten minutes of chaos/long.edn took longer to
+;; check than to run. Messages and events are sorted by time once, and each
+;; subscription or loss looks only at its own stretch of them.
+
+(defn- first-at-or-after
+  "The index of the first of the ascending `ts` that is at least `t`."
+  ^long [^longs ts ^long t]
+  (loop [lo 0 hi (alength ts)]
+    (if (< lo hi)
+      (let [mid (unsigned-bit-shift-right (+ lo hi) 1)]
+        (if (< (aget ts mid) t) (recur (inc mid) hi) (recur lo mid)))
+      lo)))
+
+(defn- by-time
+  "`xs` sorted by `(t x)`, with the times alongside for first-at-or-after."
+  [t xs]
+  (let [v (vec (sort-by t xs))]
+    {:xs v :ts (long-array (map t v))}))
+
 (defn- context
   "The chaos around a message for `client`: what happened to that client, and
    to any broker, from `before` it was sent until `after` its
    acknowledgement."
-  [events client m before after]
+  [{:keys [xs ^longs ts]} client m before after]
   (let [lo (- (long (:sent m)) (long before))
-        hi (+ (long (or (:acked m) (:sent m))) (long after))]
-    (filterv #(and (<= lo (long (:at %)) hi)
-                   (or (= client (:client %)) (broker-event? %)))
-             events)))
+        hi (+ (long (or (:acked m) (:sent m))) (long after))
+        n  (alength ts)]
+    (loop [i (first-at-or-after ts lo) acc (transient [])]
+      (if (and (< i n) (<= (aget ts i) hi))
+        (let [e (nth xs i)]
+          (recur (inc i) (if (or (= client (:client e)) (broker-event? e)) (conj! acc e) acc)))
+        (persistent! acc)))))
 
-(defn- verdicts-for
-  "msg -> {:required q-or-nil :possible max-q} for one client's
-   subscriptions. One client at a time: across every client at once this was
-   a map entry per subscriber per message, which a long run cannot hold."
-  [opts by-topic topics subs]
+(defn- matcher
+  "matches?, remembered: a run has a handful of filters and topics."
+  []
+  (let [seen (java.util.concurrent.ConcurrentHashMap.)]
+    (fn [f topic]
+      (.computeIfAbsent seen [f topic]
+                        (reify java.util.function.Function
+                          (apply [_ _] (matches? f topic)))))))
+
+(defn- required-for
+  "msg -> {:required q :ended-by} for what one client's subscriptions were
+   owed. A message is only owed if it went out after the SUBACK and before the
+   subscription ended, so each subscription looks at that stretch alone."
+  [opts match? by-topic subs]
   (let [acc (java.util.HashMap.)]
     (doseq [sub subs
-            topic topics
-            :when (matches? (:filter sub) topic)
-            [id m] (get by-topic topic)]
-      (let [q    (effective-qos m sub)
-            req? (required? opts m sub)
-            can? (possible? m sub)]
-        (when (or req? can?)
-          (let [v (.get acc id)]
-            (.put acc id (cond-> (or v {})
-                           req? (-> (update :required (fnil max 0) q)
-                                    (assoc :ended-by (:ended-by sub)))
-                           can? (update :possible (fnil max 0) q)))))))
+            :when (:from sub)
+            [topic {:keys [xs ^longs ts]}] by-topic
+            :when (match? (:filter sub) topic)]
+      (let [;; required? bounds what was sent by when it was acknowledged,
+            ;; and that comes after it was sent.
+            hi (long (or (case (:ended-by sub)
+                           nil          nil
+                           :unsubscribe (:unsub-sent sub)
+                           (:to sub))
+                         forever))
+            n  (alength ts)]
+        (loop [i (first-at-or-after ts (inc (+ (long (:from sub)) (long (:subscribe-settle opts)))))]
+          (when (and (< i n) (<= (aget ts i) hi))
+            (let [[id m] (nth xs i)]
+              (when (required? opts m sub)
+                (let [q (effective-qos m sub)
+                      v (.get acc id)]
+                  (.put acc id {:required (max q (long (or (:required v) 0)))
+                                :ended-by (:ended-by sub)}))))
+            (recur (inc i))))))
     acc))
 
-(defn check
-  "The verdict on a run. `opts`: :subscribe-settle and :clean-grace in
-   microseconds, :context-window [before after] likewise, and
-   :max-violations, how many of each kind are kept with their detail — the
-   counts are of all of them."
-  [{:keys [publishes subscriptions deliveries sessions-lost events clients protocol]}
-   {:keys [subscribe-settle clean-grace context-window max-violations]
-    :or   {subscribe-settle 0 clean-grace 0 context-window [2000000 5000000]
-           max-violations 1000}
-    :as   opts}]
-  (let [opts           (assoc opts :subscribe-settle subscribe-settle :clean-grace clean-grace)
-        [before after] context-window
-        by-topic       (group-by (comp :topic val) publishes)
-        topics         (keys by-topic)
-        violations     (atom [])
-        counts         (atom {})
-        lost-by        (atom (sorted-map))
-        lost-clients   (atom {})
-        stats          (atom {:required 0 :delivered-required 0 :deliveries 0
-                              :qos1-repeats 0 :optional-delivered 0})
-        add!           (fn [v]
-                         (swap! counts update (:kind v) (fnil inc 0))
-                         (when (< (long (get @counts (:kind v))) (long (inc max-violations)))
-                           (swap! violations conj v)))]
-    (doseq [client (distinct (concat (keys subscriptions) (keys deliveries)))
-            :let [ds       (get deliveries client)
-                  verdicts (verdicts-for opts by-topic topics (get subscriptions client))]]
-      ;; What it was owed.
-      (doseq [[id {:keys [required ended-by]}] verdicts
-              :when required]
-        (swap! stats update :required inc)
-        (if (delivery ds id)
-          (swap! stats update :delivered-required inc)
-          (let [m   (get publishes id)
-                ctx (context events client m before after)
-                near? (boolean (some broker-event? ctx))]
-            ;; {1 {:near-broker-chaos 12 :elsewhere 0} 2 {...}}: a loss next to
-            ;; a killed broker is a known gap (see thoughts.md); one elsewhere
-            ;; is news.
-            (swap! lost-by update-in [required (if near? :near-broker-chaos :elsewhere)] (fnil inc 0))
-            (swap! lost-clients update client (fnil inc 0))
-            (add! {:kind :lost :client client :msg id :qos required
-                   :session (select-keys (get clients client) [:persistent? :mqtt5? :filter :sub-qos])
-                   :topic (:topic m) :sent (:sent m) :acked (:acked m)
-                   :pub-broker (:pub-broker m)
-                   ;; How the subscription that owed it ended: nil while it
-                   ;; lasts.
-                   :sub-ended-by ended-by
-                   :near-broker-chaos? near?
-                   :context ctx}))))
-      ;; What it was handed.
-      (doseq [id (delivered-ids ds)
-              :let [{:keys [n max-qos at brokers]} (delivery ds id)
-                    m (get publishes id)
-                    {:keys [required possible]} (.get ^java.util.HashMap verdicts id)
-                    n (long n)]]
-        (swap! stats update :deliveries + n)
-        (when-not required (swap! stats update :optional-delivered inc))
+(defn- sub-index
+  "One client's subscriptions for possible-qos: sorted by when they ended, with
+   the earliest SUBSCRIBE among each one and all that ended after it."
+  [subs]
+  (let [end              #(long (or (:to %) forever))
+        {:keys [xs ts]}  (by-time end subs)
+        n                (count xs)
+        earliest         (long-array n)]
+    (loop [i (dec n) lo (long forever)]
+      (when (>= i 0)
+        (let [lo (min lo (long (:sub-sent (nth xs i))))]
+          (aset earliest i lo)
+          (recur (dec i) lo))))
+    {:xs xs :ends ts :earliest earliest}))
+
+(defn- possible-qos
+  "The highest QoS any subscription in `idx` could have handed `m` on at, nil
+   if none could have. Only those that ended after it was sent, and only until
+   the rest all started after it was acknowledged."
+  [match? {:keys [xs ^longs ends ^longs earliest]} m]
+  (let [sent  (long (:sent m))
+        acked (long (or (:acked m) forever))
+        cap   (long (:qos m))
+        n     (alength ends)]
+    (loop [i (first-at-or-after ends sent) best nil]
+      (if (and (< i n) (<= (aget earliest i) acked))
+        (let [sub (nth xs i)]
+          (if (and (match? (:filter sub) (:topic m)) (possible? m sub))
+            (let [q (effective-qos m sub)]
+              (if (= q cap) q (recur (inc i) (max q (long (or best 0))))))
+            (recur (inc i) best)))
+        best))))
+
+;; ── the verdict ────────────────────────────────────────────────────────
+
+(defn- check-client
+  "One client's share of the verdict: what it was owed and what it was handed.
+   Keeps the first `max-violations` of each kind, and counts all of them."
+  [{:keys [publishes subscriptions deliveries clients]}
+   {:keys [context-window max-violations] :as opts}
+   match? by-topic events client]
+  (let [[before after] context-window
+        ds         (get deliveries client)
+        subs       (get subscriptions client)
+        ^java.util.HashMap owed (required-for opts match? by-topic subs)
+        idx        (sub-index subs)
+        stats      (long-array 5)       ; required delivered-required deliveries qos1-repeats optional-delivered
+        counts     (java.util.HashMap.)
+        violations (java.util.ArrayList.)
+        lost-by    (volatile! {})
+        lost       (volatile! 0)
+        add!       (fn [v]
+                     (let [n (inc (long (.getOrDefault counts (:kind v) 0)))]
+                       (.put counts (:kind v) n)
+                       (when (<= n (long max-violations))
+                         (.add violations v))))
+        bump!      (fn [i n] (aset stats (int i) (+ (aget stats (int i)) (long n))))]
+    ;; What it was owed.
+    (doseq [^java.util.Map$Entry e owed
+            :let [id (.getKey e)
+                  {:keys [required ended-by]} (.getValue e)]]
+      (bump! 0 1)
+      (if (delivery ds id)
+        (bump! 1 1)
+        (let [m     (get publishes id)
+              ctx   (context events client m before after)
+              near? (boolean (some broker-event? ctx))]
+          ;; {1 {:near-broker-chaos 12 :elsewhere 0} 2 {...}}: a loss next to
+          ;; a killed broker is a known gap (see thoughts.md); one elsewhere
+          ;; is news.
+          (vswap! lost-by update-in [required (if near? :near-broker-chaos :elsewhere)] (fnil inc 0))
+          (vswap! lost inc)
+          (add! {:kind :lost :client client :msg id :qos required
+                 :session (select-keys (get clients client) [:persistent? :mqtt5? :filter :sub-qos])
+                 :topic (:topic m) :sent (:sent m) :acked (:acked m)
+                 :pub-broker (:pub-broker m)
+                 ;; How the subscription that owed it ended: nil while it
+                 ;; lasts.
+                 :sub-ended-by ended-by
+                 :near-broker-chaos? near?
+                 :context ctx}))))
+    ;; What it was handed.
+    (doseq [id (delivered-ids ds)
+            :let [{:keys [n max-qos at brokers]} (delivery ds id)
+                  m        (get publishes id)
+                  required (:required (.get owed id))
+                  n        (long n)]]
+      (bump! 2 n)
+      (when-not required (bump! 4 1))
+      (let [possible (when m
+                       (if (and required (= (long required) (long (:qos m))))
+                         required
+                         (possible-qos match? idx m)))]
         (cond
           (nil? m)
           (add! {:kind :unexpected :client client :msg id :why "no such publish"})
@@ -232,29 +310,80 @@
               (add! {:kind :qos-upgraded :client client :msg id :allowed possible
                      :got max-qos}))
             (case (long possible)
-              1 (when (> n 1) (swap! stats update :qos1-repeats + (dec n)))
+              1 (when (> n 1) (bump! 3 (dec n)))
               (when (> n 1)
                 (add! {:kind :duplicate :client client :msg id :qos possible :times n
                        :at at :brokers brokers
                        :near-broker-chaos? (boolean (some broker-event?
                                                           (context events client m before after)))})))))))
+    {:stats      (zipmap [:required :delivered-required :deliveries :qos1-repeats :optional-delivered]
+                         (vec stats))
+     :counts     (into {} counts)
+     :violations (vec violations)
+     :lost-by    @lost-by
+     :lost       @lost}))
+
+(defn check
+  "The verdict on a run. `opts`: :subscribe-settle and :clean-grace in
+   microseconds, :context-window [before after] likewise, and
+   :max-violations, how many of each kind are kept with their detail — the
+   counts are of all of them. Clients are checked in parallel."
+  [{:keys [publishes subscriptions deliveries sessions-lost events protocol] :as run}
+   {:keys [subscribe-settle clean-grace context-window max-violations]
+    :or   {subscribe-settle 0 clean-grace 0 context-window [2000000 5000000]
+           max-violations 1000}
+    :as   opts}]
+  (let [opts     (assoc opts :subscribe-settle subscribe-settle :clean-grace clean-grace
+                        :context-window context-window :max-violations max-violations)
+        match?   (matcher)
+        by-topic (into {} (for [[topic ms] (group-by (comp :topic val) publishes)]
+                            [topic (by-time (comp :sent val) ms)]))
+        events   (by-time :at events)
+        clients  (distinct (concat (keys subscriptions) (keys deliveries)))
+        per      (pmap #(check-client run opts match? by-topic events %) clients)
+        ;; Each client kept its first max-violations of a kind; of those, the
+        ;; report keeps the first max-violations over all clients.
+        kept     (java.util.HashMap.)
+        violations (java.util.ArrayList.)
+        keep!    (fn [v]
+                   (let [n (inc (long (.getOrDefault kept (:kind v) 0)))]
+                     (.put kept (:kind v) n)
+                     (when (<= n (long max-violations))
+                       (.add violations v))))
+        merged   (reduce (fn [acc [client r]]
+                           (run! keep! (:violations r))
+                           (-> acc
+                               (update :stats #(merge-with + % (:stats r)))
+                               (update :counts #(merge-with + % (:counts r)))
+                               (update :lost-by #(merge-with (partial merge-with +) % (:lost-by r)))
+                               (cond-> (pos? (long (:lost r)))
+                                 (assoc-in [:lost-clients client] (:lost r)))))
+                         {:stats {:required 0 :delivered-required 0 :deliveries 0
+                                  :qos1-repeats 0 :optional-delivered 0}
+                          :counts {} :lost-by (sorted-map) :lost-clients {}}
+                         (map vector clients per))
+        counts   (atom (:counts merged))
+        add!     (fn [v]
+                   (swap! counts update (:kind v) (fnil inc 0))
+                   (keep! v))
+        stats    (:stats merged)]
     (doseq [{:keys [client at]} sessions-lost]
       (add! {:kind :session-lost :client client :at at}))
     (doseq [p protocol]
       (add! (assoc p :kind :protocol)))
     ;; A run in which nothing was owed proves nothing, and must not pass: the
     ;; brokers were never reached, or nobody stayed subscribed long enough.
-    (when (zero? (long (:required @stats)))
+    (when (zero? (long (:required stats)))
       (add! {:kind :nothing-checked
              :why  "no message was owed to any subscriber - were the brokers reachable?"}))
     {:ok?        (empty? @counts)
-     :stats      (assoc @stats
+     :stats      (assoc stats
                         :published (count publishes)
                         :acked (count (filter (comp :acked val) publishes))
                         :subscribers (count subscriptions))
      :counts     @counts
-     :lost-by    @lost-by
+     :lost-by    (:lost-by merged)
      ;; The ten clients that lost the most: the report keeps only the first
      ;; :max-violations of each kind, all of which may be one client's.
-     :lost-by-client (into {} (take 10 (sort-by (comp - val) @lost-clients)))
-     :violations @violations}))
+     :lost-by-client (into {} (take 10 (sort-by (comp - val) (:lost-clients merged))))
+     :violations (vec violations)}))

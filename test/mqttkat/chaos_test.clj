@@ -172,3 +172,41 @@
   (testing "the scenarios in chaos/ read"
     (doseq [f (.listFiles (java.io.File. "chaos"))]
       (is (map? (runner/config [(str f)])) (str f)))))
+
+;; The check looks each subscription's messages up by time rather than trying
+;; every message against every subscription, which a long run could not
+;; afford. Against the rules applied the slow way, on random subscriptions and
+;; messages, it must find the same.
+(deftest the-check-finds-by-time-what-the-rules-say
+  (let [rnd       (java.util.Random. 11)
+        r         #(.nextInt rnd (int %))
+        required? @#'check/required?
+        possible? @#'check/possible?
+        eff       @#'check/effective-qos
+        by-time   @#'check/by-time
+        slowly    (fn [ok? subs m]
+                    (reduce (fn [best s]
+                              (if (and (check/matches? (:filter s) (:topic m)) (ok? m s))
+                                (max (long (or best 0)) (long (eff m s)))
+                                best))
+                            nil subs))]
+    (dotimes [_ 2000]
+      (let [opts {:subscribe-settle (r 5) :clean-grace (r 20)}
+            subs (vec (for [_ (range (r 5))]
+                        (let [ss (r 100)
+                              to (when (pos? (r 3)) (+ ss (r 50)))]
+                          (cond-> {:filter (rand-nth ["a/+" "a/1" "a/2"]) :qos (r 3) :sub-sent ss}
+                            (pos? (r 5))          (assoc :from (inc ss))
+                            to                    (assoc :to to :ended-by (rand-nth [:unsubscribe :drop :session-lost]))
+                            (and to (pos? (r 2))) (assoc :unsub-sent (- to (r 3)))))))
+            pubs (into {} (for [i (range (r 40))
+                                :let [sent (r 150)]]
+                            [[1 i] {:topic (rand-nth ["a/1" "a/2"]) :qos (r 3) :sent sent
+                                    :acked (when (pos? (r 3)) (+ sent (r 30)))}]))
+            by-topic (into {} (for [[t ms] (group-by (comp :topic val) pubs)]
+                                [t (by-time (comp :sent val) ms)]))
+            owed (#'check/required-for opts check/matches? by-topic subs)
+            idx  (#'check/sub-index subs)]
+        (doseq [[id m] pubs]
+          (is (= (slowly #(required? opts %1 %2) subs m) (:required (get owed id))))
+          (is (= (slowly possible? subs m) (#'check/possible-qos check/matches? idx m))))))))
