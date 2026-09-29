@@ -243,6 +243,11 @@
     ;; be seen.
     (add-client! (assoc msg :keep-alive agreed :connect-id (connection-id)))
     (send-buffer [client-key] connack)
+    ;; Only now may anything else go to it (§3.2.0-1). add-client! put it in
+    ;; the live trie before the CONNACK, so a publish in between would have
+    ;; reached the socket first; it was held instead, and the flush after
+    ;; this handler sends it.
+    (handlers/connack-sent! client-key)
     ;; After add-client!, never before: it replaces this key's whole entry,
     ;; which would throw away the :timer and :last-active that add-timer!
     ;; writes.

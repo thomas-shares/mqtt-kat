@@ -180,14 +180,14 @@
   ;; Routed like any publish: the client whose will this is was here, so
   ;; this is never a bridged copy, and the other brokers get theirs.
   (let [msg {:qos qos :payload payload :properties (forwardable-properties properties)}
-        {:keys [plan serve-group?]} (route topic msg)]
-    (when-let [keys (coalesce-subscriptions (select-shared (matching-subscribers topic) serve-group?))]
-      (log/trace "Will keys:" keys)
-      (case (long qos)
-        0 (qos-0 keys topic msg retain)
-        1 (qos-1-send keys topic msg)
-        2 (qos-2-send keys topic msg)))
-    (forward-to-brokers! plan topic msg)))
+        {:keys [plan serve-group?]} (route topic msg)
+        live (when-let [keys (coalesce-subscriptions (select-shared (matching-subscribers topic) serve-group?))]
+               (log/trace "Will keys:" keys)
+               (case (long qos)
+                 0 (qos-0 keys topic msg retain)
+                 1 (qos-1-send keys topic msg)
+                 2 (qos-2-send keys topic msg)))]
+    (forward-to-brokers! plan topic msg (if (set? live) live #{}))))
 
 (defonce ^:private delayed-wills
   ;; client-id -> the scheduled job that will publish its will. Held so a
@@ -352,6 +352,31 @@
   [client-id]
   (get @*live-clients* client-id))
 
+(defn live-key?
+  "Whether `key` is the connection holding its client right now, and so one
+   to deliver to. A connection being torn down is not, once remove-client!
+   has parked its session and taken it out of the index: what it matched is
+   queued for the session from then on (queue-for-offline-sessions!, or the
+   cluster's plan) instead of written to a socket that is going. One being
+   set up is not either, until add-client! has its subscriptions in the live
+   trie."
+  ([key] (live-key? @*live-clients* @*clients* key))
+  ([live clients key]
+   (let [client-id (get-in clients [key :client-id])]
+     (and client-id (= key (get live client-id))))))
+
+(defn awaiting-connack?
+  "Whether this connection's CONNACK has not gone out yet. §3.2.0-1: the
+   CONNACK is the first packet the server sends, so anything for it until
+   then waits (see deliver-or-queue!)."
+  [key]
+  (boolean (get-in @*clients* [key :awaiting-connack?])))
+
+(defn connack-sent!
+  "The CONNACK is written: deliveries to `key` go straight out from here."
+  [key]
+  (swap! *clients* (fn [m] (if (contains? m key) (update m key dissoc :awaiting-connack?) m))))
+
 (defn live-sessions
   "Every client connected here now, as *clients* holds it: the terms of its
    CONNECT, its connect-id and its subscriptions."
@@ -475,21 +500,6 @@
            (contains? @*clients* client-id))
     (let [client (get @*clients* client-id)]
       (log/trace "client-id already exists:" client-id)
-      (let [subscriptions (get-in client [:subscribed-topics])]
-        (log/trace "subscriptions:" subscriptions)
-        (doseq [topic subscriptions]
-          (log/trace "Adding to sub-trie for topic:" (:topic-filter topic)  "   qos: " (:qos topic))
-          (swap! *offline-trie* trie-delete (:topic-filter topic)
-                 {:client-id client-id :qos (:qos topic) :topic-filter (:topic-filter topic)})
-          ;; The whole entry, exactly as subscribe stores one and as
-          ;; remove-client! will delete it. This used to insert only the
-          ;; filter and QoS, so a resumed session lost its version 5 options
-          ;; — and its entry, deleted by the full value on the next
-          ;; disconnect, was never found: it stayed in the live trie pointing
-          ;; at a socket that was gone, for the life of the broker.
-          (swap! *subscriber-trie* trie-insert (:topic-filter topic)
-                 (assoc topic :client-key client-key))))
-      (log/trace "client-id:" client-id)
       ;; Stamped on the resumed connection, not carried over from the one that
       ;; went away: the console shows how long this connection has been up.
       ;; The new connection's name too, not the one that parked the session:
@@ -502,9 +512,36 @@
       ;; the connection with no version — answered in 3.1.1, which a version
       ;; 5 client cannot parse — and no Session Expiry, so the session was
       ;; discarded on the next disconnect.
+      ;;
+      ;; First, before the tries: a live match on this key finds nobody to
+      ;; deliver to until the record is here.
       (swap! *clients* assoc client-key (merge client
                                                (dissoc msg :packet-type :client-key)
-                                               {:connected-at (System/currentTimeMillis)}))
+                                               {:connected-at      (System/currentTimeMillis)
+                                                :awaiting-connack? true}))
+      ;; Then the session moves from the offline trie to the live one, live
+      ;; first. The other way round there was a moment it was in neither, and
+      ;; a publish then matched nobody and was lost. In the overlap it is in
+      ;; both, and a publish that reaches it live leaves it out of the offline
+      ;; queue (queue-for-offline-sessions!), so it gets the message once.
+      (let [subscriptions (get-in client [:subscribed-topics])]
+        (log/trace "subscriptions:" subscriptions)
+        (doseq [topic subscriptions]
+          (log/trace "Adding to sub-trie for topic:" (:topic-filter topic)  "   qos: " (:qos topic))
+          ;; The whole entry, exactly as subscribe stores one and as
+          ;; remove-client! will delete it. This used to insert only the
+          ;; filter and QoS, so a resumed session lost its version 5 options
+          ;; — and its entry, deleted by the full value on the next
+          ;; disconnect, was never found: it stayed in the live trie pointing
+          ;; at a socket that was gone, for the life of the broker.
+          (swap! *subscriber-trie* trie-insert (:topic-filter topic)
+                 (assoc topic :client-key client-key)))
+        ;; Live from here: deliveries on this key go ahead (see live-key?).
+        (register-live! client-id client-key)
+        (doseq [topic subscriptions]
+          (swap! *offline-trie* trie-delete (:topic-filter topic)
+                 {:client-id client-id :qos (:qos topic) :topic-filter (:topic-filter topic)})))
+      (log/trace "client-id:" client-id)
       (swap! *clients* dissoc client-id))
     (let [client (-> (dissoc msg :packet-type :client-key)
                      ;; When this connection was accepted. The console has no
@@ -512,7 +549,9 @@
                      ;; :last-active exists only for clients that asked for a
                      ;; keep alive, so it is nil for most of them.
                      (assoc :connected-at (System/currentTimeMillis)))
-          client-added (update-in client [:subscribed-topics] (fnil conj #{}))]
+          client-added (-> client
+                           (update-in [:subscribed-topics] (fnil conj #{}))
+                           (assoc :awaiting-connack? true))]
       ;; §3.1.2.4: connecting with CleanSession 1 discards any session stored
       ;; under this client-id. Without this the parked entry, its offline
       ;; subscriptions and its queued messages stayed for the life of the
@@ -641,7 +680,23 @@
   (remove-timer! key)
   ;; Both alias tables go with the connection, not with the session (§3.3.2.3.4).
   (forget-topic-aliases! key)
-  (forget-live! (get-in @*clients* [key :client-id]) key)
+  ;; A session that is kept goes into the offline trie while it is still
+  ;; live, and only then stops being live. A publish either finds it live
+  ;; and delivers to it, or finds it not and queues for it from the offline
+  ;; trie — never neither, which lost the message, and never both, since
+  ;; the offline queue leaves out whoever the publish reached live
+  ;; (queue-for-offline-sessions!, and the cluster's plan). Decided exactly
+  ;; as the cond below decides to park: not for a connection that has been
+  ;; displaced, whose session is someone else's.
+  (let [client    (get @*clients* key)
+        client-id (:client-id client)]
+    (when (and client-id
+               (contains? #{nil key} (live-connection client-id))
+               (keep-session? client))
+      (doseq [topic (:subscribed-topics client)]
+        (swap! *offline-trie* trie-insert (:topic-filter topic)
+               {:client-id client-id :qos (:qos topic) :topic-filter (:topic-filter topic)})))
+    (forget-live! client-id key))
   ;; Only for a client that was actually there: remove-client! can be reached
   ;; twice for one connection, and a count that drifts is worse than no count.
   (when (contains? @*clients* key)
@@ -688,7 +743,14 @@
       ;; session out from under it. forget-live! above has taken this key out
       ;; of the index, so whatever is still there is someone else.
       (and client-id (some? (live-connection client-id)))
-      (swap! *clients* dissoc key)
+      (do
+        ;; Unless the replacement took over between the parking at the top and
+        ;; the forget-live! after it: then this one parked a session that is
+        ;; live again, and its entries come out of the offline trie.
+        (doseq [topic subscribed-topics]
+          (swap! *offline-trie* trie-delete (:topic-filter topic)
+                 {:client-id client-id :qos (:qos topic) :topic-filter (:topic-filter topic)}))
+        (swap! *clients* dissoc key))
 
       (not (keep-session? client))
       (do
@@ -706,11 +768,8 @@
         ;; While attached, what it leaves unacknowledged goes to the cluster,
         ;; so it can come back anywhere; a broker on its own keeps it here.
         (hand-over-unacknowledged! client-id)
-        ;; Parked rather than forgotten: a publish arriving while this session
-        ;; is away still has to match it, or there is nothing to queue.
-        (doseq [topic subscribed-topics]
-          (swap! *offline-trie* trie-insert (:topic-filter topic)
-                 {:client-id client-id :qos (:qos topic) :topic-filter (:topic-filter topic)}))
+        ;; Parked rather than forgotten: its subscriptions went into the
+        ;; offline trie at the top, before they left the live one.
         ;; Parking the session under its client-id happens once, not once per
         ;; subscribed topic: these two were inside the doseq above, so a
         ;; persistent session with no subscriptions was dropped instead of
@@ -919,10 +978,39 @@
     (when-let [a (existing-outbound client-id)]
       (let [[{:keys [pending inflight]} _]
             (swap-vals! a assoc :pending clojure.lang.PersistentQueue/EMPTY :inflight {})]
-        (doseq [msg (concat (vals inflight) pending)
-                :when (not (::cluster-key msg))]
+        (doseq [[identifier msg] (concat (sort-by first inflight) (map vector (repeat nil) pending))
+                ;; Nor what the client has answered with a PUBREC: it has the
+                ;; message (§4.3.3), and sending it again would be a second
+                ;; delivery. What is left of that exchange is a PUBREL the
+                ;; client can do without.
+                :when (not (or (::cluster-key msg) (::released? msg)))]
+          ;; In flight with its identifier, so a resume sends it again under
+          ;; the same one (§4.4) and the client can tell it is the one it may
+          ;; already have. It went out under a new one, and a QoS 2 message
+          ;; the client had taken, but not yet acknowledged when it dropped,
+          ;; was delivered twice.
           (enqueue! client-id (cond-> (select-keys msg [:topic :payload :qos :properties])
-                                (::queued-at msg) (assoc :queued-at (::queued-at msg)))))))))
+                                (::queued-at msg) (assoc :queued-at (::queued-at msg))
+                                identifier        (assoc :packet-identifier identifier))))))))
+
+(defn- restore-queued!
+  "Put a message from the cluster's queue on `client-id`'s outbound state: in
+   flight under the identifier it was sent with, when hand-over-unacknowledged!
+   recorded one and it is free here, so the resume's redelivery sends it again
+   as the same message (§4.4); otherwise on the queue, for a new identifier."
+  [client-id msg]
+  (let [identifier (:packet-identifier msg)
+        msg        (dissoc msg :packet-identifier)
+        placed?    (when identifier
+                     (let [[before after]
+                           (swap-vals! (outbound-atom client-id)
+                                       (fn [state]
+                                         (if (contains? (:inflight state) identifier)
+                                           state
+                                           (assoc-in state [:inflight identifier] msg))))]
+                       (not (identical? before after))))]
+    (when-not placed?
+      (queue-pending! client-id msg))))
 
 (defn adopt-session!
   "Take over `client-id`'s session from the cluster, on its CONNECT.
@@ -968,9 +1056,9 @@
           (log/info "session" client-id "taken over from the cluster:"
                     (count entries) "subscriptions," (count queued) "queued"))
         (doseq [[k msg] queued]
-          (queue-pending! client-id (assoc msg
-                                           ::queued-at (:queued-at msg)
-                                           ::cluster-key k))))
+          (restore-queued! client-id (assoc msg
+                                            ::queued-at (:queued-at msg)
+                                            ::cluster-key k))))
       true)))
 
 (defn deliver-queued!
@@ -1539,6 +1627,8 @@
       (when (<= (pending-count client-id) resume-threshold)
         (.ackDrained subscriber)))))
 
+(declare deliver-now-or-queue!)
+
 (defn- deliver-or-queue!
   "Send `msg` to a subscriber if its window has room; hold it if not.
 
@@ -1548,6 +1638,20 @@
    QoS 1 is at-least-once, so the pressure has to go back to the source rather
    than be paid for in dropped messages. The refusal below it is a backstop for
    memory, and under back-pressure it should never fire."
+  [key client-id msg publisher-key]
+  (cond
+    ;; Before its CONNACK: held, and sent by the flush that follows the
+    ;; CONNACK. Unless that flush has been and gone while this was queued,
+    ;; which the second look catches.
+    (awaiting-connack? key)
+    (do (queue-pending! client-id msg)
+        (when-not (awaiting-connack? key)
+          (flush-pending! key client-id)))
+
+    :else
+    (deliver-now-or-queue! key client-id msg publisher-key)))
+
+(defn- deliver-now-or-queue!
   [key client-id msg publisher-key]
   (if-let [packet-identifier (acquire-packet-identifier! client-id msg
                                                          (receive-maximum-of key))]
@@ -1574,29 +1678,35 @@
    subscription keeps nothing either, whatever the publish's QoS. It used to
    keep it at QoS 0, which nothing ever acknowledges: the message stayed in
    the session's window and went out again on every reconnect."
-  [topic {:keys [qos payload properties]}]
-  ;; Not when attached to a cluster: sessions that are away are queued for
-  ;; there, by whichever broker saw the publish, from the cluster's own copy
-  ;; of the subscriptions — see mqttkat.rama.cluster/plan. Queuing here as
-  ;; well would deliver twice on resume.
-  (when (and (pos? (long qos)) (nil? @session-source))
-    (doseq [{:keys [client-id] sub-qos :qos} (matching-offline-sessions topic)
-            :when (pos? (long (or sub-qos 0)))]
-      (when client-id
-        ;; With its properties. They used to be dropped here, so a message that
-        ;; waited for its session arrived stripped of the content type, response
-        ;; topic and user properties that an identical message delivered live
-        ;; kept — and with no Message Expiry Interval, there was nothing to
-        ;; expire it by either.
-        (when (queue-pending! client-id {:topic      topic
-                                         :payload    payload
-                                         :properties (forwardable-properties properties)
-                                         :qos        (min (long qos) (long sub-qos))})
-          ;; Back already: it resumed between the match above and the queue,
-          ;; and its connect flushed a queue this was not in yet. Nothing
-          ;; else would send it until the client acknowledged something.
-          (when-let [key (live-connection client-id)]
-            (flush-pending! key client-id)))))))
+  ([topic msg] (queue-for-offline-sessions! topic msg #{}))
+  ;; `live-ids`: the clients this publish was delivered to live, left out.
+  ;; A session moving between the live trie and the offline one is in both
+  ;; for a moment (see add-client! and remove-client!), and would otherwise
+  ;; be sent it twice.
+  ([topic {:keys [qos payload properties]} live-ids]
+   ;; Not when attached to a cluster: sessions that are away are queued for
+   ;; there, by whichever broker saw the publish, from the cluster's own copy
+   ;; of the subscriptions — see mqttkat.rama.cluster/plan. Queuing here as
+   ;; well would deliver twice on resume.
+   (when (and (pos? (long qos)) (nil? @session-source))
+     (doseq [{:keys [client-id] sub-qos :qos} (matching-offline-sessions topic)
+             :when (and (pos? (long (or sub-qos 0)))
+                        (not (contains? live-ids client-id)))]
+       (when client-id
+         ;; With its properties. They used to be dropped here, so a message that
+         ;; waited for its session arrived stripped of the content type, response
+         ;; topic and user properties that an identical message delivered live
+         ;; kept — and with no Message Expiry Interval, there was nothing to
+         ;; expire it by either.
+         (when (queue-pending! client-id {:topic      topic
+                                          :payload    payload
+                                          :properties (forwardable-properties properties)
+                                          :qos        (min (long qos) (long sub-qos))})
+           ;; Back already: it resumed between the match above and the queue,
+           ;; and its connect flushed a queue this was not in yet. Nothing
+           ;; else would send it until the client acknowledged something.
+           (when-let [key (live-connection client-id)]
+             (flush-pending! key client-id))))))))
 
 (defn flush-pending!
   "Send what was queued for `client-id` while it was away.
@@ -1605,19 +1715,21 @@
    returns nil once the window is full, and the rest drains on acknowledgements
    the ordinary way."
   [key client-id]
-  (loop [sent 0]
-    (when (< sent pending-limit)
-      (when-let [[packet-identifier msg] (take-pending! client-id
-                                                        (receive-maximum-of key))]
-        ;; A message that expired while it waited is exactly what this loop
-        ;; finds, so the identifier has to come back here as well — otherwise a
-        ;; session that was away long enough returns to a window full of
-        ;; messages it will never be sent.
-        (when-not (send-publish! key msg packet-identifier)
-          (release-packet-identifier! client-id packet-identifier)
-          ;; Expired here is expired there: nobody will be sent it.
-          (settled! client-id msg))
-        (recur (inc sent))))))
+  ;; Not before the CONNACK (§3.2.0-1): the flush that follows it sends this.
+  (when-not (awaiting-connack? key)
+    (loop [sent 0]
+      (when (< sent pending-limit)
+        (when-let [[packet-identifier msg] (take-pending! client-id
+                                                          (receive-maximum-of key))]
+          ;; A message that expired while it waited is exactly what this loop
+          ;; finds, so the identifier has to come back here as well — otherwise a
+          ;; session that was away long enough returns to a window full of
+          ;; messages it will never be sent.
+          (when-not (send-publish! key msg packet-identifier)
+            (release-packet-identifier! client-id packet-identifier)
+            ;; Expired here is expired there: nobody will be sent it.
+            (settled! client-id msg))
+          (recur (inc sent)))))))
 
 (defn redeliver-inflight!
   "Resend whatever this session left unacknowledged (§4.4).
@@ -1635,10 +1747,17 @@
    a first delivery — right dialect, properties, subscription identifiers,
    topic alias and maximum packet size — differing only in DUP."
   [key client-id]
-  (doseq [[identifier msg] (:inflight (some-> (existing-outbound client-id) deref))]
+  (doseq [[identifier msg] (sort-by first (:inflight (some-> (existing-outbound client-id) deref)))]
     (log/trace "redelivering to" client-id "identifier:" identifier)
-    (when-not (send-publish! key (assoc msg :duplicate? true) identifier)
-      (release-packet-identifier! client-id identifier))))
+    (if (::released? msg)
+      ;; The client answered it with a PUBREC: what is owed now is the
+      ;; PUBREL, not the message again (§4.4). A client that had the PUBREL
+      ;; already, and had forgotten the identifier, would otherwise take a
+      ;; resent PUBLISH as a new message and deliver it twice.
+      (send-buffer [key] (MqttPubRel/encode {:packet-type       :PUBREL
+                                             :packet-identifier identifier}))
+      (when-not (send-publish! key (assoc msg :duplicate? true) identifier)
+        (release-packet-identifier! client-id identifier)))))
 
 (defn- drain-pending!
   "Send the next message waiting on this client's window, if any, and let any
@@ -1740,6 +1859,14 @@
     ;; publish measured as a 10% throughput regression against the version
     ;; before any of it existed.
     (let [clients   @*clients*
+          live      @*live-clients*
+          ;; Only connections that are live and past their CONNACK: one
+          ;; being torn down is going, and one being set up may not be sent
+          ;; anything yet (§3.2.0-1). At most once allows either to miss it.
+          keys      (filter #(let [k (:client-key %)]
+                               (and (live-key? live clients k)
+                                    (not (get-in clients [k :awaiting-connack?]))))
+                            keys)
           published (:retain? msg)
           ;; One object shared by every subscriber that agreed to no aliases,
           ;; rather than an identical map built per subscriber purely to be a
@@ -1788,17 +1915,26 @@
   ([keys topic msg] (qos-1-send keys topic msg false))
   ([keys topic {:keys [payload properties retain?] publisher-key :client-key :as msg} retain]
    #_(log/trace "respond qos 1:" (count keys))
-   (doseq [subscription keys]
-     (let [key (:client-key subscription)]
-       ;; No client-id means the subscriber went away between the trie lookup
-       ;; and here, which is ordinary — there is nobody left to deliver to.
-       (when-let [client-id (:client-id (get @*clients* key))]
-         (deliver-or-queue! key client-id
-                            {:topic topic :payload payload :qos 1
-                             :properties properties
-                             :retain? (delivery-retain? subscription retain retain?)
-                             :subscription-identifiers (identifiers-of subscription)}
-                            publisher-key))))))
+   ;; Returns the client-ids it delivered to, which queue-for-offline-sessions!
+   ;; and the cluster's plan leave out.
+   (reduce
+    (fn [live subscription]
+      (let [key (:client-key subscription)]
+        ;; No client-id means the subscriber went away between the trie lookup
+        ;; and here, which is ordinary: there is nobody left to deliver to
+        ;; here, and the session, if it is kept, is in the offline trie by
+        ;; now (remove-client! puts it there before it stops being live).
+        (if-let [client-id (and (live-key? key) (:client-id (get @*clients* key)))]
+          (do (deliver-or-queue! key client-id
+                                 {:topic topic :payload payload :qos 1
+                                  :properties properties
+                                  :retain? (delivery-retain? subscription retain retain?)
+                                  :subscription-identifiers (identifiers-of subscription)}
+                                 publisher-key)
+              (conj live client-id))
+          live)))
+    #{}
+    keys)))
 
 (defn qos-n? [num {:keys [qos] :as m}]
   (when (= num qos) m))
@@ -1842,9 +1978,10 @@
   (some-> (filter qos-0? keys)
           (seq)
           (qos-0 topic msg false))
-  (some-> (filter qos-1-or-2? keys)
-          (seq)
-          (qos-1-send topic msg)))
+  (or (some-> (filter qos-1-or-2? keys)
+              (seq)
+              (qos-1-send topic msg))
+      #{}))
 
 ;  (doseq [k qos-1-keys]
 ;    (log/trace "K" k)
@@ -1989,13 +2126,17 @@
    With the connection it came in on, which the bridge stops reading if a
    link to another broker falls behind — none for a will, whose publisher
    is gone."
-  [plan topic {:keys [qos payload properties client-key]}]
-  (when plan
-    (bridge/forward! plan topic {:qos        qos
-                                 :payload    payload
-                                 :properties (forwardable-properties properties)
-                                 :publisher  (when (instance? SelectionKey client-key)
-                                               (connection-of client-key))})))
+  ([plan topic msg] (forward-to-brokers! plan topic msg #{}))
+  ;; `live-ids`, the clients this broker delivered it to live: the plan's
+  ;; :leaving are the ones it did not, see mqttkat.rama.cluster/plan.
+  ([plan topic {:keys [qos payload properties client-key]} live-ids]
+   (when plan
+     (bridge/forward! (assoc plan :delivered live-ids) topic
+                      {:qos        qos
+                       :payload    payload
+                       :properties (forwardable-properties properties)
+                       :publisher  (when (instance? SelectionKey client-key)
+                                     (connection-of client-key))}))))
 
 (defn- publish-resolved [{:keys [topic qos retain? payload properties] :as msg}]
   (log/debug "PUBLISH:" (dissoc msg :client-key))
@@ -2036,13 +2177,14 @@
     (case (long qos)
       0 (do (qos-0 keys topic msg false)
             (forward-to-brokers! plan topic msg))
-      ;; Queued for the sessions that are away before the PUBACK, which
-      ;; qos-1 sends: the acknowledgement says the broker has the message
-      ;; (§4.3.2), and a subscriber reconnecting the moment it arrives found
-      ;; its queue flushed with this message not yet in it.
-      1 (do (queue-for-offline-sessions! topic msg)
-            (qos-1 keys topic msg)
-            (forward-to-brokers! plan topic msg))
+      ;; Queued for the sessions that are away after the live deliveries,
+      ;; and without the ones those reached: a session on its way in or out
+      ;; is in both tries for a moment, and whether it is live is decided
+      ;; once, by the delivery. A subscriber back since, whose queue was
+      ;; flushed without this, is flushed again by queue-for-offline-sessions!.
+      1 (let [live (qos-1 keys topic msg)]
+          (queue-for-offline-sessions! topic msg live)
+          (forward-to-brokers! plan topic msg live))
       ;; Not for QoS 2: that message is not published until its PUBREL
       ;; arrives (§4.3.3), so it is kept for offline sessions there — and
       ;; routed there, for the same reason: the subscribers are whoever
@@ -2234,9 +2376,17 @@
   ;; §4.3.3: on PUBREC the receiver has the message, and the sender keeps
   ;; only the identifier until PUBCOMP. That is the moment a message from
   ;; the cluster's queue is done there.
+  ;; Marked, too, so that a resume sends the PUBREL again rather than the
+  ;; message, and a hand-over does not queue it (§4.4).
   (let [client-id (:client-id (get @*clients* client-key))]
-    (when-let [msg (get-in @(or (existing-outbound client-id) (atom {})) [:inflight packet-identifier])]
-      (settled! client-id msg)))
+    (when-let [a (existing-outbound client-id)]
+      (let [[before _] (swap-vals! a (fn [state]
+                                       (if (get-in state [:inflight packet-identifier])
+                                         (update-in state [:inflight packet-identifier]
+                                                    assoc ::released? true)
+                                         state)))]
+        (when-let [msg (get-in before [:inflight packet-identifier])]
+          (settled! client-id msg)))))
   (send-buffer [client-key]
                (MqttPubRel/encode
                 {:packet-type :PUBREL :packet-identifier packet-identifier})))
@@ -2247,9 +2397,11 @@
    (some-> (filter qos-0? keys)
            (seq)
            (qos-0 topic msg retain))
-   (some-> (filter qos-1? keys)
-           (seq)
-           (qos-1-send topic msg retain))
+   (into
+    (or (some-> (filter qos-1? keys)
+                (seq)
+                (qos-1-send topic msg retain))
+        #{})
    ;; Over the subscriptions rather than over their keys, and passing the
    ;; publisher's properties on: this delivery map was written out by hand as
    ;; topic, payload and QoS, so a QoS 2 message arrived stripped of its content
@@ -2257,15 +2409,18 @@
    ;; subscription identifier the server owes it (§3.3.4). QoS 0 and 1 were
    ;; right, which is what made it hard to see — the same publish delivered
    ;; correctly at two QoS levels out of three.
-   (doseq [subscription (some->> (filter qos-2? keys) (seq))]
-     (let [key (:client-key subscription)]
-       (when-let [client-id (:client-id (get @*clients* key))]
-         (deliver-or-queue! key client-id
-                            {:topic topic :payload payload :qos 2
-                             :properties properties
-                             :retain? (delivery-retain? subscription retain retain?)
-                             :subscription-identifiers (identifiers-of subscription)}
-                            publisher-key))))))
+   ;; The client-ids delivered to at QoS 1 and 2, as qos-1-send returns them.
+    (keep (fn [subscription]
+            (let [key (:client-key subscription)]
+              (when-let [client-id (and (live-key? key) (:client-id (get @*clients* key)))]
+                (deliver-or-queue! key client-id
+                                   {:topic topic :payload payload :qos 2
+                                    :properties properties
+                                    :retain? (delivery-retain? subscription retain retain?)
+                                    :subscription-identifiers (identifiers-of subscription)}
+                                   publisher-key)
+                client-id))))
+    (filter qos-2? keys))))
 
 (defn serve-groups!
   "Deliver a publish of `msg` on `topic` to one member here of each shared
@@ -2300,9 +2455,10 @@
       ;; §4.3.3 publishes on the PUBREL, so the subscribers are whoever matches
       ;; now — but they are chosen the same way as on any other publish.
       (let [{:keys [plan serve-group? groups-only?]} (route topic msg)]
-        (qos-2-send (subscribers-for topic (:client-key msg) serve-group? groups-only?) topic msg)
-        (queue-for-offline-sessions! topic msg)
-        (forward-to-brokers! plan topic msg)))
+        (let [live (qos-2-send (subscribers-for topic (:client-key msg) serve-group? groups-only?)
+                               topic msg)]
+          (queue-for-offline-sessions! topic msg live)
+          (forward-to-brokers! plan topic msg live))))
     (when (contains? @*inflight* [client-id packet-identifier])
       ;; The slot is given back on PUBREL, which is what makes the quota a
       ;; limit on messages in flight rather than on messages ever sent.
