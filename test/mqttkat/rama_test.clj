@@ -1605,3 +1605,17 @@
                                   {1 {"event/connect" 2.0}}))))
   (testing "and a task seen for the first time has none yet"
     (is (= {0 {}} (state/rama-task-rates nil {0 {"at" 1000 "event/connect" 10}} {})))))
+
+(deftest unwatch-waits-for-the-proxies-to-close
+  ;; close! shuts the cluster manager's executor down straight after
+  ;; unwatch!, so a proxy still closing on it would fail, loudly.
+  (let [conn    (cluster/watch! (cluster/connect :in-process))
+        proxies @(:proxies conn)]
+    (try
+      (is (seq proxies))
+      (cluster/unwatch! conn)
+      (is (every? #(not= com.rpl.rama.ProxyState$Status/ACTIVE (.status ^com.rpl.rama.ProxyState %)) proxies)
+          "every proxy has finished closing by the time unwatch! returns")
+      (is (empty? @(:proxies conn)))
+      (finally
+        (cluster/close! conn)))))

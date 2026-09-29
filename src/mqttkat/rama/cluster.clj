@@ -47,7 +47,8 @@
             [mqttkat.rama.module :as module]
             [mqttkat.retained :as retained]
             [mqttkat.trie :as trie])
-  (:import [java.net InetAddress]
+  (:import [com.rpl.rama ProxyState ProxyState$Status]
+           [java.net InetAddress]
            [java.util.function BiConsumer]))
 
 (def broker-id
@@ -166,11 +167,34 @@
      :stats         (atom {})
      :proxies       (atom [])}))
 
+(def proxy-close-wait-millis
+  "How long unwatch! waits for its proxies to finish closing."
+  5000)
+
+(defn- closed? [^ProxyState p]
+  (not= ProxyState$Status/ACTIVE (.status p)))
+
 (defn unwatch!
-  "Close the shard proxies, if open. The trie keeps what it had."
+  "Close the shard proxies, if open, and wait until they have. The trie
+   keeps what it had.
+
+   Waited for because a proxy's close is not done when it returns: Rama
+   hands the teardown, a round trip to the cluster, to the cluster
+   manager's executor, and marks the proxy closed when it is done. close!
+   shuts that executor down next, and a teardown still queued behind it
+   then fails, each one logging \"Executor pool is shut down\" with a stack
+   trace: a screenful on every Ctrl-C against a real cluster."
   [{:keys [proxies]}]
-  (doseq [p @proxies]
-    (try (r/close! p) (catch Exception e (log/debug e "closing a proxy"))))
+  (let [ps       @proxies
+        deadline (+ (System/currentTimeMillis) proxy-close-wait-millis)]
+    (doseq [p ps]
+      (try (r/close! p) (catch Exception e (log/debug e "closing a proxy"))))
+    (loop []
+      (when-not (every? closed? ps)
+        (if (< (System/currentTimeMillis) deadline)
+          (do (Thread/sleep 10) (recur))
+          (log/warn (count (remove closed? ps)) "Rama proxies still closing after"
+                    proxy-close-wait-millis "ms")))))
   (reset! proxies []))
 
 (defn close!
