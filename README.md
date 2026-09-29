@@ -286,7 +286,13 @@ bb scripts/chaos.bb chaos/three-brokers.edn                          # everythin
 bb scripts/chaos.bb chaos/three-brokers.edn chaos/three-brokers-calm.edn  # brokers left alone
 bb scripts/chaos.bb chaos/single-broker.edn                          # no cluster needed; what CI runs
 bb scripts/chaos.bb --keep chaos/single-broker.edn                   # leave the brokers up afterwards
+bb scripts/chaos.bb chaos/single-broker.edn chaos/long.edn           # ten minutes, heavier
 ```
+
+`chaos/long.edn` is an overlay: it sets no `:setup`, so put it after a
+scenario. For brokers on an external cluster, `chaos.bb` starts Rama if its
+Conductor is not up, then waits with `bb scripts/rama.bb wait` until the
+Conductor listens and the module is RUNNING before it starts any broker.
 
 The EDN files merge left to right over `mqttkat.chaos.runner/defaults`, which
 documents every key: `:setup` (brokers, Rama), `:load` (clients, rate, QoS

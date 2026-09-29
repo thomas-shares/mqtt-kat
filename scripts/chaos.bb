@@ -13,7 +13,9 @@
 ;;   build    `lein uberjar` if target/mqtt-kat-0.0.1-standalone.jar is missing
 ;;            (or always, with :setup {:build :always})
 ;;   rama     `bb scripts/rama.bb start`, when :setup :rama :start? and the
-;;            Conductor is not already up
+;;            Conductor is not already up; then, for brokers on an external
+;;            cluster, `bb scripts/rama.bb wait` until the Conductor listens
+;;            and the module is RUNNING, however the cluster was started
 ;;   brokers  `bb scripts/brokers.bb start N` with :setup :brokers
 ;;   run      mqttkat.chaos.runner, which kills and restarts brokers through
 ;;            brokers.bb as the :chaos section says
@@ -38,7 +40,11 @@
   {:setup {:build   :if-missing
            :brokers {:count 1 :host "127.0.0.1" :port 1885 :http 8085
                      :heap "1g" :rama "external"}
-           :rama    {:start? false :stop? false}}})
+           ;; Started when not up: the brokers default to an external
+           ;; cluster, and a scenario that does not say otherwise (an
+           ;; overlay like chaos/long.edn, run on its own) had brokers
+           ;; dying on a Conductor that was never there.
+           :rama    {:start? true :stop? false}}})
 
 (defn listening? [port]
   (try (with-open [_ (java.net.Socket. "localhost" (int port))] true)
@@ -54,6 +60,9 @@
 (defn fail! [& msg]
   (apply println "chaos:" msg)
   (System/exit 2))
+
+(defn rama-flags [rama]
+  (when (:dir rama) ["--rama-dir" (:dir rama)]))
 
 (defn broker-flags [{:keys [port http heap rama conductor advertise]}]
   (cond-> ["--port" (str port) "--http" (str http) "--heap" (str heap) "--rama" (name rama)]
@@ -77,10 +86,17 @@
     (when (:start? rama)
       (if (listening? 1973)
         (println "Rama's Conductor is already up on :1973, using it")
-        (do (when-not (zero? (apply sh! "bb" "scripts/rama.bb" "start"
-                                    (when (:dir rama) ["--rama-dir" (:dir rama)])))
+        (do (when-not (zero? (apply sh! "bb" "scripts/rama.bb" "start" (rama-flags rama)))
               (fail! "Rama did not start"))
             (reset! started-rama? true))))
+    ;; Brokers on a cluster of their own need it up before they start, not
+    ;; merely started: a broker that finds no Conductor exits. Not for one
+    ;; named elsewhere with :conductor, which this machine cannot look at.
+    (when (and (= "external" (name (:rama brokers))) (not (:conductor brokers)))
+      (when-not (zero? (apply sh! "bb" "scripts/rama.bb" "wait" (rama-flags rama)))
+        (fail! "the Rama cluster is not ready for the brokers; start it with"
+               "`bb scripts/rama.bb start` (RAMA_HOME, or :setup :rama :dir), or"
+               "run a scenario that does not need it: chaos/single-broker.edn")))
     ;; System/exit skips finally blocks, so the status is carried out of the
     ;; try and the process exits after the teardown.
     (let [status
