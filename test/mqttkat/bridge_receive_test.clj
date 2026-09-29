@@ -54,3 +54,14 @@
         (tu/expect-eventually! (:ch member) :PUBLISH 2000)
         (tu/expect-eventually! (:ch plain) :PUBLISH 2000)
         (finally (tu/close! member plain peer))))))
+
+(deftest the-message-key-is-for-the-broker-not-its-subscribers
+  (let [props {:content-type    "text/plain"
+               :user-properties [["app" "x"]
+                                 [bridge/msg-key-property "0001234567890-abcdef12"]
+                                 [bridge/share-property "g/t/#"]]}]
+    (is (= "0001234567890-abcdef12" (bridge/msg-key props)))
+    (is (nil? (bridge/msg-key {:user-properties [["app" "x"]]})))
+    (is (= [#{["g" "t/#"]} {:content-type "text/plain" :user-properties [["app" "x"]]}]
+           (bridge/take-shares props))
+        "taken off with the share instructions, before any subscriber sees it")))

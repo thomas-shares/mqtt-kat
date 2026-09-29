@@ -562,6 +562,16 @@
                 (record! conn (cluster/->dequeue "away-1" (map first q)))
                 (is (empty? (cluster/queued conn "away-1")))
                 (is (= [] (:queued (cluster/resume conn "away-1"))))))
+            (testing "a message queued by two brokers under its message key is queued once"
+              (let [k (h/new-message-key)]
+                (record! conn (cluster/->enqueue "away-1" {:topic "away/t" :payload (.getBytes "once") :qos 1} k))
+                (record! conn (cluster/->enqueue "away-1" {:topic "away/t" :payload (.getBytes "once") :qos 1} k))
+                (is (= [k] (map first (cluster/queued conn "away-1"))))
+                (record! conn (cluster/->dequeue "away-1" [k]))
+                (is (empty? (cluster/queued conn "away-1")))))
+            (is (= {:queue [{:client-id "away-1" :qos 1}] :leaving []}
+                   (cluster/plan conn "away/t" {:away-only? true}))
+                "a copy from another broker: queued for a client last here, and nothing else planned")
             (is (nil? (cluster/resume conn "never-seen")))
             (record! conn (cluster/->connect (connect-map "clean-1" :clean? true)))
             (let [r (cluster/resume conn "clean-1")]

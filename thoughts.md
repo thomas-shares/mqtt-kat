@@ -4,6 +4,45 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20260929
 
+### Queued by message, not by moment
+
+The three-broker chaos run still lost QoS 1 and 2 messages and delivered QoS
+2 twice, all around clients that had just moved. Both came from the same
+place. The publisher's broker decides from its own copy of the cluster,
+which lags; the broker the client is on delivers to whoever is live there.
+Nothing reconciled the two.
+
+- Lost: the publisher's broker still had the client on broker X and
+  forwarded it there. The client had just left X, and X, attached to Rama,
+  queued nothing.
+- Twice: the publisher's broker had the client away and queued it, while X,
+  which had it live again, delivered it too. The copy on the queue went out
+  again, under a new packet identifier, on the next resume.
+
+Queuing on X as well fixed the first and made the second worse, because the
+two queue entries had different keys. Now a QoS 1 or 2 publish gets a name
+where it enters the cluster, the time then eight random hex digits, and it
+travels with every forwarded copy as the user property `mqttkat-msg`. Every
+queue entry for it uses that name, and `$$queued` already overwrote by key,
+so however many brokers decide a client is away, it is queued once.
+The hand-over uses the same name, so an in-flight message handed over
+merges with a copy another broker queued.
+
+With that, X queues a bridged copy for the clients its own copy of the
+cluster has here, or last had here, and that it did not deliver to. For the
+other half, a live delivery to a persistent client that connected in the
+last ten seconds is marked, and when the client acknowledges it, it comes
+off the cluster's queue under its name, then again five seconds later for a
+copy queued by a broker whose word arrived late. Those take-offs are
+batched every 250 ms. Unbatched, one Rama append per message filled the
+depot buffer at once, and the run lost 180,000 messages.
+
+On the client-kill run (three brokers, one minute, every session
+persistent), lost went from 227 to 1,079 per run to 0 and 3, and duplicates
+from 64 to 442 to 0 and 1. chaos/three-brokers.edn went from 915 lost and
+650 duplicate to none of either. Its 11 `:unexpected` deliveries are still
+unexplained.
+
 ### Ctrl-C against a cluster printed a screenful
 
 Stopping a broker attached to a real cluster logged "Executor pool is shut
@@ -56,21 +95,7 @@ only `:stop-broker` for chaos, a minute on three brokers went from 809 lost
 to none.
 
 Two more gaps turned up in the same run, both when a session moves between
-brokers, and neither is fixed yet:
-
-- **A copy forwarded to the broker a client just left is lost.** The
-  publisher's broker forwards it because its view of the cluster still has
-  the client there, so it queues nothing; the receiving broker acknowledges
-  it and, attached to Rama, queues nothing either. Queuing on the receiving
-  broker for its clients the cluster still has connected there cut the loss
-  but added QoS 2 duplicates, since the two brokers' views change at
-  slightly different moments. The brokers have to agree on who queues.
-- **QoS 2 is delivered twice after a quick reconnect elsewhere.** The old
-  broker hands the session's in-flight messages to the cluster's queue as the
-  connection goes, and the new broker reads that queue on the resume. When
-  the client is back fast, the read can come first. What was handed over then
-  sits on the queue and is delivered again, under a new packet identifier, at
-  the next resume.
+brokers. See "Queued by message, not by moment" above for both.
 
 ### The chaos check took longer than the run
 
