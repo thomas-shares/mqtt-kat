@@ -2,6 +2,41 @@
 
 In this file will go my thoughts and ramblings about this project and what I have done and what I might do next.
 
+## 20260929
+
+### The chaos run's two open items, closed
+
+Thomas ran `chaos/single-broker.edn` on master and it failed with lost QoS 1
+and 2 messages: the two gaps written down yesterday, not something new. Both
+are fixed, and the scenario now passes, with in-process Rama and without.
+
+- **A publish as a persistent session drops.** `remove-client!` now parks the
+  session in the offline trie while it is still live, and only then takes it
+  out of the index and the live trie. Whether a subscriber is live is decided
+  once per publish, at delivery (`live-key?`: its key is the one the index
+  holds), and the deliveries return the client-ids they reached.
+  `queue-for-offline-sessions!` leaves those out, so the overlap in the two
+  tries gives one copy, not two, which QoS 2 needed. Resume does the same in
+  reverse: live trie, then the index, then out of the offline trie.
+  Attached to a cluster, the cluster's word on who is connected lags the
+  broker's, so the plan now names every client connected here as well
+  (`:leaving`) and `forward-publish!` queues, if the session is kept, any of
+  those and of the away ones that the broker did not deliver to live.
+- **A PUBLISH before the CONNACK.** `add-client!` marks the connection
+  `:awaiting-connack?`, and the connect handler clears it once the CONNACK is
+  written. Until then QoS 1 and 2 deliveries go on the session's queue, which
+  the flush after the CONNACK sends, and QoS 0 ones are dropped (at most once
+  allows it).
+- **A QoS 2 message delivered twice**, found by the reruns once nothing was
+  lost any more. A message in flight when its session dropped went to the
+  cluster's queue without its packet identifier, and came back on resume
+  under a new one, so a client that had it already could not tell. And one
+  the client had answered with a PUBREC was handed over, or redelivered on
+  its own, as a PUBLISH, where §4.4 owes it the PUBREL. Now the identifier
+  travels with the queued message and the resume puts it back in flight
+  under it, and a PUBREC marks the message so that a resume sends the PUBREL
+  and a hand-over leaves it out.
+
 ## 20260928
 
 ### A chaos run
@@ -114,22 +149,6 @@ another member's broker. Left over:
 - ~~**The multi-broker failure tests are manual.**~~ `scripts/chaos.bb`, see
   "A chaos run" below. CI still cannot reach a real Rama cluster, so the
   three-broker scenarios run by hand; CI runs the one-broker one.
-- **A publish in the moment a persistent session drops is lost.** Found by the
-  chaos run, with and without Rama: a QoS 1 or 2 message sent a millisecond or
-  two after the subscriber's socket went is neither delivered nor queued. The
-  subscription has left the live trie and is not yet in the offline one (or,
-  attached, the cluster still has the client as connected here), so the
-  publish matches nobody. Parking first and unhooking second would close the
-  gap but open another, a live delivery and a queued one for the same message,
-  which QoS 2 must not have.
-- **A resumed session can be sent a PUBLISH before its CONNACK.** Found by
-  the chaos run. `add-client!` puts a resumed session's subscriptions back in
-  the live trie before the CONNACK goes out, on purpose (a publish in between
-  used to miss it), so a publish in that moment is written first. §3.2.0-1
-  says the CONNACK is the first packet the server sends. A version 5 client
-  that learns its dialect from the CONNACK then reads that PUBLISH as 3.1.1.
-  Holding deliveries to a connection until its CONNACK is written would keep
-  both.
 - **`scripts/rama.bb` has no wipe.** The cure the README gives for a wedged dev
   cluster (destroy and relaunch the module, or clear `local-rama-data` and
   `local-zk`) is still done by hand.

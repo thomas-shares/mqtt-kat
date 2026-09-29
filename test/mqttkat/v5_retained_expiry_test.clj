@@ -35,11 +35,15 @@
     (let [topic (tu/topic "ret-expire")
           pub   (tu/connect-v5! "ret-expire-pub")]
       (try
-        (retain! pub topic "stale" 0 1)
+        ;; Two seconds, not one: a broker that keeps time in whole seconds
+        ;; (Mosquitto does) can expire a one-second message at the next tick,
+        ;; any moment after it arrives, and the early subscriber then found
+        ;; nothing on a slow CI runner.
+        (retain! pub topic "stale" 0 2)
         ;; A subscriber arriving inside the interval still gets it...
         (is (some? (subscribe-and-take "ret-expire-early" topic 1200))
             "not expired yet")
-        (Thread/sleep 1600)
+        (Thread/sleep 3200)
         ;; ...and one arriving after it does not.
         (is (nil? (subscribe-and-take "ret-expire-late" topic 1200))
             "the interval passed, so there is no retained message")

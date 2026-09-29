@@ -153,14 +153,11 @@ jobs:
   # scripts/chaos.bb against one broker with an in-process Rama: clients are
   # killed, disconnected and move their subscriptions while publishers publish
   # at QoS 0, 1 and 2, and afterwards every message is checked against what
-  # its QoS promised. Not blocking yet: it finds two open bugs on every run (a
-  # publish in the moment a persistent session drops is lost, and a resumed
-  # session can get a PUBLISH before its CONNACK; see thoughts.md, 20260928).
-  # Make it blocking once those are fixed. The report is kept either way.
+  # its QoS promised. Blocking since the bugs it found were fixed (see
+  # thoughts.md, 20260929). The report is kept either way.
   chaos:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 

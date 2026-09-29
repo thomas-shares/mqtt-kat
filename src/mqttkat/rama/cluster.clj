@@ -635,9 +635,8 @@
         ;; queued, here, whichever broker parked it — see :queue below. Unless
         ;; the client is live on this very broker: the local trie delivers to
         ;; it, and this copy of the table saying otherwise is a diff that has
-        ;; not arrived yet. Queuing as well would deliver twice on its next
-        ;; resume.
-        {parked true present false} (group-by #(and (false? (:connected? %))
+        ;; not arrived yet.
+        {present false} (group-by #(and (false? (:connected? %))
                                                     (nil? (handlers/live-connection (:client-id %))))
                                               matches)
         {shared true ordinary false} (group-by #(some? (:share-group %)) present)
@@ -659,7 +658,19 @@
         ;; matching subscriptions (§3.3.5-1), as a live delivery would be.
         ;; A shared group's away members are left out: the group has
         ;; present members to take the message, or it has nobody.
-        queue   (per-client parked)
+        ;;
+        ;; Whether a client is away is not decided here, though: this is
+        ;; the cluster's word, and it lags the broker's. A client on its way
+        ;; in here may be recorded as away and not yet be live; one on its
+        ;; way out may be recorded as connected here and be live no longer.
+        ;; A publish in either moment reached nobody. So every client the
+        ;; cluster has away, and every one it has here, is a candidate, and
+        ;; forward-publish! queues those the broker did not deliver to live
+        ;; — which the broker decides once, as it delivers.
+        queue   (per-client (filter #(false? (:connected? %)) matches))
+        leaving (per-client (filter #(and (true? (:connected? %))
+                                          (= broker-id (:broker-id %)))
+                                    matches))
         ;; And who each other broker is being sent this for, so that if it
         ;; cannot be reached the message is queued for them instead of
         ;; lost: a broker that dies is recorded as holding its clients
@@ -669,8 +680,9 @@
                       (keep (fn [[b entries]]
                               (when-not (= broker-id b) [b (per-client entries)])))
                       (group-by :broker-id ordinary))]
-    (when (or (seq brokers) (seq skip) (seq queue))
-      {:brokers brokers :skip skip :queue queue :holders holders :groups groups})))
+    (when (or (seq brokers) (seq skip) (seq queue) (seq leaving))
+      {:brokers brokers :skip skip :queue queue :leaving leaving
+       :holders holders :groups groups})))
 
 (defn forward-publish!
   "What the bridge's forwarder does when this broker is attached: `plan`,
@@ -735,7 +747,14 @@
             (do (log/debug "no address for broker" peer-id "- queuing" topic "for its sessions")
                 (when on-lost (on-lost)))))))
     (when (pos? qos)
-      (queue-for (:queue plan) false))))
+      ;; Not for whoever this broker delivered to live, as the plan says
+      ;; above: that client has it, and queuing too would deliver twice on
+      ;; its next resume. A client leaving here is queued only if its
+      ;; session is kept: a clean one's messages end with its connection.
+      (let [delivered (or (:delivered plan) #{})
+            away      (fn [clients] (remove #(contains? delivered (:client-id %)) clients))]
+        (queue-for (away (:queue plan)) false)
+        (queue-for (away (:leaving plan)) true)))))
 
 ;; ── the running broker's connection ──────────────────────────────────────
 

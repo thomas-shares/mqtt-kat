@@ -537,11 +537,13 @@
             (record! conn (cluster/->subscribe {:connect-id (:connect-id c) :client-id "away-1"
                                                 :filter "away/#" :entry (entry "away/#" 1)}))
             (is (tu/wait-until #(present-in-trie? conn "away/t" "away-1")))
-            (is (nil? (:queue (cluster/plan conn "away/t"))) "present: nothing to queue")
+            (is (empty? (:queue (cluster/plan conn "away/t"))) "present: nothing to queue")
+            (is (= [{:client-id "away-1" :qos 1}] (:leaving (cluster/plan conn "away/t")))
+                "but connected here: queued if it has gone and was not delivered to")
             (record! conn (cluster/->disconnect c))
             (is (tu/wait-until #(and (contains? (matches conn "away/t") "away-1")
                                      (not (present-in-trie? conn "away/t" "away-1")))))
-            (is (= {:brokers {} :skip #{} :queue [{:client-id "away-1" :qos 1}] :holders {} :groups {}}
+            (is (= {:brokers {} :skip #{} :queue [{:client-id "away-1" :qos 1}] :leaving [] :holders {} :groups {}}
                    (cluster/plan conn "away/t"))
                 "away: queued here, forwarded nowhere")
 

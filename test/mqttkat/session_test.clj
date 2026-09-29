@@ -6,6 +6,7 @@
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [mqttkat.client :as client]
             [mqttkat.handlers :as h]
+            [mqttkat.trie :as trie]
             [mqttkat.util :as util]
             [mqttkat.test-util :as tu])
   (:import [java.nio ByteBuffer]
@@ -180,6 +181,121 @@
           (client/send-message (:client back) {:packet-type :DISCONNECT})
           (tu/close! back)
           (tu/wait-for-parked-session! id))))))
+
+;; ── a session on its way out ───────────────────────────────────────────
+;;
+;; Found by the chaos run (mqttkat.chaos.runner): a publish in the moment a
+;; persistent subscriber dropped was lost. remove-client! took the connection
+;; out of the index, out of the live trie, and only then put the session in
+;; the offline trie, so a publish in between matched it in neither; and one
+;; that matched it live still went to the socket that was closing. These put
+;; the broker in each moment of the handover and publish into it: it cannot
+;; be timed from outside.
+
+(defn- park-offline! [id topic qos]
+  (swap! h/*offline-trie* trie/trie-insert topic {:client-id id :qos qos :topic-filter topic}))
+
+(defn- unpark-offline! [id topic qos]
+  (swap! h/*offline-trie* trie/trie-delete topic {:client-id id :qos qos :topic-filter topic}))
+
+(deftest a-session-in-both-tries-is-sent-a-publish-once
+  (testing "live and already parked: delivered live, and not queued as well"
+    (let [id    (tu/client-id "handover-both")
+          topic (tu/topic "handover-both")
+          sub   (tu/connect! nil :id id :clean-session? false)]
+      (client/send-message (:client sub) (subscribe-msg topic 1 1))
+      (tu/expect! (:ch sub) :SUBACK)
+      (park-offline! id topic 1)
+      (try
+        (let [pub (tu/connect! "handover-both-pub")]
+          (client/send-message (:client pub) (publish-msg topic "once" 1 21))
+          (tu/expect-eventually! (:ch pub) :PUBACK 2000)
+          (tu/close! pub))
+        (is (= "once" (tu/payload-str (tu/expect-eventually! (:ch sub) :PUBLISH 2000))))
+        (is (zero? (h/pending-count id)) "nothing kept for it as well")
+        (finally
+          (unpark-offline! id topic 1)
+          (tu/close! sub))))))
+
+(deftest a-session-no-longer-live-is-queued-not-written-to
+  (testing "parked and out of the index, still in the live trie: queued for it"
+    (let [id    (tu/client-id "handover-leaving")
+          topic (tu/topic "handover-leaving")
+          sub   (tu/connect! nil :id id :clean-session? false)
+          key   (h/live-connection id)]
+      (client/send-message (:client sub) (subscribe-msg topic 1 1))
+      (tu/expect! (:ch sub) :SUBACK)
+      ;; As remove-client! leaves it between its first two steps.
+      (park-offline! id topic 1)
+      (h/forget-live! id key)
+      (try
+        (let [pub (tu/connect! "handover-leaving-pub")]
+          (client/send-message (:client pub) (publish-msg topic "kept" 1 21))
+          (tu/expect-eventually! (:ch pub) :PUBACK 2000)
+          (tu/close! pub))
+        (is (nil? (tu/take! (:ch sub) 300)) "not written to a connection that is going")
+        (is (= 1 (h/pending-count id)) "kept for the session instead")
+        (finally
+          (swap! h/*live-clients* assoc id key)
+          (unpark-offline! id topic 1)
+          (tu/close! sub))))))
+
+(deftest nothing-is-sent-before-the-connack
+  (testing "a delivery to a connection whose CONNACK is not out yet waits for it"
+    ;; §3.2.0-1. add-client! puts a resumed session in the live trie before
+    ;; the CONNACK is written, and a publish in that moment went out first:
+    ;; the chaos run's clients saw a PUBLISH where the CONNACK should be.
+    (let [id    (tu/client-id "before-connack")
+          topic (tu/topic "before-connack")
+          sub   (tu/connect! nil :id id :clean-session? false)
+          key   (h/live-connection id)]
+      (client/send-message (:client sub) (subscribe-msg topic 1 1))
+      (tu/expect! (:ch sub) :SUBACK)
+      (swap! h/*clients* assoc-in [key :awaiting-connack?] true)
+      (try
+        (let [pub (tu/connect! "before-connack-pub")]
+          (client/send-message (:client pub) (publish-msg topic "held" 1 21))
+          (tu/expect-eventually! (:ch pub) :PUBACK 2000)
+          (client/send-message (:client pub) (publish-msg topic "dropped" 0 nil))
+          (tu/close! pub))
+        (is (nil? (tu/take! (:ch sub) 300)) "nothing yet")
+        (is (= 1 (h/pending-count id)) "QoS 1 held; QoS 0 may be missed")
+        (h/connack-sent! key)
+        (h/flush-pending! key id)
+        (is (= "held" (tu/payload-str (tu/expect-eventually! (:ch sub) :PUBLISH 2000))))
+        (finally
+          (h/connack-sent! key)
+          (tu/close! sub))))))
+
+(deftest ^:portable a-qos-2-message-the-client-has-received-is-not-sent-again
+  (testing "after a PUBREC, a resumed session is sent the PUBREL, not the PUBLISH"
+    ;; §4.4. The broker resent the PUBLISH, and a client that had the PUBREL
+    ;; already and let the identifier go took it for a new message. Found by
+    ;; the chaos run as a QoS 2 message delivered twice.
+    (let [id    (tu/client-id "pubrec-resume")
+          topic (tu/topic "pubrec-resume")
+          sub   (tu/connect! nil :id id :clean-session? false)]
+      (client/send-message (:client sub) (subscribe-msg topic 2 1))
+      (tu/expect! (:ch sub) :SUBACK)
+      (let [pub (tu/connect! "pubrec-resume-pub")]
+        (client/send-message (:client pub) (publish-msg topic "once" 2 21))
+        (tu/expect-eventually! (:ch pub) :PUBREC 2000)
+        (client/pubrel (:client pub) 21)
+        (tu/expect-eventually! (:ch pub) :PUBCOMP 2000)
+        (tu/close! pub))
+      (let [{pid :packet-identifier} (tu/expect-eventually! (:ch sub) :PUBLISH 2000)]
+        (client/pubrec (:client sub) pid)
+        (tu/expect-eventually! (:ch sub) :PUBREL 2000)
+        ;; Gone before the PUBCOMP.
+        (tu/close! sub)
+        (tu/wait-for-parked-session! id)
+        (let [back (tu/connect! nil :id id :clean-session? false)
+              got  (tu/take-n! (:ch back) 2 1000)]
+          (is (empty? (:PUBLISH got)) "the message is not sent again")
+          (is (= [pid] (mapv :packet-identifier (:PUBREL got))) "its PUBREL is")
+          (client/pubcomp (:client back) pid)
+          (client/send-message (:client back) {:packet-type :DISCONNECT})
+          (tu/close! back))))))
 
 ;; ── retained replay ──────────────────────────────────────────────────────
 
