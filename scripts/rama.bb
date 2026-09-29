@@ -9,6 +9,9 @@
 ;;                                  was started: SIGTERM, then SIGKILL after --grace s
 ;;   bb scripts/rama.bb kill        the same, SIGKILL at once
 ;;   bb scripts/rama.bb restart     stop, then start
+;;   bb scripts/rama.bb wait        until the Conductor is listening and the
+;;                                  module is RUNNING, however the cluster was
+;;                                  started; exits 1 after --timeout s
 ;;   bb scripts/rama.bb status      what is running, and on which ports
 ;;
 ;; The Rama distribution is --rama-dir, or $RAMA_HOME, or ~/projects/rama. The
@@ -32,7 +35,8 @@
   {:rama-dir {:default (or (System/getenv "RAMA_HOME")
                            (str (fs/path (System/getProperty "user.home") "projects" "rama")))
               :desc "the Rama distribution: rama, rama.yaml, local-rama-data"}
-   :grace    {:default 15 :coerce :long :desc "seconds between SIGTERM and SIGKILL on stop"}})
+   :grace    {:default 15 :coerce :long :desc "seconds between SIGTERM and SIGKILL on stop"}
+   :timeout  {:default 180 :coerce :long :desc "seconds wait gives the Conductor and the module"}})
 
 ;; ── finding Rama ─────────────────────────────────────────────────────────
 
@@ -141,6 +145,31 @@
           (do (println "still running:" (str/join ", " (map :pid (rama-processes))))
               (System/exit 1)))))))
 
+(defn- wait-module!
+  "Wait up to `seconds` for the module to be RUNNING, saying what it passes
+   through. Whether it got there."
+  [rama-dir seconds]
+  (print (str "module     " module " ")) (flush)
+  (let [deadline (+ (System/currentTimeMillis) (* 1000 (long seconds)))]
+    (loop [last-state nil]
+      (let [state (module-state rama-dir)]
+        (cond
+          (= "RUNNING" state)
+          (do (println "RUNNING") true)
+
+          (= :not-deployed state)
+          (do (println (str "not deployed - see the README: `lein jar`, then `./rama deploy --action launch`"))
+              false)
+
+          (> (System/currentTimeMillis) deadline)
+          (do (println (str "still " (or state "unreachable") " after " seconds " s - see " rama-dir "/logs"))
+              false)
+
+          :else
+          (do (when (and state (not= state last-state)) (print (str state " ")) (flush))
+              (Thread/sleep 3000)
+              (recur state)))))))
+
 (defn start! [{:keys [rama-dir]}]
   (let [rama (fs/path rama-dir "rama")]
     (when-not (fs/exists? rama)
@@ -167,25 +196,25 @@
               (System/exit 1)))))
     (println "UI         http://localhost:8888/")
     ;; A restarted cluster brings its module back by itself, which takes a
-    ;; while; the brokers cannot connect until it has.
-    (print (str "module     " module " ")) (flush)
-    (let [deadline (+ (System/currentTimeMillis) 180000)]
-      (loop [last-state nil]
-        (let [state (module-state rama-dir)]
-          (cond
-            (= "RUNNING" state)
-            (println "RUNNING")
+    ;; while; the brokers cannot connect until it has. Not a failure of
+    ;; start if it never is: a first start is followed by the deploy.
+    (wait-module! rama-dir 180)))
 
-            (= :not-deployed state)
-            (println (str "not deployed - see the README: `lein jar`, then `./rama deploy --action launch`"))
-
-            (> (System/currentTimeMillis) deadline)
-            (println (str "still " (or state "unreachable") " after 180 s - see " rama-dir "/logs"))
-
-            :else
-            (do (when (and state (not= state last-state)) (print (str state " ")) (flush))
-                (Thread/sleep 3000)
-                (recur state))))))))
+(defn wait!
+  "Until the cluster can take the brokers: the Conductor listening, then the
+   module RUNNING. A cluster that was just started, by this script or by
+   hand, is some way from both — and a broker started in between dies with
+   \"Failed to connect to the Rama conductor\"."
+  [{:keys [rama-dir timeout]}]
+  (print "conductor  :1973 ") (flush)
+  (if-not (wait-for #(listening? 1973) timeout)
+    (do (println "not listening after" timeout "s - is Rama running? (`bb scripts/rama.bb start`)")
+        (System/exit 1))
+    (println "up"))
+  (if (fs/exists? (fs/path rama-dir "rama"))
+    (when-not (wait-module! rama-dir timeout)
+      (System/exit 1))
+    (println "module     not checked: no Rama at" rama-dir "to ask (--rama-dir, or RAMA_HOME)")))
 
 (defn -main [& args]
   (let [{:keys [args opts]} (cli/parse-args args {:spec spec})]
@@ -195,7 +224,8 @@
       "kill"    (stop! opts "KILL")
       "restart" (do (stop! opts "TERM") (start! opts))
       "status"  (status! opts)
-      (do (println "usage: bb scripts/rama.bb start | stop | kill | restart | status [--rama-dir DIR] [--grace 15]")
+      "wait"    (wait! opts)
+      (do (println "usage: bb scripts/rama.bb start | stop | kill | restart | status | wait [--rama-dir DIR] [--grace 15] [--timeout 180]")
           (System/exit 2)))))
 
 (apply -main *command-line-args*)

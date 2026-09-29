@@ -1,4 +1,5 @@
 ;; Longer and heavier; put after a scenario to stretch it.
 ;;
 ;;   bb scripts/chaos.bb chaos/three-brokers.edn chaos/long.edn
+;;   bb scripts/chaos.bb chaos/single-broker.edn chaos/long.edn   no cluster needed
 {:load {:publishers 50 :subscribers 300 :rate 2000 :duration-s 600}}
