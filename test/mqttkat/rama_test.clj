@@ -1090,6 +1090,45 @@
                         (finally
                           (tu/close! pub)))))
 
+                  (testing "a version 5 session back from the cluster is answered in version 5, and stays kept"
+                    ;; adopt-session! parks what the cluster has, which is the
+                    ;; subscriptions and no more. add-client! resumed that as the
+                    ;; connection's record, so it had no protocol version: what
+                    ;; was queued went out in 3.1.1, which a version 5 client
+                    ;; cannot parse, and with no Session Expiry the session was
+                    ;; thrown away on the next disconnect. Found by the chaos run.
+                    (let [id  (tu/client-id "v5-leaver")
+                          v5  #(tu/connect-v5! "v5-leaver" :id id :clean-session? false
+                                               :properties {:session-expiry-interval 600})
+                          c1  (v5)
+                          pub (tu/connect! "v5-leaver-pub")]
+                      (try
+                        (tu/send-v5! c1 (subscribe-msg "v5leave/#" 1 1 :version 5))
+                        (tu/expect! (:ch c1) :SUBACK)
+                        (is (tu/wait-until #(present-in-trie? conn "v5leave/t" id)))
+                        (tu/close! c1)
+                        (is (tu/wait-until #(and (contains? (matches conn "v5leave/t") id)
+                                                 (not (present-in-trie? conn "v5leave/t" id)))))
+                        (client/send-message (:client pub) (publish-msg "v5leave/t" "while away" 1 51 :version 4))
+                        (tu/expect-eventually! (:ch pub) :PUBACK)
+                        (is (tu/wait-until #(= 1 (count (cluster/queued conn id)))))
+                        (let [c2 (v5)]
+                          (try
+                            (is (true? (:session-present? (:connack c2))))
+                            (let [got (tu/expect-eventually! (:ch c2) :PUBLISH)]
+                              (is (= "while away" (tu/payload-str got)))
+                              (tu/send-v5! c2 {:packet-type :PUBACK :packet-identifier (:packet-identifier got)}))
+                            (finally
+                              (tu/close! c2))))
+                        (let [c3 (v5)]
+                          (try
+                            (is (true? (:session-present? (:connack c3)))
+                                "the Session Expiry of the CONNECT it resumed on still holds")
+                            (finally
+                              (tu/close! c3))))
+                        (finally
+                          (tu/close! pub)))))
+
                   (testing "a session that went away from this broker is queued for in the cluster, not here"
                     (let [id  (tu/client-id "leaver")
                           c1  (tu/connect! "leaver" :id id :clean-session? false)

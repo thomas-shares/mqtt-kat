@@ -1,0 +1,33 @@
+;; Three brokers on one Rama cluster, and everything that can go wrong going
+;; wrong: clients killed and disconnected, subscriptions coming and going, and
+;; a broker killed or stopped every twenty seconds or so.
+;;
+;;   bb scripts/chaos.bb chaos/three-brokers.edn
+;;
+;; Needs the Rama distribution (RAMA_HOME, or :setup :rama :dir) with the
+;; module deployed; see the README, "External cluster". Expect losses next to
+;; a killed broker until the gaps in thoughts.md ("What is still open") are
+;; closed: the report counts them apart, as :near-broker-chaos.
+{:setup {:brokers {:count 3 :port 1885 :http 8085 :heap "1g" :rama :external}
+         :rama    {:start? true :stop? false}}
+
+ :load {:publishers  20
+        :subscribers 60
+        :topics      10
+        :rate        500
+        :duration-s  120
+        :qos         {0 1, 1 2, 2 2}
+        :sub-qos     {0 1, 1 2, 2 2}
+        :persistent  0.75
+        :wildcard    0.2
+        :mqtt        {4 1, 5 1}}
+
+ :chaos {:kill-client         {:every-ms [300 1000]  :down-ms [0 3000] :who :any}
+         :disconnect-client   {:every-ms [1000 3000] :down-ms [0 2000] :who :any}
+         :toggle-subscription {:every-ms [200 600]}
+         :kill-broker         {:every-ms [20000 30000] :down-ms [5000 15000] :min-up 1}
+         :stop-broker         {:every-ms [40000 60000] :down-ms [2000 5000] :min-up 1}}
+
+ ;; A subscription takes a moment to reach the other brokers through Rama.
+ :check {:subscribe-settle-ms 2000
+         :drain-ms            10000}}

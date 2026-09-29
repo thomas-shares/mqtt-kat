@@ -4,6 +4,59 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20260928
 
+### A chaos run
+
+`bb scripts/chaos.bb chaos/<scenario>.edn` starts Rama (`rama.bb`) and the
+brokers (`brokers.bb`), puts publishers and subscribers on them, and for the
+length of the run kills clients, disconnects them, has subscribers unsubscribe
+and subscribe again, and kills or stops brokers and brings them back, all at
+random intervals the EDN file sets. Then it checks every message against what
+its QoS promised and exits 0 only if nothing broke a promise. The scenarios are
+in `chaos/`: `three-brokers.edn` does everything, `three-brokers-calm.edn`
+leaves the brokers alone, `single-broker.edn` needs no cluster and is what CI
+runs, and files merge left to right, so `long.edn` stretches any of them.
+
+The load runner could not do this: its clients are clean sessions that never
+come back. The chaos clients (`mqttkat.chaos.client`) keep what MQTT says a
+client keeps. A persistent one reconnects with Clean Session 0, wherever a
+broker is up, and expects its session; a QoS 2 one remembers the identifiers
+it has PUBRECed across reconnects, so a resend is not counted as a second
+delivery; a SUBSCRIBE or UNSUBSCRIBE the connection dropped under is sent
+again. Everything they see goes into one ledger, timed on one clock.
+
+What is owed is decided per subscription (`mqttkat.chaos.check`): a QoS 1 or 2
+message, at the lower of the two QoSes, acknowledged to its publisher,
+published at least `:subscribe-settle-ms` after the SUBACK and acknowledged
+before the UNSUBSCRIBE went. A clean session is also owed only what it outlived
+by `:clean-grace-ms`. What is owed and missing is `:lost`; QoS 2 or QoS 0 more
+than once is `:duplicate` (QoS 1 repeats are counted, not wrong); a delivery
+no subscription could explain is `:unexpected`; a persistent session missing
+on reconnect is `:session-lost`; and a run in which nothing was owed fails as
+`:nothing-checked` rather than passing on nothing. A loss within a few seconds
+of a killed broker is counted apart, as `:near-broker-chaos`, since those are
+the gaps listed below.
+
+The first runs, one broker, found two bugs, both fixed:
+
+- A persistent version 5 session resumed from the cluster was answered in
+  3.1.1. `adopt-session!` parks the cluster's copy of a session, which is its
+  subscriptions and nothing else, and `add-client!` resumed the parked entry
+  as the new connection's record: no protocol version, so what was queued went
+  out without a property block and the client could not parse it, and no
+  Session Expiry, so the next disconnect discarded the session. The resumed
+  record now takes the connection's terms from the CONNECT. 749 of 31,476
+  owed messages were lost to it in a fifteen-second run.
+- A QoS 0 subscription kept a QoS 1 or 2 message for its session while it was
+  away, at QoS 0. Nothing acknowledges QoS 0, so it stayed in the window and
+  went out again on every reconnect. `queue-for-offline-sessions!` now skips a
+  subscription whose QoS is 0, as the cluster's `forward-publish!` already did.
+
+And two it did not fix, now in the list below: a publish in the moment a
+persistent session drops is lost, and a resumed session can be sent a PUBLISH
+before its CONNACK. A thirty-second run of `single-broker.edn` still ends with
+a few dozen of the first and about ten of the second, which is why the chaos
+job in CI does not block yet.
+
 ### What is still open
 
 Everything known and not done, in one place. The "Still open" list under
@@ -58,12 +111,25 @@ another member's broker. Left over:
   publishers and 3,000 subscribers, the median is 205 ms over three brokers
   against 119 ms on one, but the p95 is 1.6 s against 0.4 s. There is one link
   per pair of brokers, and each queues behind itself.
-- **The multi-broker failure tests are manual.** Killing a broker under
-  persistent-session load was done by hand with `mosquitto_sub -c` and
-  `brokers.bb kill`. The load runner has no persistent-session option, and CI
-  cannot reach a real Rama cluster, so only the InProcessCluster tests in
-  `rama_test` guard this. A bb script that starts three brokers, kills one
-  under load and checks every message arrived would keep it honest.
+- ~~**The multi-broker failure tests are manual.**~~ `scripts/chaos.bb`, see
+  "A chaos run" below. CI still cannot reach a real Rama cluster, so the
+  three-broker scenarios run by hand; CI runs the one-broker one.
+- **A publish in the moment a persistent session drops is lost.** Found by the
+  chaos run, with and without Rama: a QoS 1 or 2 message sent a millisecond or
+  two after the subscriber's socket went is neither delivered nor queued. The
+  subscription has left the live trie and is not yet in the offline one (or,
+  attached, the cluster still has the client as connected here), so the
+  publish matches nobody. Parking first and unhooking second would close the
+  gap but open another, a live delivery and a queued one for the same message,
+  which QoS 2 must not have.
+- **A resumed session can be sent a PUBLISH before its CONNACK.** Found by
+  the chaos run. `add-client!` puts a resumed session's subscriptions back in
+  the live trie before the CONNACK goes out, on purpose (a publish in between
+  used to miss it), so a publish in that moment is written first. §3.2.0-1
+  says the CONNACK is the first packet the server sends. A version 5 client
+  that learns its dialect from the CONNACK then reads that PUBLISH as 3.1.1.
+  Holding deliveries to a connection until its CONNACK is written would keep
+  both.
 - **`scripts/rama.bb` has no wipe.** The cure the README gives for a wedged dev
   cluster (destroy and relaunch the module, or clear `local-rama-data` and
   `local-zk`) is still done by hand.

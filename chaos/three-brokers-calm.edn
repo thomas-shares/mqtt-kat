@@ -1,0 +1,6 @@
+;; three-brokers.edn with the brokers left alone: only clients die, move
+;; between brokers and change their subscriptions. What should hold today.
+;;
+;;   bb scripts/chaos.bb chaos/three-brokers.edn chaos/three-brokers-calm.edn
+{:chaos {:kill-broker nil
+         :stop-broker nil}}

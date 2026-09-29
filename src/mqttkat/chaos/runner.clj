@@ -1,0 +1,431 @@
+(ns mqttkat.chaos.runner
+  "A chaos run: load on a set of brokers while clients are killed, subscribe
+   and unsubscribe, and brokers are killed and brought back, followed by a
+   check that every message arrived as its QoS promised.
+
+     java -cp target/mqtt-kat-0.0.1-standalone.jar clojure.main \\
+       -m mqttkat.chaos.runner chaos/three-brokers.edn [more.edn ...]
+
+   Usually started by scripts/chaos.bb, which brings up Rama and the brokers
+   from the same files first. Every file is merged over the defaults below,
+   later files over earlier ones, maps deeply: a small file can adjust one
+   number of a larger one.
+
+   The run, in order:
+
+     connect    every client, subscribers first, round-robin over the brokers,
+                and wait until the subscriptions are in
+     load       publishers publish at :rate for :duration-s while the actions
+                under :chaos go off at random intervals
+     recover    brokers that are down are started again, every client is let
+                back in, and (with :final-reconnect?) every persistent
+                subscriber reconnects once, which is when a session collects
+                what was queued for it
+     drain      until nothing has arrived for :drain-ms
+     check      mqttkat.chaos.check over what the clients saw
+
+   The report goes to <:report-dir>/<run-id>.edn, a summary to stdout, and the
+   exit status is 0 only if nothing broke a QoS promise."
+  (:require [clojure.edn :as edn]
+            [clojure.java.io :as io]
+            [clojure.pprint :as pp]
+            [clojure.string :as str]
+            [mqttkat.chaos.check :as check]
+            [mqttkat.chaos.client :as c]
+            [mqttkat.chaos.ledger :as ledger])
+  (:import [java.util Random]
+           [java.util.concurrent.atomic AtomicBoolean])
+  (:gen-class))
+
+(set! *warn-on-reflection* true)
+
+;; ── configuration ─────────────────────────────────────────────────────
+
+(def defaults
+  {:run-id     nil                      ; generated when not given
+   :seed       nil                      ; for the random choices; timing is not reproducible
+   :report-dir "logs/chaos"
+
+   ;; Where the brokers are and how they were started. scripts/chaos.bb reads
+   ;; this too; the runner uses it to find the brokers and to start one again
+   ;; after killing it. Broker n listens on :port + n - 1.
+   :setup {:brokers {:count 1 :host "127.0.0.1" :port 1885 :http 8085
+                     :heap "1g" :rama "external"}
+           :rama    {:start? false :stop? false}}
+
+   ;; How a broker is killed, stopped and started: brokers.bb unless said
+   ;; otherwise. "{n}" is the broker's number; start gets the flags from
+   ;; :setup :brokers appended.
+   :control {:bb     "bb"
+             :script "scripts/brokers.bb"}
+
+   :load {:publishers       10
+          :subscribers      30
+          :topics           5
+          :rate             200         ; messages per second, all publishers together
+          :size             64          ; payload bytes
+          :duration-s       30
+          :window           32          ; unacknowledged QoS 1/2 publishes per publisher
+          :qos              {0 1, 1 1, 2 1}   ; weights for each publish's QoS
+          :sub-qos          {0 1, 1 1, 2 1}   ; weights for each subscription's QoS
+          :persistent       0.75        ; share of subscribers with a persistent session
+          :wildcard         0.2         ; share subscribed to every topic with +
+          :mqtt             {4 1, 5 1}  ; weights for the protocol version
+          :session-expiry-s 3600}
+
+   ;; Each action goes off every :every-ms [min max], at random in between.
+   ;; Leave one out to not have it.
+   ;;   :kill-client          socket closed without a DISCONNECT, back after :down-ms
+   ;;   :disconnect-client    DISCONNECT first, back after :down-ms
+   ;;     :who :subscribers, :publishers or :any
+   ;;   :toggle-subscription  a subscriber unsubscribes, or subscribes again
+   ;;   :kill-broker          SIGKILL, started again after :down-ms
+   ;;   :stop-broker          SIGTERM, the same
+   ;;     :min-up             never take the brokers below this many
+   :chaos {}
+
+   :check {:subscribe-settle-ms 1000    ; how long a subscription takes to reach every broker
+           :clean-grace-ms      10000   ; how long a clean session must outlive an ack for it to count
+           :drain-ms            5000
+           :max-drain-ms        120000
+           :final-reconnect?    true
+           :connect-timeout-ms  30000
+           :max-violations      200}})  ; per kind, in the report
+
+(defn deep-merge [& ms]
+  (apply merge-with (fn [a b] (if (and (map? a) (map? b)) (deep-merge a b) b)) ms))
+
+(defn read-config [path]
+  (let [m (edn/read-string (slurp path))]
+    (when-not (map? m)
+      (throw (ex-info (str path " should hold a map") {:path path})))
+    m))
+
+(defn config
+  "The defaults, then each file over the one before."
+  [paths]
+  (apply deep-merge defaults (map read-config paths)))
+
+(defn brokers
+  "[{:n :host :port}] from :setup :brokers."
+  [cfg]
+  (let [{:keys [count host port]} (get-in cfg [:setup :brokers])]
+    (vec (for [n (range 1 (inc (long count)))]
+           {:n n :host host :port (+ (long port) (dec n))}))))
+
+;; ── randomness ────────────────────────────────────────────────────────
+
+(defn- pick-weighted
+  "A key of `weights` ({k weight}), with probability proportional to it."
+  [^Random rng weights]
+  (let [total (reduce + (vals weights))
+        r     (* (.nextDouble rng) total)]
+    (loop [[[k w] & more] (seq weights) acc 0.0]
+      (if (or (nil? more) (< r (+ acc (double w))))
+        k
+        (recur more (+ acc (double w)))))))
+
+(defn- between ^long [^Random rng [lo hi]]
+  (let [lo (long lo) hi (long (or hi lo))]
+    (if (<= hi lo) lo (+ lo (long (.nextInt rng (int (- hi lo))))))))
+
+(defn- choose [^Random rng xs]
+  (when (seq xs) (nth xs (.nextInt rng (count xs)))))
+
+;; ── brokers ───────────────────────────────────────────────────────────
+
+(defn- listening? [{:keys [host port]}]
+  (try (with-open [_ (java.net.Socket. ^String host (int port))] true)
+       (catch java.io.IOException _ false)))
+
+(defn- wait-until [pred ms]
+  (let [deadline (+ (System/currentTimeMillis) (long ms))]
+    (loop []
+      (cond (pred) true
+            (> (System/currentTimeMillis) deadline) false
+            :else (do (Thread/sleep 200) (recur))))))
+
+(defn- start-flags [cfg]
+  (let [b (get-in cfg [:setup :brokers])]
+    (mapcat (fn [k] (when-some [v (get b k)] [(str "--" (name k)) (if (keyword? v) (name v) (str v))]))
+            [:port :http :heap :rama :conductor :advertise])))
+
+(defn- control-command [cfg action n]
+  (let [{:keys [bb script]} (:control cfg)
+        count (get-in cfg [:setup :brokers :count])]
+    (case action
+      :kill  [bb script "kill" (str n)]
+      :stop  [bb script "stop" (str n)]
+      :start (into [bb script "start" (str count)] (start-flags cfg)))))
+
+(defn- run-command!
+  "Run a control command, its output appended to the run's control log."
+  [{:keys [control-log]} argv]
+  (let [pb (doto (ProcessBuilder. ^java.util.List (vec argv))
+             (.redirectErrorStream true)
+             (.redirectOutput (java.lang.ProcessBuilder$Redirect/appendTo (io/file control-log))))]
+    (.waitFor (.start pb))))
+
+;; ── the run's state ───────────────────────────────────────────────────
+
+(defn- make-clients [cfg ^Random rng lg run-id]
+  (let [{:keys [publishers subscribers topics qos sub-qos persistent wildcard mqtt
+                window session-expiry-s]} (:load cfg)
+        topic-of #(str "chaos/" run-id "/t" %)
+        subs (vec (for [i (range subscribers)]
+                    (let [wild? (< (.nextDouble rng) (double wildcard))
+                          opts  {:id (str "chaos-" run-id "-s" i) :kind :sub :idx i
+                                 :mqtt5? (= 5 (pick-weighted rng mqtt))
+                                 :persistent? (< (.nextDouble rng) (double persistent))
+                                 :filter (if wild? (str "chaos/" run-id "/+") (topic-of (mod i topics)))
+                                 :sub-qos (pick-weighted rng sub-qos)
+                                 :session-expiry-s session-expiry-s}]
+                      (ledger/client! lg (:id opts) (dissoc opts :id))
+                      (c/make lg opts))))
+        pubs (vec (for [i (range publishers)]
+                    (c/make lg {:id (str "chaos-" run-id "-p" i) :kind :pub :idx i
+                                :mqtt5? (= 5 (pick-weighted rng mqtt))
+                                :persistent? false :window window})))]
+    {:subscribers subs
+     :publishers  pubs
+     :topics      (mapv topic-of (range topics))
+     :qos-weights qos}))
+
+(defn- up-brokers [state]
+  (->> @(:brokers state) vals (filter :up?) (sort-by :n) vec))
+
+;; ── the loops ─────────────────────────────────────────────────────────
+
+(defn- watchdog
+  "Every 100 ms: notice dead connections, and connect whatever wants to be
+   connected to a broker that is up."
+  [{:keys [clients ^AtomicBoolean running rng] :as state}]
+  (while (.get running)
+    (doseq [cl clients]
+      (c/check-connection! cl 10000)
+      (when (c/wants-connection? cl)
+        (if-let [b (locking rng (choose rng (up-brokers state)))]
+          (when-not (c/connect! cl b)
+            (c/back-off! cl 500))
+          (c/back-off! cl 500))))
+    (Thread/sleep 100)))
+
+(defn- publisher-loop
+  [{:keys [^AtomicBoolean publishing topics qos-weights] :as state} cl cfg]
+  (let [{:keys [rate publishers size]} (:load cfg)
+        rng      (Random. (+ (long (:seed state)) 1000 (long (:idx cl))))
+        interval (long (/ (* 1e9 (long publishers)) (max 1 (long rate))))
+        t0       (System/nanoTime)]
+    (loop [i 0]
+      (when (.get publishing)
+        (let [due  (+ t0 (* i interval))
+              wait (- due (System/nanoTime))]
+          (when (pos? wait) (Thread/sleep (quot wait 1000000) (int (mod wait 1000000))))
+          (let [r (c/publish! cl (choose rng topics) (pick-weighted rng qos-weights) size 50)]
+            (swap! (:tally state) update r (fnil inc 0)))
+          (recur (inc i)))))))
+
+(defn- chaos-loop
+  "Fire `action` every :every-ms until the load phase ends."
+  [{:keys [^AtomicBoolean publishing] :as state} action spec f]
+  (let [rng (Random. (+ (long (:seed state)) (long (hash action))))]
+    (loop []
+      (let [pause (between rng (:every-ms spec))
+            end   (+ (System/currentTimeMillis) pause)]
+        (while (and (.get publishing) (< (System/currentTimeMillis) end))
+          (Thread/sleep (long (min 100 (max 1 (- end (System/currentTimeMillis)))))))
+        (when (.get publishing)
+          (when (f rng spec)
+            (swap! (:actions state) update action (fnil inc 0)))
+          (recur))))))
+
+(defn- client-pool [state who]
+  (case who
+    :subscribers (:subscribers state)
+    :publishers  (:publishers state)
+    (:clients state)))
+
+(defn- kill-client-action [state graceful?]
+  (fn [rng spec]
+    (when-let [cl (choose rng (filterv c/connected? (client-pool state (:who spec :any))))]
+      (let [broker (c/broker-of cl)]
+        (when (c/kill! cl (between rng (:down-ms spec [0 2000])) graceful?)
+          (ledger/event! (:ledger state) {:type (if graceful? :disconnect-client :kill-client)
+                                          :client (:id cl) :broker broker})
+          true)))))
+
+(defn- toggle-action [state]
+  (fn [rng _]
+    (when-let [cl (choose rng (filterv c/connected? (:subscribers state)))]
+      (when-let [what (c/toggle-subscription! cl)]
+        (ledger/event! (:ledger state) {:type what :client (:id cl)})
+        true))))
+
+(defn- start-broker! [state n]
+  (let [b (get @(:brokers state) n)]
+    (run-command! state (control-command (:cfg state) :start n))
+    (if (wait-until #(listening? b) 90000)
+      (do (swap! (:brokers state) assoc-in [n :up?] true)
+          (ledger/event! (:ledger state) {:type :broker-up :broker n})
+          (println (format "  broker-%d is back" n)))
+      (do (ledger/event! (:ledger state) {:type :broker-failed-to-start :broker n})
+          (println (format "  broker-%d did not come back - see logs/brokers/broker-%d.log" n n))))))
+
+(defn- broker-action [state signal]
+  (fn [rng spec]
+    (let [up (up-brokers state)]
+      (when (> (count up) (long (:min-up spec 1)))
+        (let [{:keys [n]} (choose rng up)
+              down        (between rng (:down-ms spec [5000 10000]))]
+          (swap! (:brokers state) assoc-in [n :up?] false)
+          (ledger/event! (:ledger state) {:type (if (= :kill signal) :kill-broker :stop-broker)
+                                          :broker n})
+          (println (format "  %s broker-%d for %d ms" (if (= :kill signal) "killing" "stopping") n down))
+          (run-command! state (control-command (:cfg state) signal n))
+          (Thread/sleep down)
+          (start-broker! state n)
+          true)))))
+
+(defn- progress [state]
+  (let [{:keys [ledger clients brokers tally actions]} state]
+    (into (sorted-map)
+          {:t-s        (quot (ledger/now ledger) 1000000)
+           :published  (:sent @tally 0)
+           :skipped    (:skipped @tally 0)
+           :acked      (count (filter (comp :acked val) (:publishes ledger)))
+           :delivered  (ledger/delivery-count ledger)
+           :connected  (str (count (filter c/connected? clients)) "/" (count clients))
+           :brokers-up (mapv :n (up-brokers state))
+           :chaos      @actions})))
+
+(defn- start-thread [f]
+  (Thread/startVirtualThread ^Runnable (fn [] (try (f) (catch Throwable t (.printStackTrace t))))))
+
+;; ── the run ───────────────────────────────────────────────────────────
+
+(defn- drain!
+  "Wait until nothing new has been acknowledged or delivered for :drain-ms,
+   or :max-drain-ms has gone by."
+  [state]
+  (let [{:keys [drain-ms max-drain-ms]} (get-in state [:cfg :check])
+        lg       (:ledger state)
+        observe  #(vector (ledger/delivery-count lg)
+                          (count (filter (comp :acked val) (:publishes lg))))
+        deadline (+ (System/currentTimeMillis) (long max-drain-ms))]
+    (loop [last (observe) quiet-since (System/currentTimeMillis)]
+      (Thread/sleep 250)
+      (let [now (System/currentTimeMillis) seen (observe)]
+        (cond
+          (not= seen last)                          (recur seen now)
+          (>= (- now quiet-since) (long drain-ms))  :drained
+          (> now deadline)                          :gave-up
+          :else                                     (recur last quiet-since))))))
+
+(defn- summarise [result max-violations]
+  (-> result
+      (update :violations
+              (fn [vs] (->> (group-by :kind vs)
+                            (mapcat (fn [[_ vs]] (take max-violations vs)))
+                            vec)))))
+
+(defn run-scenario!
+  "Run the scenario `cfg` against brokers that are already up. Returns the
+   check's verdict, with the report's path under :report."
+  [cfg]
+  (let [run-id  (or (:run-id cfg) (format "%tY%<tm%<td-%<tH%<tM%<tS" (java.util.Date.)))
+        seed    (long (or (:seed cfg) (System/currentTimeMillis)))
+        rng     (Random. seed)
+        lg      (ledger/ledger)
+        dir     (doto (io/file (:report-dir cfg)) (.mkdirs))
+        bs      (brokers cfg)
+        pool    (make-clients cfg rng lg run-id)
+        state   (merge pool
+                       {:cfg         cfg
+                        :seed        seed
+                        :rng         rng
+                        :ledger      lg
+                        :clients     (into (:subscribers pool) (:publishers pool))
+                        :brokers     (atom (into (sorted-map) (map (juxt :n #(assoc % :up? true)) bs)))
+                        :running     (AtomicBoolean. true)
+                        :publishing  (AtomicBoolean. true)
+                        :tally       (atom {})
+                        :actions     (atom (sorted-map))
+                        :control-log (str (io/file dir (str run-id "-control.log")))})
+        chk     (:check cfg)]
+    (println "chaos run" run-id "seed" seed)
+    (when-let [down (seq (remove listening? bs))]
+      (throw (ex-info (str "not listening: " (str/join ", " (map #(str (:host %) ":" (:port %)) down))
+                           " - start the brokers first (bb scripts/chaos.bb does)")
+                      {:down down})))
+    ;; connect: subscribers first, spread round-robin
+    (doseq [[i cl] (map-indexed vector (:clients state))]
+      (when-not (c/connect! cl (nth bs (mod i (count bs))))
+        (c/back-off! cl 500)))
+    (let [dog (start-thread #(watchdog state))]
+      (when-not (wait-until #(every? c/subscribed? (:subscribers state)) (:connect-timeout-ms chk))
+        (println "  not every subscriber subscribed in time:"
+                 (count (remove c/subscribed? (:subscribers state))) "missing"))
+      (Thread/sleep (long (:subscribe-settle-ms chk)))
+      (println "load" (pr-str (select-keys (:load cfg) [:publishers :subscribers :topics :rate :duration-s])))
+      (let [pubs   (mapv #(start-thread (fn [] (publisher-loop state % cfg))) (:publishers state))
+            chaos  (for [[action spec] (:chaos cfg) :when spec]
+                     (start-thread
+                      #(chaos-loop state action spec
+                                   (case action
+                                     :kill-client         (kill-client-action state false)
+                                     :disconnect-client   (kill-client-action state true)
+                                     :toggle-subscription (toggle-action state)
+                                     :kill-broker         (broker-action state :kill)
+                                     :stop-broker         (broker-action state :stop)))))
+            chaos  (doall chaos)
+            end    (+ (System/currentTimeMillis) (* 1000 (long (get-in cfg [:load :duration-s]))))
+            every  5000]
+        (while (< (System/currentTimeMillis) end)
+          (Thread/sleep (long (min every (max 1 (- end (System/currentTimeMillis))))))
+          (println " " (pr-str (progress state))))
+        (.set ^AtomicBoolean (:publishing state) false)
+        (run! #(.join ^Thread %) pubs)
+        (run! #(.join ^Thread %) chaos))
+      ;; recover
+      (println "recovering")
+      (doseq [[n b] @(:brokers state) :when (not (:up? b))]
+        (start-broker! state n))
+      (run! c/wake! (:clients state))
+      (wait-until #(every? c/connected? (:clients state)) 30000)
+      (when (:final-reconnect? chk)
+        (doseq [cl (:subscribers state) :when (:persistent? cl)]
+          (c/kill! cl 0 true))
+        (wait-until #(every? c/connected? (:clients state)) 30000))
+      (println "draining")
+      (let [how (drain! state)]
+        (println " " (pr-str (assoc (progress state) :drain how))))
+      (.set ^AtomicBoolean (:running state) false)
+      (.join ^Thread dog))
+    (let [snap   (ledger/snapshot lg)
+          result (check/check snap {:subscribe-settle (* 1000 (long (:subscribe-settle-ms chk)))
+                                    :clean-grace      (* 1000 (long (:clean-grace-ms chk)))})
+          path   (str (io/file dir (str run-id ".edn")))
+          counters (apply merge-with + (map c/counters (:clients state)))]
+      (run! c/close! (:clients state))
+      (with-open [w (io/writer path)]
+        (binding [*out* w]
+          (pp/pprint {:run-id   run-id
+                      :seed     seed
+                      :config   cfg
+                      :clients  counters
+                      :sessions (:clients snap)
+                      :chaos    @(:actions state)
+                      :result   (summarise result (:max-violations chk))
+                      :events   (:events snap)})))
+      (assoc result :report path :run-id run-id :clients counters))))
+
+(defn -main [& paths]
+  (when (empty? paths)
+    (println "usage: clojure -m mqttkat.chaos.runner config.edn [more.edn ...]")
+    (System/exit 2))
+  (let [result (run-scenario! (config paths))]
+    (pp/pprint (select-keys result [:ok? :stats :counts :lost-by :clients :report]))
+    (doseq [v (take 10 (:violations result))]
+      (println " " (pr-str (dissoc v :context))))
+    (shutdown-agents)
+    (System/exit (if (:ok? result) 0 1))))
