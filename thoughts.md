@@ -4,6 +4,15 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20260929
 
+### Ctrl-C against a cluster printed a screenful
+
+Stopping a broker attached to a real cluster logged "Executor pool is shut
+down" with a stack trace, over and over. Closing a proxy only hands its
+teardown to the cluster manager's executor, and close! shut that executor
+down straight after, under a hundred and thirty teardowns still queued. The
+Rama tab's proxy, busy every second, made it hard to miss. unwatch! now waits,
+up to five seconds, until every proxy reports it is no longer active.
+
 ### A Rama tab on the console
 
 `/rama` shows what the module holds and has been through, as the module
