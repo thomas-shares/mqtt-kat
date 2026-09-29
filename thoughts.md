@@ -4,6 +4,39 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20260929
 
+### The unexpected deliveries were the check's, and the Rama writes were mine
+
+Every `:unexpected` delivery in the three-broker runs had been acknowledged
+to its publisher between a few microseconds and about 20 ms before the
+subscriber sent a SUBSCRIBE that matched it. The check took the PUBACK as
+the moment the broker matched the message, but it isn't. The broker
+acknowledges before it fans out, and another broker matches only when the
+forwarded copy arrives. A subscription that lands in between gets the
+message, and MQTT doesn't order a publish from one client against a
+SUBSCRIBE from another. The check now counts a delivery as possible if the
+SUBSCRIBE went out no later than `:subscribe-settle` after the
+acknowledgement. That is the same allowance it already gives a subscription
+before it owes one. Unexpected deliveries now also carry `:acked`,
+`:pub-broker`, the next SUBSCRIBE and the chaos around them, which is what
+it took to see this.
+
+Reproducing this found a regression in queue-by-message-id. With publishers
+killed as well as subscribers, and subscriptions toggling, Rama's depot
+buffer filled: 20,000 lost, 24,000 unexpected. The code before it lost 72
+on the same run. There were two causes:
+
+- The receiving broker queued a bridged copy for every client last seen
+  there that was away. With clients down for up to three seconds at a time,
+  that doubled the enqueues. It now queues for those its own copy still has
+  connected, and for those that left in the last two seconds, which it
+  knows without asking the cluster.
+- Taking live deliveries off the queue went out every 250 ms per client. It
+  now goes out once a second.
+
+After both, the same run has none lost and none duplicated, with no buffer
+errors. chaos/three-brokers.edn had 3 lost, all on subscriptions that ended
+in an UNSUBSCRIBE, 2 of them next to a killed broker.
+
 ### Queued by message, not by moment
 
 The three-broker chaos run still lost QoS 1 and 2 messages and delivered QoS
