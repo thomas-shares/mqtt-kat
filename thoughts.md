@@ -4,6 +4,18 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20260929
 
+### The chaos runner ran out of heap
+
+`chaos/long.edn` (50 publishers, 300 subscribers, 2000 a second) took the
+runner's JVM out of heap after three minutes. It was keeping one
+`[msg at qos broker]` per delivery, and 36 million of them by then. Now a
+delivery is four bits (per client, per publisher, by sequence number: seen,
+seen again, at QoS 1 or more, at QoS 2), with the detail kept only for the
+first ten thousand repeats, which is what a :duplicate is reported with. The
+check goes one client at a time instead of building a verdict per client per
+message for all of them at once. And `chaos.bb` gives the runner `-Xmx` from
+`:setup :runner :heap`, 4g unless a scenario says otherwise.
+
 ### The chaos run's two open items, closed
 
 Thomas ran `chaos/single-broker.edn` on master and it failed with lost QoS 1

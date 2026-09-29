@@ -17,11 +17,14 @@
                     session (:to, nil while it lasts). :ended-by is
                     :unsubscribe, :drop (a clean session's connection went) or
                     :session-lost; :unsub-sent is when the UNSUBSCRIBE went.
-     :deliveries    {client-id {[pub seq] [{:at :qos :broker}]}}
+     :deliveries    {client-id Delivered}
                     What the client handed on, once per PUBLISH for QoS 0 and
                     1, once per packet identifier for QoS 2 — a QoS 2 PUBLISH
                     resent before its PUBREL is the protocol retrying, not a
-                    second delivery.
+                    second delivery. Anything that satisfies Delivered: a
+                    plain {[pub seq] [{:at :qos :broker}]} does, and so does
+                    the ledger's compact record, which a long run needs — one
+                    map entry per delivery ran a ten-minute run out of heap.
      :sessions-lost [{:client :at}]
      :protocol      [{:client :what :at ...}]
      :events        [{:at :type ...}]  the chaos, for putting losses in context
@@ -30,11 +33,13 @@
    the lower of the publish and the subscription:
 
      required  QoS 1 or 2, acknowledged to the publisher, published at least
-               :subscribe-settle after the SUBACK, and acknowledged before the
-               UNSUBSCRIBE went. A clean session's subscription also needs its
-               connection to have outlived the acknowledgement by :clean-grace:
-               what was still on its way when a clean session dropped is
-               legitimately gone.
+               :subscribe-settle after the SUBACK, and acknowledged at least
+               :clean-grace before the UNSUBSCRIBE went: what the broker still
+               had queued for the subscription then it may drop (§3.10.4). A
+               clean session's subscription likewise needs its connection to
+               have outlived the acknowledgement by :clean-grace: what was
+               still on its way when a clean session dropped is legitimately
+               gone.
      possible  anything published between the SUBSCRIBE going out and the
                UNSUBACK coming back. Arriving outside that is :unexpected.
 
@@ -69,6 +74,27 @@
 
 (def ^:private forever Long/MAX_VALUE)
 
+(defprotocol Delivered
+  "What one client was handed."
+  (delivered-ids [d] "The [pub seq] of every message it was handed at least once.")
+  (delivery [d id]
+    "For a message it was handed, {:n :max-qos} — how many times, at most
+     which QoS — plus :at and :brokers where they were kept; nil if never."))
+
+(extend-protocol Delivered
+  nil
+  (delivered-ids [_] nil)
+  (delivery [_ _] nil)
+
+  clojure.lang.IPersistentMap
+  (delivered-ids [m] (keys m))
+  (delivery [m id]
+    (when-let [ds (seq (get m id))]
+      {:n       (count ds)
+       :max-qos (reduce max 0 (map #(long (:qos %)) ds))
+       :at      (mapv :at ds)
+       :brokers (mapv :broker ds)})))
+
 (defn- effective-qos [m sub] (min (long (:qos m)) (long (:qos sub))))
 
 (defn- required?
@@ -81,7 +107,12 @@
          (< (+ (long from) (long subscribe-settle)) (long sent))
          (case ended-by
            nil          true
-           :unsubscribe (< (long acked) (long (or unsub-sent forever)))
+           ;; §3.10.4: on UNSUBSCRIBE the server MAY drop what it has
+           ;; buffered for the subscription and not yet begun to send. Under
+           ;; load a subscriber's queue runs seconds behind, so what was
+           ;; acknowledged just before the UNSUBSCRIBE is not owed either:
+           ;; only what had the grace to get out first.
+           :unsubscribe (< (+ (long acked) (long clean-grace)) (long (or unsub-sent forever)))
            ;; A clean session's messages die with its connection, and so do a
            ;; lost session's, which is its own violation.
            (:drop :session-lost)
@@ -108,82 +139,105 @@
                    (or (= client (:client %)) (broker-event? %)))
              events)))
 
+(defn- verdicts-for
+  "msg -> {:required q-or-nil :possible max-q} for one client's
+   subscriptions. One client at a time: across every client at once this was
+   a map entry per subscriber per message, which a long run cannot hold."
+  [opts by-topic topics subs]
+  (let [acc (java.util.HashMap.)]
+    (doseq [sub subs
+            topic topics
+            :when (matches? (:filter sub) topic)
+            [id m] (get by-topic topic)]
+      (let [q    (effective-qos m sub)
+            req? (required? opts m sub)
+            can? (possible? m sub)]
+        (when (or req? can?)
+          (let [v (.get acc id)]
+            (.put acc id (cond-> (or v {})
+                           req? (-> (update :required (fnil max 0) q)
+                                    (assoc :ended-by (:ended-by sub)))
+                           can? (update :possible (fnil max 0) q)))))))
+    acc))
+
 (defn check
   "The verdict on a run. `opts`: :subscribe-settle and :clean-grace in
-   microseconds, :context-window [before after] likewise."
+   microseconds, :context-window [before after] likewise, and
+   :max-violations, how many of each kind are kept with their detail — the
+   counts are of all of them."
   [{:keys [publishes subscriptions deliveries sessions-lost events clients protocol]}
-   {:keys [subscribe-settle clean-grace context-window]
-    :or   {subscribe-settle 0 clean-grace 0 context-window [2000000 5000000]}
+   {:keys [subscribe-settle clean-grace context-window max-violations]
+    :or   {subscribe-settle 0 clean-grace 0 context-window [2000000 5000000]
+           max-violations 1000}
     :as   opts}]
-  (let [opts         (assoc opts :subscribe-settle subscribe-settle :clean-grace clean-grace)
+  (let [opts           (assoc opts :subscribe-settle subscribe-settle :clean-grace clean-grace)
         [before after] context-window
-        by-topic     (group-by (comp :topic val) publishes)
-        topics       (keys by-topic)
-        violations   (atom [])
-        stats        (atom {:required 0 :delivered-required 0 :deliveries 0
-                            :qos1-repeats 0 :optional-delivered 0})
-        add!         (fn [v] (swap! violations conj v))
-        ;; client -> msg -> {:required q-or-nil :possible max-q}
-        verdicts
-        (into {}
-              (for [[client subs] subscriptions]
-                [client
-                 (reduce
-                  (fn [acc sub]
-                    (reduce
-                     (fn [acc [id m]]
-                       (let [q    (effective-qos m sub)
-                             req? (required? opts m sub)
-                             can? (possible? m sub)]
-                         (cond-> acc
-                           req? (update-in [id :required] (fnil max 0) q)
-                           can? (update-in [id :possible] (fnil max 0) q))))
-                     acc
-                     (mapcat #(get by-topic %) (filter #(matches? (:filter sub) %) topics))))
-                  {}
-                  subs)]))]
-    (doseq [[client ms] verdicts
-            [id {:keys [required]}] ms
-            :when required
-            :let [n (count (get-in deliveries [client id]))]]
-      (swap! stats update :required inc)
-      (if (zero? n)
-        (let [m   (get publishes id)
-              ctx (context events client m before after)]
-          (add! {:kind :lost :client client :msg id :qos required
-                 :session (select-keys (get clients client) [:persistent? :mqtt5? :filter :sub-qos])
-                 :topic (:topic m) :sent (:sent m) :acked (:acked m)
-                 :pub-broker (:pub-broker m)
-                 :near-broker-chaos? (boolean (some broker-event? ctx))
-                 :context ctx}))
-        (swap! stats update :delivered-required inc)))
-    (doseq [[client ms] deliveries
-            [id ds] ms
-            :let [m (get publishes id)
-                  {:keys [required possible]} (get-in verdicts [client id])
-                  n (count ds)]]
-      (swap! stats update :deliveries + n)
-      (when-not required (swap! stats update :optional-delivered inc))
-      (cond
-        (nil? m)
-        (add! {:kind :unexpected :client client :msg id :why "no such publish"})
+        by-topic       (group-by (comp :topic val) publishes)
+        topics         (keys by-topic)
+        violations     (atom [])
+        counts         (atom {})
+        lost-by        (atom (sorted-map))
+        lost-clients   (atom {})
+        stats          (atom {:required 0 :delivered-required 0 :deliveries 0
+                              :qos1-repeats 0 :optional-delivered 0})
+        add!           (fn [v]
+                         (swap! counts update (:kind v) (fnil inc 0))
+                         (when (< (long (get @counts (:kind v))) (long (inc max-violations)))
+                           (swap! violations conj v)))]
+    (doseq [client (distinct (concat (keys subscriptions) (keys deliveries)))
+            :let [ds       (get deliveries client)
+                  verdicts (verdicts-for opts by-topic topics (get subscriptions client))]]
+      ;; What it was owed.
+      (doseq [[id {:keys [required ended-by]}] verdicts
+              :when required]
+        (swap! stats update :required inc)
+        (if (delivery ds id)
+          (swap! stats update :delivered-required inc)
+          (let [m   (get publishes id)
+                ctx (context events client m before after)
+                near? (boolean (some broker-event? ctx))]
+            ;; {1 {:near-broker-chaos 12 :elsewhere 0} 2 {...}}: a loss next to
+            ;; a killed broker is a known gap (see thoughts.md); one elsewhere
+            ;; is news.
+            (swap! lost-by update-in [required (if near? :near-broker-chaos :elsewhere)] (fnil inc 0))
+            (swap! lost-clients update client (fnil inc 0))
+            (add! {:kind :lost :client client :msg id :qos required
+                   :session (select-keys (get clients client) [:persistent? :mqtt5? :filter :sub-qos])
+                   :topic (:topic m) :sent (:sent m) :acked (:acked m)
+                   :pub-broker (:pub-broker m)
+                   ;; How the subscription that owed it ended: nil while it
+                   ;; lasts.
+                   :sub-ended-by ended-by
+                   :near-broker-chaos? near?
+                   :context ctx}))))
+      ;; What it was handed.
+      (doseq [id (delivered-ids ds)
+              :let [{:keys [n max-qos at brokers]} (delivery ds id)
+                    m (get publishes id)
+                    {:keys [required possible]} (.get ^java.util.HashMap verdicts id)
+                    n (long n)]]
+        (swap! stats update :deliveries + n)
+        (when-not required (swap! stats update :optional-delivered inc))
+        (cond
+          (nil? m)
+          (add! {:kind :unexpected :client client :msg id :why "no such publish"})
 
-        (nil? possible)
-        (add! {:kind :unexpected :client client :msg id :qos (:qos m) :topic (:topic m)
-               :sent (:sent m) :at (mapv :at ds)})
+          (nil? possible)
+          (add! {:kind :unexpected :client client :msg id :qos (:qos m) :topic (:topic m)
+                 :sent (:sent m) :at at})
 
-        :else
-        (do
-          (when-let [over (seq (filter #(> (long (:qos %)) (long possible)) ds))]
-            (add! {:kind :qos-upgraded :client client :msg id :allowed possible
-                   :got (mapv :qos over)}))
-          (case (long possible)
-            1 (when (> n 1) (swap! stats update :qos1-repeats + (dec n)))
-            (when (> n 1)
-              (add! {:kind :duplicate :client client :msg id :qos possible :times n
-                     :at (mapv :at ds) :brokers (mapv :broker ds)
-                     :near-broker-chaos? (boolean (some broker-event?
-                                                        (context events client m before after)))}))))))
+          :else
+          (do
+            (when (> (long max-qos) (long possible))
+              (add! {:kind :qos-upgraded :client client :msg id :allowed possible
+                     :got max-qos}))
+            (case (long possible)
+              1 (when (> n 1) (swap! stats update :qos1-repeats + (dec n)))
+              (when (> n 1)
+                (add! {:kind :duplicate :client client :msg id :qos possible :times n
+                       :at at :brokers brokers
+                       :near-broker-chaos? (boolean (some broker-event?
+                                                          (context events client m before after)))})))))))
     (doseq [{:keys [client at]} sessions-lost]
       (add! {:kind :session-lost :client client :at at}))
     (doseq [p protocol]
@@ -193,19 +247,14 @@
     (when (zero? (long (:required @stats)))
       (add! {:kind :nothing-checked
              :why  "no message was owed to any subscriber - were the brokers reachable?"}))
-    (let [vs @violations]
-      {:ok?        (empty? vs)
-       :stats      (assoc @stats
-                          :published (count publishes)
-                          :acked (count (filter (comp :acked val) publishes))
-                          :subscribers (count subscriptions))
-       :counts     (frequencies (map :kind vs))
-       ;; {1 {:near-broker-chaos 12 :elsewhere 0} 2 {...}}: a loss next to a
-       ;; killed broker is a known gap (see thoughts.md); one elsewhere is news.
-       :lost-by    (->> vs
-                        (filter (comp #{:lost} :kind))
-                        (reduce (fn [acc {:keys [qos near-broker-chaos?]}]
-                                  (update-in acc [qos (if near-broker-chaos? :near-broker-chaos :elsewhere)]
-                                             (fnil inc 0)))
-                                (sorted-map)))
-       :violations vs})))
+    {:ok?        (empty? @counts)
+     :stats      (assoc @stats
+                        :published (count publishes)
+                        :acked (count (filter (comp :acked val) publishes))
+                        :subscribers (count subscriptions))
+     :counts     @counts
+     :lost-by    @lost-by
+     ;; The ten clients that lost the most: the report keeps only the first
+     ;; :max-violations of each kind, all of which may be one client's.
+     :lost-by-client (into {} (take 10 (sort-by (comp - val) @lost-clients)))
+     :violations @violations}))

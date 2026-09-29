@@ -44,7 +44,12 @@
            ;; cluster, and a scenario that does not say otherwise (an
            ;; overlay like chaos/long.edn, run on its own) had brokers
            ;; dying on a Conductor that was never there.
-           :rama    {:start? true :stop? false}}})
+           :rama    {:start? true :stop? false}
+           ;; The runner's own JVM. Its record of what arrived is a few bits a
+           ;; delivery, but a long run has a million publishes and hundreds of
+           ;; connections; the JVM's default, a quarter of the machine, was
+           ;; not always enough.
+           :runner  {:heap "4g"}}})
 
 (defn listening? [port]
   (try (with-open [_ (java.net.Socket. "localhost" (int port))] true)
@@ -76,7 +81,7 @@
                  (println "usage: bb scripts/chaos.bb [--keep] chaos/<scenario>.edn [more.edn ...]")
                  (System/exit 2))
         cfg    (apply deep-merge setup-defaults (map (comp edn/read-string slurp) paths))
-        {:keys [build brokers rama]} (:setup cfg)
+        {:keys [build brokers rama runner]} (:setup cfg)
         started-rama? (atom false)]
     ;; build
     (when (or (= :always build) (not (fs/exists? jar)))
@@ -111,7 +116,7 @@
                                ""))
                     2)
                 ;; run
-                (let [status (apply sh! "java" "--add-opens" "java.base/java.lang=ALL-UNNAMED"
+                (let [status (apply sh! "java" (str "-Xmx" (:heap runner)) "--add-opens" "java.base/java.lang=ALL-UNNAMED"
                                     "--enable-native-access=ALL-UNNAMED"
                                     "-cp" jar "clojure.main" "-m" "mqttkat.chaos.runner" paths)]
                   (println (case status
