@@ -4,6 +4,32 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20260929
 
+### A Rama tab on the console
+
+`/rama` shows what the module holds and has been through, as the module
+counts it: sessions stored, connected and parked, subscriptions, retained and
+queued messages, sessions expired, and every `*session-events` record by kind
+with a rate. Brokers registered comes from `$$brokers`, which every broker
+already watches.
+
+Counting by scanning was never on: `$$sessions` is a top-level map, and
+counting its keys walks them. So each task keeps its own counts in
+`$$counts`, keyed by task like `$$expiring`, and the topology bumps them where
+it makes the change it counts, which costs a read and a write and no hop. The
+gauges are read before and after the write they count, never worked out from
+the event, so a record run twice (a stream topology is at least once) counts
+nothing the second time; the per-kind event counts do count it twice, which a
+throughput can bear. A tick once a second copies each task's counts under one
+key of `$$rama-stats`, a proxy on that key pushes them to the broker, and the
+broker pushes them on to any open Rama page the moment they arrive. Rates are
+worked out over the time between two of a task's copies as Rama stamped them,
+not between two samples here.
+
+A ramaop cannot see the topology's PStates, and a segmacro would not
+normalise, so the bump is a plain macro around `<<atomic`. On a cluster that
+already holds data, an update to this module starts every count at zero:
+they are right about what changes after, not about what was there.
+
 ### The chaos check took longer than the run
 
 After chaos/long.edn drained, the runner seemed to hang. It was checking, with

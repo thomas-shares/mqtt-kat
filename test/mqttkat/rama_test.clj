@@ -1515,3 +1515,93 @@
         (finally
           (cluster/close! peer)
           (cluster/close! conn))))))
+
+(deftest the-module-counts-what-it-holds
+  ;; A cluster of its own: the counts are the module's whole contents, and
+  ;; the scenarios above would be in them.
+  (with-redefs [cluster/in-process-config {:tasks (rand-nth [2 4 8]) :threads 2 :workers 1}
+                module/REPLACE-TICK-DEPOT true]
+    (let [conn    (cluster/watch! (cluster/connect :in-process))
+          tick    (fn [depot] (r/foreign-depot (:cluster conn) (:module-name conn) depot))
+          stats   (tick "*stats-tick")
+          expiry  (tick "*expiry-tick")
+          now     (atom 1000)
+          ;; Every task copies its counts, then the proxy is waited on for
+          ;; that copy — the stamp is the tick's, so a fresh one is known.
+          counts! (fn []
+                    (let [at (swap! now inc)]
+                      @(r/foreign-append-async! stats {:now at} :ack)
+                      (tu/wait-until #(let [s (cluster/module-stats conn)]
+                                        (and (pos? (:tasks s))
+                                             (every? (fn [c] (= at (get c "at"))) (vals (:per-task s))))))
+                      (select-keys (:counts (cluster/module-stats conn))
+                                   (conj cluster/gauges "expired"))))
+          a       (cluster/->connect (connect-map "count-a" :version 5 :clean? false :expiry 60))
+          b       (cluster/->connect (connect-map "count-b"))]
+      (try
+        (testing "nothing yet"
+          (is (= {} (counts!))))
+
+        (testing "two clients, a subscription each, a retained message"
+          (record! conn a)
+          (record! conn b)
+          (record! conn (cluster/->subscribe {:connect-id (:connect-id a) :client-id "count-a"
+                                              :filter "x/#" :entry (entry "x/#" 1)}))
+          (record! conn (cluster/->subscribe {:connect-id (:connect-id b) :client-id "count-b"
+                                              :filter "y" :entry (entry "y" 0)}))
+          (record! conn (cluster/->retain "count/r" {:topic "count/r" :payload (.getBytes "p") :qos 0}))
+          (is (= {"sessions" 2 "connected" 2 "subscriptions" 2 "retained" 1} (counts!))))
+
+        (testing "and every one of those again changes nothing: the gauges count state, not records"
+          (record! conn a)
+          (record! conn (cluster/->subscribe {:connect-id (:connect-id a) :client-id "count-a"
+                                              :filter "x/#" :entry (entry "x/#" 1)}))
+          (record! conn (cluster/->retain "count/r" {:topic "count/r" :payload (.getBytes "q") :qos 0}))
+          (is (= {"sessions" 2 "connected" 2 "subscriptions" 2 "retained" 1} (counts!))))
+
+        (testing "a kept session parks, a clean one ends, and messages queue for the parked one"
+          (record! conn (cluster/->disconnect a))
+          (record! conn (cluster/->disconnect b))
+          (record! conn (cluster/->disconnect b))
+          (let [q1 (cluster/->enqueue "count-a" {:topic "x/1" :qos 1})
+                q2 (cluster/->enqueue "count-a" {:topic "x/2" :qos 1})]
+            (record! conn q1)
+            (record! conn q2)
+            (record! conn q1)
+            (is (= {"sessions" 2 "connected" 0 "parked" 1 "subscriptions" 1 "retained" 1 "queued" 2}
+                   (counts!))
+                "the clean session's record stays, as history")
+            (record! conn (cluster/->dequeue "count-a" [(:key q1) "no-such-key"]))
+            (is (= 1 (get (counts!) "queued")))))
+
+        (testing "the parked session expires, and everything it held goes with it"
+          @(r/foreign-append-async! expiry {:now (+ (:at a) 3600000)} :ack)
+          (record! conn (cluster/->retain "count/r" nil))
+          (is (= {"sessions" 1 "connected" 0 "parked" 0 "subscriptions" 0 "retained" 0 "queued" 0 "expired" 1}
+                 (counts!))))
+
+        (testing "every record is counted by kind, again or not"
+          (let [c (:counts (cluster/module-stats conn))]
+            (is (= 3 (get c "event/connect")))
+            (is (= 3 (get c "event/disconnect")))
+            (is (= 3 (get c "event/subscribe")))
+            (is (= 3 (get c "event/enqueue")))
+            (is (= 2 (get c "event/retain")))
+            (is (= 1 (get c "event/unretain")))))
+        (finally
+          (cluster/close! conn))))))
+
+(deftest rama-rates-are-over-ramas-own-clock
+  (testing "per task, over the time between two of its copies"
+    (is (= {0 {"event/connect" 5.0}}
+           (state/rama-task-rates {0 {"at" 1000 "event/connect" 10 "sessions" 3}}
+                                  {0 {"at" 3000 "event/connect" 20 "sessions" 9}}
+                                  {}))
+        "ten connects in two seconds; a gauge is not a rate"))
+  (testing "a task whose copy has not moved keeps the rate it had"
+    (is (= {0 {"event/connect" 5.0} 1 {"event/connect" 2.0}}
+           (state/rama-task-rates {0 {"at" 1000 "event/connect" 10} 1 {"at" 1000 "event/connect" 4}}
+                                  {0 {"at" 3000 "event/connect" 20} 1 {"at" 1000 "event/connect" 4}}
+                                  {1 {"event/connect" 2.0}}))))
+  (testing "and a task seen for the first time has none yet"
+    (is (= {0 {}} (state/rama-task-rates nil {0 {"at" 1000 "event/connect" 10}} {})))))

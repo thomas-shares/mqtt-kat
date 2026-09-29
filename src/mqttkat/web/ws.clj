@@ -1,11 +1,12 @@
 (ns mqttkat.web.ws
   "The WebSocket the console listens on.
 
-   Three things go over it. The broker's whole displayed state once a second,
+   Four things go over it. The broker's whole displayed state once a second,
    which is what every reading on the page is kept fresh from; a chart sample
    alongside it; and a message the moment a client connects or disconnects, so
    the count does not sit stale for up to a second when someone is watching it
-   change.
+   change. And, to the Rama page, the module's counts the moment Rama's
+   proxy pushes them.
 
    Every message carries whole values rather than deltas, so a page that
    missed a frame or has only just opened is right after the next one, and
@@ -88,9 +89,12 @@
   ;; Not to a socket still waiting for its snapshot: see handler.
   (let [open    (into {} (remove (comp #{::pending} val)) @sockets)
         by-page (into {} (map (fn [page] [page (payload page)])) (distinct (vals open)))]
-    (doseq [[ch page] open]
+    ;; A payload of nil is nothing for that page.
+    (doseq [[ch page] open
+            :let [message (get by-page page)]
+            :when message]
       (try
-        (http/send! ch (get by-page page))
+        (http/send! ch message)
         (catch Throwable t
           (log/debug t "dropping a websocket that could not be written to")
           (swap! sockets dissoc ch))))))
@@ -105,7 +109,14 @@
     "topics"  :topics
     "clients" :clients
     "brokers" :brokers
+    "rama"    :rama
     :overview))
+
+(defn- page-fields
+  "The readings for `page`: every page's, and the Rama page's own on it."
+  [page reading]
+  (cond-> (state/fields reading)
+    (= page :rama) (merge (state/rama-fields))))
 
 (defn snapshot
   "What a page needs to be completely up to date the moment it connects: the
@@ -121,7 +132,7 @@
              ;; So the page can offer windows it can actually fill, rather than
              ;; hard-coding a guess at what the server keeps.
              :retention (* history-size sample-interval-ms)
-             :fields    (state/fields now)
+             :fields    (page-fields page now)
              :history   @history
              :events    (recent-events)}
       (= page :topics)  (assoc :topics (:topics now))
@@ -159,6 +170,7 @@
 
 (defn- tick! []
   (let [reading (state/sample!)
+        _       (state/rama-sample!)
         point   (remember! (state/sample-point reading))]
     ;; Onto the event bus, for whoever keeps the cluster's registry — the
     ;; console does not know whether there is one, and need not.
@@ -169,7 +181,7 @@
        (fn [page]
          (json/generate-string
           (cond-> {:event  "tick"
-                   :fields (state/fields reading)
+                   :fields (page-fields page reading)
                    :sample point}
             (= page :topics)  (assoc :topics (:topics reading))
             (= page :clients) (assoc :clients (:rows (state/client-rows)))
@@ -192,7 +204,19 @@
     (swap! event-log (fn [l] (vec (take-last event-log-size (conj l entry)))))
     entry))
 
-(defn- on-broker-event [{:keys [event] :as broker-event}]
+(defn- push-rama!
+  "Rama's proxy has pushed new counts: on to the Rama page, and no other.
+   Throttled like the events — each task's copy arrives as its own push, a
+   handful a second — and not logged: it is a reading, not something that
+   happened."
+  []
+  (let [now (System/currentTimeMillis)]
+    (when (>= (- now (get @last-event :rama-stats 0)) min-event-gap-ms)
+      (swap! last-event assoc :rama-stats now)
+      (let [payload (delay (json/generate-string {:event "rama" :fields (state/rama-fields)}))]
+        (broadcast! (fn [page] (when (= page :rama) @payload)))))))
+
+(defn- on-broker-news [{:keys [event] :as broker-event}]
   (let [entry (log-event! broker-event)
         now   (:t entry)
         sent  (get @last-event event 0)]
@@ -207,6 +231,11 @@
                       :entry  entry})]
         ;; The same for every page: an event is a reading, not a table.
         (broadcast! (constantly payload))))))
+
+(defn- on-broker-event [{:keys [event] :as broker-event}]
+  (if (= :rama-stats event)
+    (push-rama!)
+    (on-broker-news broker-event)))
 
 (defn start!
   "Begin sampling and forwarding. Idempotent."
