@@ -58,10 +58,15 @@
   (atom nil))
 
 (defn plan
-  "Where a publish on `topic` has to go besides here, or nil."
-  [topic]
-  (when-let [f @planner]
-    (f topic)))
+  "Where a publish on `topic` has to go besides here, or nil. With
+   `{:away-only? true}`, only whom to queue it for — :queue and :leaving —
+   for a copy that came from another broker and goes no further."
+  ([topic]
+   (when-let [f @planner]
+     (f topic)))
+  ([topic opts]
+   (when-let [f @planner]
+     (f topic opts))))
 
 ;; ── shared groups on the wire ────────────────────────────────────────────
 
@@ -80,6 +85,18 @@
    another. That broker's ordinary subscribers had their own copy already,
    when the message was first forwarded, and must not have it twice."
   "mqttkat-groups-only")
+
+(def msg-key-property
+  "The user property carrying a forwarded publish's message key: the name
+   it was given where it entered the cluster, under which every broker that
+   queues it queues it, so that it is queued once — see
+   mqttkat.handlers/new-message-key."
+  "mqttkat-msg")
+
+(defn msg-key
+  "The message key a bridged publish's `properties` carry, or nil."
+  [properties]
+  (some (fn [[k v]] (when (= msg-key-property k) v)) (:user-properties properties)))
 
 (defn groups-only?
   "Whether a bridged publish's `properties` say it is for its groups only."
@@ -109,7 +126,7 @@
   [properties]
   (let [ups    (:user-properties properties)
         shares (into #{} (keep (fn [[k v]] (when (= share-property k) (string->group-key v)))) ups)
-        rest   (remove (fn [[k _]] (or (= share-property k) (= groups-only-property k))) ups)]
+        rest   (remove (fn [[k _]] (contains? #{share-property groups-only-property msg-key-property} k)) ups)]
     [shares (if (seq rest)
               (assoc properties :user-properties (vec rest))
               (dissoc properties :user-properties))]))
@@ -465,7 +482,7 @@
    name. Version 5 on the wire whatever the publisher spoke, so the
    properties travel; the receiving broker strips them for its 3.1.1
    subscribers as it does for any publish."
-  [my-id peer-id peer group-keys topic {:keys [qos payload properties publisher on-lost groups-only?]}]
+  [my-id peer-id peer group-keys topic {:keys [qos payload properties publisher on-lost groups-only? msg-key]}]
   (let [qos (long (or qos 0))]
     (enqueue! my-id peer-id peer qos
               {:packet-type      :PUBLISH
@@ -477,7 +494,9 @@
                :duplicate?       false
                :properties       (cond-> (with-shares (or properties {}) group-keys)
                                    groups-only? (update :user-properties (fnil conj [])
-                                                        [groups-only-property "1"]))}
+                                                        [groups-only-property "1"])
+                                   msg-key      (update :user-properties (fnil conj [])
+                                                        [msg-key-property msg-key]))}
               publisher
               ;; Only a message the peer acknowledges can be lost: at QoS 0
               ;; there is nothing to hand back.

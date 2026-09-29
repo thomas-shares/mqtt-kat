@@ -287,16 +287,19 @@
 
 (defn ->enqueue
   "The record queuing `message` for `client-id` while it is away. The key
-   orders the queue and names the message: the time first, so a resume gets
-   them back in the order they were queued, then enough randomness that two
-   queued in the same millisecond, here or on another broker, are two."
-  [client-id message]
-  (let [now (System/currentTimeMillis)]
-    {:event     :enqueue
-     :client-id client-id
-     :key       (format "%013d-%s" now (subs (str (java.util.UUID/randomUUID)) 0 8))
-     :message   (assoc message :queued-at now)
-     :at        now}))
+   orders the queue and names the message: `key`, the name the message was
+   given where it entered the cluster, so that every broker queuing it for
+   the client queues the one entry — or a new name when it has none. Either
+   way the time comes first, so a resume gets them back in order; see
+   mqttkat.handlers/new-message-key."
+  ([client-id message] (->enqueue client-id message nil))
+  ([client-id message key]
+   (let [now (System/currentTimeMillis)]
+     {:event     :enqueue
+      :client-id client-id
+      :key       (or key (handlers/new-message-key))
+      :message   (assoc message :queued-at now)
+      :at        now})))
 
 (defn ->dequeue
   "The record for messages taken off `client-id`'s queue, by key."
@@ -657,6 +660,8 @@
                {})
        (mapv (fn [[client-id qos]] {:client-id client-id :qos qos}))))
 
+(declare plan-matches)
+
 (defn plan
   "Where a publish on `topic` goes besides this broker — see
    mqttkat.bridge/planner for the shape — or nil when nowhere.
@@ -667,9 +672,29 @@
    served as usual, otherwise it is skipped here and the chosen broker is
    told to serve it, and the message is sent there whether or not it holds
    anything else. Every other broker that gets a copy for its ordinary
-   subscribers is told nothing about the group, and serves none of it."
-  [{:keys [trie]} topic]
-  (let [matches (trie/sieve-dollar topic (trie/trie-matching-vals @trie topic))
+   subscribers is told nothing about the group, and serves none of it.
+
+   With :away-only?, for a copy another broker sent here, only :queue and
+   :leaving: the copy goes no further, and its groups were chosen there."
+  ([conn topic] (plan conn topic nil))
+  ([{:keys [trie]} topic {:keys [away-only?]}]
+   (let [matches (trie/sieve-dollar topic (trie/trie-matching-vals @trie topic))]
+     (if away-only?
+       ;; Only the clients this broker's copy has here, or last had here:
+       ;; the sender's copy may not know yet that they left. Those it has
+       ;; away from another broker, the sender had away too, and queued.
+       (let [here?   #(= broker-id (:broker-id %))
+             queue   (per-client (filter #(and (false? (:connected? %)) (here? %)) matches))
+             leaving (per-client (filter #(and (true? (:connected? %)) (here? %)) matches))]
+         (when (or (seq queue) (seq leaving))
+           {:queue queue :leaving leaving}))
+       (plan-matches matches)))))
+
+(defn- plan-matches
+  "plan's work for a publish from this broker's own clients, on the
+   subscriptions `matches`."
+  [matches]
+  (let [
         ;; A subscription whose client is away is nobody's to deliver: it is
         ;; queued, here, whichever broker parked it — see :queue below. Unless
         ;; the client is live on this very broker: the local trie delivers to
@@ -728,7 +753,7 @@
    carried out at the addresses the registry has. A broker the registry
    does not know yet gets nothing — its subscriptions arrived before its
    announcement, which the next publish will find."
-  [{:keys [brokers] :as conn} plan topic {:keys [qos payload properties] :as msg}]
+  [{:keys [brokers] :as conn} plan topic {:keys [qos payload properties msg-key] :as msg}]
   (let [qos       (long (or qos 0))
         queue-for (fn [clients if-kept?]
                     ;; §4.1 keeps QoS 1 and 2 for a session that is away;
@@ -738,10 +763,13 @@
                     ;; the subscription, as it would be on delivery.
                     (doseq [{:keys [client-id] sub-qos :qos} clients
                             :when (pos? (long sub-qos))]
+                      ;; Under the message's key, so that a client queued
+                      ;; for by more than one broker has it once.
                       (record! conn (cond-> (->enqueue client-id {:topic      topic
                                                                   :payload    payload
                                                                   :properties properties
-                                                                  :qos        (min qos (long sub-qos))})
+                                                                  :qos        (min qos (long sub-qos))}
+                                                       msg-key)
                                       if-kept? (assoc :if-kept? true)))))]
     (letfn [(reroute! [group-keys tried]
               ;; The shared groups a lost copy was to serve, served by another
@@ -1040,14 +1068,14 @@
   (reset! *connection* conn)
   (reset! listing {:listed? false :dropped? false})
   (events/listen! ::rama on-broker-event)
-  (reset! bridge/planner (fn [topic] (plan conn topic)))
+  (reset! bridge/planner (fn ([topic] (plan conn topic)) ([topic opts] (plan conn topic opts))))
   (reset! bridge/forwarder (fn [plan topic msg] (forward-publish! conn plan topic msg)))
   (reset! retained/sink (fn [topic message] (record! conn (->retain topic message))))
   (reset! handlers/redirector (fn [client-id] (redirect-target client-id)))
   (reset! handlers/session-source
           {:my-broker-id broker-id
            :resume       (fn [client-id] (resume conn client-id))
-           :enqueue!     (fn [client-id msg] (record! conn (->enqueue client-id msg)))
+           :enqueue!     (fn [client-id msg key] (record! conn (->enqueue client-id msg key)))
            :dequeue!     (fn [client-id keys] (record! conn (->dequeue client-id keys)))
            :takeover!    (fn [peer-id client-id connect-id]
                            (if-let [peer (get @(:brokers conn) peer-id)]
