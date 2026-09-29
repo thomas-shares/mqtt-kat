@@ -39,6 +39,39 @@ normalise, so the bump is a plain macro around `<<atomic`. On a cluster that
 already holds data, an update to this module starts every count at zero:
 they are right about what changes after, not about what was there.
 
+### A stopped broker forwarded nothing while it stopped
+
+The three-broker chaos run lost messages for clean sessions next to a
+`:stop-broker`. On SIGTERM the shutdown hook left the cluster first, which
+also removes the bridge's planner and forwarder, while the MQTT server was
+still listening. For as long as the rest of the shutdown took, the broker
+acknowledged publishes and delivered them to its own clients only. Every
+subscriber on another broker missed them, and a clean one stayed connected
+long past the acknowledgement, so the check rightly counted them as lost.
+
+The hook now runs `stop!`: close the listener and the clients, then leave
+the cluster. `stop!` had its own bug: it called the server's stop function as
+the test of a `when`, which returns nil, so the rest of it never ran. With
+only `:stop-broker` for chaos, a minute on three brokers went from 809 lost
+to none.
+
+Two more gaps turned up in the same run, both when a session moves between
+brokers, and neither is fixed yet:
+
+- **A copy forwarded to the broker a client just left is lost.** The
+  publisher's broker forwards it because its view of the cluster still has
+  the client there, so it queues nothing; the receiving broker acknowledges
+  it and, attached to Rama, queues nothing either. Queuing on the receiving
+  broker for its clients the cluster still has connected there cut the loss
+  but added QoS 2 duplicates, since the two brokers' views change at
+  slightly different moments. The brokers have to agree on who queues.
+- **QoS 2 is delivered twice after a quick reconnect elsewhere.** The old
+  broker hands the session's in-flight messages to the cluster's queue as the
+  connection goes, and the new broker reads that queue on the resume. When
+  the client is back fast, the read can come first. What was handed over then
+  sits on the queue and is delivered again, under a new packet identifier, at
+  the next resume.
+
 ### The chaos check took longer than the run
 
 After chaos/long.edn drained, the runner seemed to hang. It was checking, with

@@ -68,12 +68,22 @@
    (h/start-retained-sweep!)
    @*server*))
 
-(defn stop! []
-  (when (@*server*)
+(defn stop!
+  "Stop taking clients, then let go of the cluster: the order matters. A
+   broker detached from Rama while still listening acknowledged publishes
+   and forwarded them to no other broker, which lost them for every
+   subscriber elsewhere (the chaos run's :stop-broker). Closing the clients
+   first also parks their persistent sessions while the cluster can still
+   be told."
+  []
+  (when-let [stop-server @*server*]
     (log/info "Server stopping...")
     ;;(prof/stop {})
     (at/stop-and-reset-pool! h/my-pool :strategy :kill)
-    (alter-meta! *server* #(assoc % :timeout 1000))
+    ;; Called for its effect: it returns nil, which is how this used to be
+    ;; the test of a `when` whose body, the Rama disconnect included, never
+    ;; ran.
+    (stop-server :timeout 1000)
     (reset! *server* nil)
     ;; Nothing to do unless -main opened one.
     (rama/disconnect!)))
@@ -104,7 +114,10 @@
     ;; and an announcement left behind has the others forwarding to a broker
     ;; that is gone until something else notices.
     (rama/register! port)
-    (.addShutdownHook (Runtime/getRuntime) (Thread. ^Runnable rama/disconnect!))
+    ;; stop!, not just the Rama disconnect: a SIGTERM that detached from the
+    ;; cluster and left the clients connected had them publishing into a
+    ;; broker that forwarded nothing.
+    (.addShutdownHook (Runtime/getRuntime) (Thread. ^Runnable stop!))
     ;; Started here rather than in start!, so the test suite's broker does not
     ;; spend its life publishing retained $SYS messages into the state the
     ;; tests are asserting about. Anything that wants them calls sys/start!.
