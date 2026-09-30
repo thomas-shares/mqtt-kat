@@ -193,8 +193,20 @@
        :heap          (- (.totalMemory rt) (.freeMemory rt))
        :heap-max      (.maxMemory rt)
        :cpu-nanos     (cpu-nanos)
-       :uptime        (uptime-seconds)}
+       :uptime        (uptime-seconds)
+       :cores         cores
+       ;; What the notes beside the two lists say, carried in the reading
+       ;; rather than looked up by `fields`: another broker's reading comes
+       ;; from Rama, and this broker's TopicStats says nothing about it.
+       :client-total     (count (filter (comp :client-id val) @h/*clients*))
+       :tracked-topics   (TopicStats/size)
+       :topics-truncated (TopicStats/isTruncated)}
      (retained-count))))
+
+(def console-port
+  "The port this broker's console listens on, once it does: reported with
+   its figures, so the other brokers' consoles can link to this one."
+  (atom nil))
 
 ;; ── rates ─────────────────────────────────────────────────────────────
 
@@ -423,19 +435,19 @@
       ;; says more about the host than about the broker.
       "m-mem"          (if-let [c (:cpu reading)] (percent-str c) "—")
       "m-mem-unit"     (bytes-str (:heap reading))
-      "m-mem-note"     (str (bytes-str (:heap-max reading)) " heap · " cores " cores")
+      "m-mem-note"     (str (bytes-str (:heap-max reading)) " heap · " (:cores reading cores) " cores")
 
       "active-topics-note"
-      (let [n (TopicStats/size)]
+      (let [n (long (:tracked-topics reading 0))]
         (cond
-          (zero? n)               ""
-          (TopicStats/isTruncated) (str "busiest " active-topic-limit " of " (commas n) "+ tracked")
-          :else                   (str "busiest " (min active-topic-limit n) " of " (commas n))))
+          (zero? n)                   ""
+          (:topics-truncated reading) (str "busiest " active-topic-limit " of " (commas n) "+ tracked")
+          :else                       (str "busiest " (min active-topic-limit n) " of " (commas n))))
       "c-connected"    (commas (:clients reading))
       "c-parked"       (commas (:parked reading))
       "c-subs"         (commas (:subscriptions reading))
       "clients-note"
-      (let [{:keys [total]} (client-rows)]
+      (let [total (long (:client-total reading 0))]
         (cond
           (zero? total)            ""
           (> total client-limit)   (str "first " client-limit " of " (commas total))
@@ -468,7 +480,8 @@
      :heap-max      (:heap-max reading)
      :cpu           (:cpu reading)
      :uptime        (:uptime reading)
-     :version       sys/broker-version}))
+     :version       sys/broker-version
+     :console-port  @console-port}))
 
 (def stale-after-ms
   "A broker whose last report is older than this is shown as stale: three
@@ -477,7 +490,11 @@
 
 (defn broker-rows
   "Every broker in the cluster, as the registry every broker watches has it,
-   this one first. Empty when not attached to a cluster — the page says so."
+   this one first. Empty when not attached to a cluster — the page says so.
+
+   :console is where that broker's own console listens, when it has said:
+   the host it advertises to the other brokers, which is the one address of
+   a broker on another machine this broker knows."
   []
   (let [now (System/currentTimeMillis)]
     (->> (cluster/brokers)
@@ -486,6 +503,7 @@
                   {:id       id
                    :self     (= id cluster/broker-id)
                    :address  (str host ":" port)
+                   :console  (when-let [p (:console-port stats)] (str host ":" p))
                    :up-ms    (when at (max 0 (- now (long at))))
                    :stale    (or (nil? age) (> age stale-after-ms))
                    :age-ms   age

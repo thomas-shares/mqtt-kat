@@ -49,7 +49,14 @@
    "-Xms128m" "-Xmx4G" "-Djdk.attach.allowAttachSelf" "-XX:+UnlockDiagnosticVMOptions" "-XX:+DebugNonSafepoints"
    ;; Rama's RocksDB loads a native library; on 21 the JVM warns about it on
    ;; every start unless told these are expected.
-   "--add-opens" "java.base/java.lang=ALL-UNNAMED" "--enable-native-access=ALL-UNNAMED"]
+   "--add-opens" "java.base/java.lang=ALL-UNNAMED" "--enable-native-access=ALL-UNNAMED"
+   ;; Rama parses the module's dataflow when mqttkat.rama.module is loaded,
+   ;; recursively, and a test namespace can reach it through a long chain of
+   ;; requires, each one more frames on the stack. The module outgrew the
+   ;; default 1 MB there: `lein test` died with a StackOverflowError in
+   ;; rpl.rama.util.parse before running anything. The launcher runs main
+   ;; on a thread of this size, so this is the stack the loading happens on.
+   "-Xss4m"]
 
   ;; --release 21, not -source/-target: it pins the platform API too, so javac
   ;; can prove nothing newer leaks in (and stops warning that it cannot). 21 is

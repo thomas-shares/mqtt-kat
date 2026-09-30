@@ -2,6 +2,47 @@
 
 In this file will go my thoughts and ramblings about this project and what I have done and what I might do next.
 
+## 20260930
+
+### One console for the whole cluster
+
+The console was one broker's: its overview, topics and clients were read
+from that JVM's atoms, and only the Brokers page knew there were others.
+With brokers on different machines, a console can't read another broker's
+memory, so each broker now reports what its own console shows to Rama
+every five seconds, next to the figures it already put in the registry:
+
+- `$$broker-detail`, broker id -> its latest reading, busiest topics, first
+  fifty clients and recent events. A plain value, read whole.
+- `$$broker-history`, broker id -> millis -> chart point, subindexed. The
+  report carries the one-second points taken since the last one, and the
+  topology drops points older than half an hour as new ones come in.
+
+Both are only written for the announced run, like the stats, and both go
+when the broker withdraws or is forgotten. They're kept out of the registry
+on purpose, because every broker proxies the registry and it should stay
+small. A console reads them only while someone is looking, at most once a
+second.
+
+The overview, topics and clients pages now add the brokers up. Clients,
+heap, cores and rates are summed. Retained counts are not, because every
+broker holds the cluster's retained messages. A client is shown on the
+broker it's connected to. The cluster's chart is summed a second at a time
+and ends seven seconds ago, because a report comes every five seconds and
+a second that not every broker has reported yet would show as a dip. A
+broker that skips a second on its own clock has its last point carried
+forward for a couple of seconds. The broker serving the page always uses
+its own live figures, not its copy in Rama. With no cluster there is one
+broker, and every page reads as it did before.
+
+`/brokers/<id>` is one broker's page: the overview's metrics, charts,
+counters and events, plus its clients and topics, all from Rama. It also
+links to that broker's own console at the host it advertises.
+
+Message rates added across brokers count a message forwarded from one
+broker to another once on each, because the receiving broker counts the
+bridged PUBLISH as inbound. I haven't separated those yet.
+
 ## 20260929
 
 ### Chaos clients go where the brokers send them

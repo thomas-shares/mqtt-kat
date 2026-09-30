@@ -4,6 +4,7 @@
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [mqttkat.client :as client]
+            [mqttkat.rama.cluster :as rama]
             [mqttkat.web.console :as console]
             [mqttkat.events :as events]
             [mqttkat.test-util :as tu]
@@ -16,11 +17,14 @@
 
 (use-fixtures :once tu/broker-fixture)
 
-(defn- console-markup
-  "Every page that is kept live, as one string."
+(defn- live-pages
+  "Every page that is kept live, with the page its socket says it is."
   []
-  (str (console/overview-page) (console/topics-page) (console/clients-page)
-       (console/rama-page)))
+  [[:overview (console/overview-page)]
+   [:topics (console/topics-page)]
+   [:clients (console/clients-page)]
+   [:rama (console/rama-page)]
+   [[:broker rama/broker-id] (console/broker-page rama/broker-id)]])
 
 (defn- listener [^LinkedBlockingQueue received]
   (reify WebSocket$Listener
@@ -149,30 +153,30 @@
     ;; browser assigns it. An id in the markup with no field behind it is a
     ;; reading frozen at page load, which looks live and is not — the failure
     ;; this is here to catch, because nothing else would.
-    (let [fields (merge (state/fields (state/current)) (state/rama-fields))
-          markup (str (console-markup))
-          ;; Only the ids that are readings. The charts and their wrappers are
-          ;; addressed by id too, and are drawn rather than assigned.
-          ids    (->> (re-seq #"id=\"([^\"]+)\"" markup)
-                      (map second)
-                      (remove #(or (str/starts-with? % "chart")
-                                   (str/starts-with? % "spark")
-                                   (str/starts-with? % "axis")
-                                   (str/starts-with? % "grad")
-                                   ;; Containers the browser rebuilds wholesale
-                                   ;; rather than assigns into, like the event
-                                   ;; list. Their contents are live; the node
-                                   ;; itself is only somewhere to put them.
-                                   (contains? #{"event-list"
-                                                "active-topics"
-                                                "active-topics-empty"
-                                                "client-list"
-                                                "client-list-empty"}
-                                              %))))]
-      (is (seq ids) "the page should render ids at all")
+    (doseq [[page markup] (live-pages)
+            :let [fields (ws/page-fields page)
+                  ;; Only the ids that are readings. The charts and their wrappers are
+                  ;; addressed by id too, and are drawn rather than assigned.
+                  ids    (->> (re-seq #"id=\"([^\"]+)\"" markup)
+                              (map second)
+                              (remove #(or (str/starts-with? % "chart")
+                                           (str/starts-with? % "spark")
+                                           (str/starts-with? % "axis")
+                                           (str/starts-with? % "grad")
+                                           ;; Containers the browser rebuilds wholesale
+                                           ;; rather than assigns into, like the event
+                                           ;; list. Their contents are live; the node
+                                           ;; itself is only somewhere to put them.
+                                           (contains? #{"event-list"
+                                                        "active-topics"
+                                                        "active-topics-empty"
+                                                        "client-list"
+                                                        "client-list-empty"}
+                                                      %))))]]
+      (is (seq ids) (str page " should render ids at all"))
       (doseq [id ids]
         (is (contains? fields id)
-            (str "the page renders #" id " but nothing keeps it up to date"))))))
+            (str page " renders #" id " but nothing keeps it up to date"))))))
 
 (deftest events-reach-listeners-and-survive-a-bad-one
   (testing "one listener throwing does not stop the others"

@@ -1,5 +1,11 @@
 (ns mqttkat.web.console
-  "MQTT Console — the server-rendered pages: overview and topics.
+  "MQTT Console — the server-rendered pages.
+
+   The overview, topics and clients pages are the cluster's: every broker's
+   figures added up, whichever broker serves the page. /brokers lists the
+   brokers and /brokers/<id> is one of them, wherever it runs — read from
+   what it reports to Rama. See mqttkat.web.cluster. With no cluster, the
+   cluster is this broker.
 
    The design's markup, with its sample readings replaced by the broker's own.
    Every figure is rendered from mqttkat.web.state at request time and then
@@ -16,10 +22,12 @@
             [hiccup2.core :as h]
             [hiccup.page :refer [doctype]]
             [mqttkat.handlers :as handlers]
-            [mqttkat.rama.cluster :as cluster]
+            [mqttkat.rama.cluster :as rama]
             [mqttkat.s :as s]
             [mqttkat.sys :as sys]
-            [mqttkat.web.state :as state]))
+            [mqttkat.web.cluster :as cluster]
+            [mqttkat.web.state :as state])
+  (:import [java.net URLEncoder]))
 
 ;; ── icons (Lucide, stroked on currentColor) ───────────────────────────
 
@@ -149,6 +157,25 @@
         [:div.side-foot-sub.num {:id "uptime-foot"} (fields "uptime-foot")]
         [:div.live [:div.live-dot] [:div.live-text "Live"]]))
 
+(defn broker-href
+  "Where broker `id`'s page is. Encoded as a path segment: an id is
+   whatever the broker was started with."
+  [id]
+  (str "/brokers/" (str/replace (URLEncoder/encode (str id) "UTF-8") "+" "%20")))
+
+(defn- broker-link [id]
+  [:a.cell-link {:href (broker-href id)} id])
+
+(defn- cluster-note [fields]
+  [:div.page-stamp.num {:id "cluster-note"} (fields "cluster-note")])
+
+(defn- page-view
+  "What the page for `page` shows, with the other brokers' reports read
+   first so the page is as fresh as the socket that follows it."
+  [page]
+  (cluster/refresh!)
+  (cluster/page-view page))
+
 ;; ── charts ────────────────────────────────────────────────────────────
 
 (defn- sparkline
@@ -210,66 +237,78 @@
    (sparkline {:id spark :accent accent})
    [:div.metric-note {:id (str id "-note")} (fields (str id "-note"))]])
 
+(defn- overview-body
+  "The metric row, the charts, the counters and the events: the overview's,
+   for the cluster, and a broker page's, for one broker."
+  [fields]
+  (list
+   [:div.metrics (for [m headline-metrics] (metric fields m))]
+
+   [:div.panels
+    [:div.panel.panel--ruled
+     [:div.panel-head
+      [:h2.panel-title "Message throughput"]
+      [:div.chart-scale.num {:id "chart-throughput-peak"}]]
+     [:div.panel-body
+      (chart {:id "chart-throughput" :height 220 :variant "chart--tall" :series ["out" "in"]})
+      (axis "axis-throughput")]
+     [:div.panel-body.panel-body--split
+      [:div.panel-head
+       [:h2.panel-title "Connected clients"]
+       [:div.chart-scale.num {:id "chart-clients-peak"}]]
+      (chart {:id "chart-clients" :height 120 :variant "chart--short" :series ["out"]})
+      (axis "axis-clients")]]
+
+    [:div.panel
+     [:div.panel-head [:h2.panel-title "Counters"]]
+     [:div.table-wrap
+      [:table.table.table--fixed
+       ;; The number columns are pinned so they cannot be re-measured as the
+       ;; figures change; the label column takes whatever is left. Without
+       ;; this the whole column shifts every time a counter gains a digit,
+       ;; once a second, which is movement that reads as data.
+       [:colgroup [:col] [:col.col-value] [:col.col-rate]]
+       [:thead [:tr [:th "Counter"] [:th.cell-right "Value"] [:th.cell-right "Rate"]]]
+       [:tbody
+        (for [{:keys [id name rate]} state/counter-rows]
+          [:tr [:td name]
+           [:td.cell-right.cell-strong.num {:id (str "c-" id)} (fields (str "c-" id))]
+           (if (= :none rate)
+             [:td.cell-right.cell-dim "—"]
+             [:td.cell-right.cell-dim.num {:id (str "c-" id "-rate")}
+              (fields (str "c-" id "-rate"))])])]]]
+     [:div.events
+      [:div.label "Recent events"]
+      [:div.event-list {:id "event-list"}
+       [:div.event-empty "Nothing yet — connects and disconnects appear here."]]]]]))
+
+(defn- chart-tools
+  "The chart window picker and legend, beside a page's stamp."
+  []
+  (list
+   ;; Filled in by the browser from the retention the server
+   ;; reports, so the options match what this broker actually
+   ;; keeps. Empty until then rather than guessed at here — a
+   ;; server-rendered "2m" that the page then replaced would be
+   ;; one flicker on every load.
+   [:div.chart-window {:id "chart-window" :role "group"}]
+   [:div.legend
+    [:div.legend-item [:div.legend-key] "Inbound"]
+    [:div.legend-item [:div.legend-key.legend-key--out] "Outbound"]]))
+
 (defn overview-page []
-  (let [now    (state/current)
-        fields (state/fields now)]
+  (let [fields (:fields (page-view :overview))]
     (layout
      {:title "Overview — MQTT Console" :active :overview :sidebar-foot (broker-foot fields)}
      [:div.main
       (page-head
-       {:eyebrow "Broker health"
+       {:eyebrow "Cluster health"
         :title "Overview"
         :tools (list
+                (cluster-note fields)
                 [:div.page-stamp.num {:id "stamp"} (fields "stamp")]
-                ;; Filled in by the browser from the retention the server
-                ;; reports, so the options match what this broker actually
-                ;; keeps. Empty until then rather than guessed at here — a
-                ;; server-rendered "2m" that the page then replaced would be
-                ;; one flicker on every load.
-                [:div.chart-window {:id "chart-window" :role "group"}]
-                [:div.legend
-                 [:div.legend-item [:div.legend-key] "Inbound"]
-                 [:div.legend-item [:div.legend-key.legend-key--out] "Outbound"]])})
-
-      [:div.metrics (for [m headline-metrics] (metric fields m))]
-
-      [:div.panels
-       [:div.panel.panel--ruled
-        [:div.panel-head
-         [:h2.panel-title "Message throughput"]
-         [:div.chart-scale.num {:id "chart-throughput-peak"}]]
-        [:div.panel-body
-         (chart {:id "chart-throughput" :height 220 :variant "chart--tall" :series ["out" "in"]})
-         (axis "axis-throughput")]
-        [:div.panel-body.panel-body--split
-         [:div.panel-head
-          [:h2.panel-title "Connected clients"]
-          [:div.chart-scale.num {:id "chart-clients-peak"}]]
-         (chart {:id "chart-clients" :height 120 :variant "chart--short" :series ["out"]})
-         (axis "axis-clients")]]
-
-       [:div.panel
-        [:div.panel-head [:h2.panel-title "Broker counters"]]
-        [:div.table-wrap
-         [:table.table.table--fixed
-          ;; The number columns are pinned so they cannot be re-measured as the
-          ;; figures change; the label column takes whatever is left. Without
-          ;; this the whole column shifts every time a counter gains a digit,
-          ;; once a second, which is movement that reads as data.
-          [:colgroup [:col] [:col.col-value] [:col.col-rate]]
-          [:thead [:tr [:th "Counter"] [:th.cell-right "Value"] [:th.cell-right "Rate"]]]
-          [:tbody
-           (for [{:keys [id name rate]} state/counter-rows]
-             [:tr [:td name]
-              [:td.cell-right.cell-strong.num {:id (str "c-" id)} (fields (str "c-" id))]
-              (if (= :none rate)
-                [:td.cell-right.cell-dim "—"]
-                [:td.cell-right.cell-dim.num {:id (str "c-" id "-rate")}
-                 (fields (str "c-" id "-rate"))])])]]]
-        [:div.events
-         [:div.label "Recent events"]
-         [:div.event-list {:id "event-list"}
-          [:div.event-empty "Nothing yet — connects and disconnects appear here."]]]]]])))
+                (chart-tools))})
+      (overview-body fields)])))
 
 ;; ── topics ────────────────────────────────────────────────────────────
 
@@ -341,9 +380,13 @@
     (< ms 3600000)   (str (quot ms 60000) "m")
     :else            (str (quot ms 3600000) "h")))
 
-(defn- client-row [{:keys [id connected protocol clean subscriptions inflight queued age-ms]}]
+(defn- client-row
+  "One client. With `with-broker?`, which broker it is on: the cluster's
+   list has every broker's clients, a broker's page only its own."
+  [with-broker? {:keys [id broker connected protocol clean subscriptions inflight queued age-ms]}]
   [:tr
    [:td.cell-topic {:title id} id]
+   (when with-broker? [:td.cell-topic (if broker (broker-link broker) "—")])
    [:td [:span {:class (str "pill" (when-not connected " pill--dim"))}
          (if connected "connected" "parked")]]
    [:td.cell-dim protocol]
@@ -353,19 +396,35 @@
    [:td.cell-right.num (state/commas queued)]
    [:td.cell-right.num.cell-dim (idle-str age-ms)]])
 
+(defn- client-table
+  "The client list, rebuilt by the browser each second — see console.js.
+   data-with-broker tells it whether rows carry a broker column."
+  [rows with-broker?]
+  [:div.table-wrap
+   [:table.table
+    [:thead
+     [:tr [:th {:style "width:24%"} "Client"] (when with-broker? [:th {:style "width:14%"} "Broker"])
+      [:th "State"] [:th "MQTT"] [:th "Session"]
+      [:th.cell-right "Subs"] [:th.cell-right "In flight"]
+      [:th.cell-right "Queued"] [:th.cell-right "Connected"]]]
+    [:tbody {:id "client-list" :data-with-broker (str (boolean with-broker?))}
+     (if (empty? rows)
+       [:tr {:id "client-list-empty"}
+        [:td {:colspan (if with-broker? 9 8)} [:div.event-empty "No clients connected."]]]
+       (map (partial client-row with-broker?) rows))]]])
+
 (defn clients-page []
-  (let [now     (state/current)
-        fields  (state/fields now)
-        {:keys [rows total]} (state/client-rows)]
+  (let [{:keys [fields clients]} (page-view :clients)]
     (layout
      {:title "Clients — MQTT Console"
       :active :clients
       :sidebar-foot (broker-foot fields)}
      [:div.main
       (page-head
-       {:eyebrow "Connections"
+       {:eyebrow "Connections, every broker"
         :title "Clients"
-        :tools [:div.page-stamp.num {:id "stamp"} (fields "stamp")]})
+        :tools (list (cluster-note fields)
+                     [:div.page-stamp.num {:id "stamp"} (fields "stamp")])})
 
       [:div.stat-row
        [:div.stat [:div.label "Connected"] [:div.stat-value.num {:id "c-connected"} (fields "c-connected")]]
@@ -376,18 +435,7 @@
        [:div.panel-head
         [:h2.panel-title "Clients"]
         [:div.chart-scale.num {:id "clients-note"} (fields "clients-note")]]
-       [:div.table-wrap
-        [:table.table
-         [:thead
-          [:tr [:th {:style "width:26%"} "Client"] [:th "State"] [:th "MQTT"] [:th "Session"]
-           [:th.cell-right "Subs"] [:th.cell-right "In flight"]
-           [:th.cell-right "Queued"] [:th.cell-right "Connected"]]]
-         ;; Rebuilt by the browser each second — see console.js.
-         [:tbody {:id "client-list"}
-          (if (empty? rows)
-            [:tr {:id "client-list-empty"}
-             [:td {:colspan 8} [:div.event-empty "No clients connected."]]]
-            (map client-row rows))]]]]])))
+       (client-table clients true)]])))
 
 (defn- broker-row
   "One broker as the cluster's registry has it. The same shape console.js
@@ -396,7 +444,7 @@
   (let [{:keys [clients parked subscriptions in out queued inflight heap heap-max cpu version]
          :or   {clients 0 parked 0 subscriptions 0 in 0 out 0 queued 0 inflight 0}} stats]
     [:tr
-     [:td.cell-topic {:title id} id (when self [:span.cell-dim " (this one)"])]
+     [:td.cell-topic {:title id} (broker-link id) (when self [:span.cell-dim " (this one)"])]
      [:td [:span {:class (str "pill" (when stale " pill--dim"))} (if stale "stale" "up")]]
      [:td.cell-dim address]
      [:td.cell-dim (or version "—")]
@@ -445,8 +493,7 @@
       [:div [:button.btn.btn-primary {:type "submit" :disabled (not attached?)} "Apply"]]]]))
 
 (defn brokers-page []
-  (let [now    (state/current)
-        fields (state/fields now)
+  (let [fields (:fields (page-view :brokers))
         rows   (state/broker-rows)]
     (layout
      {:title "Brokers — MQTT Console"
@@ -466,12 +513,12 @@
         [:div.stat-value.num {:id "b-rate"}
          (state/commas (reduce + 0 (keep #(some-> (:stats %) (as-> st (+ (:in st 0) (:out st 0)))) rows)))]]]
 
-      (redirect-form (cluster/attached?) (cluster/redirect-policy) (cluster/redirect-via))
+      (redirect-form (rama/attached?) (rama/redirect-policy) (rama/redirect-via))
 
       [:div.panel.panel--flush
        [:div.panel-head
         [:h2.panel-title "Brokers"]
-        [:div.chart-scale.num "as the cluster's registry has them · reported every 5 s"]]
+        [:div.chart-scale.num "as the cluster's registry has them · reported every 5 s · open one for its details"]]
        [:div.table-wrap
         [:table.table
          [:thead
@@ -488,6 +535,77 @@
                "Not attached to a Rama cluster: start with -Dmqttkat.rama=in-process or external."]]]
             (map broker-row rows))]]]]])))
 
+;; Built with the topics page, further down, where the table is used first.
+(declare active-topics-table)
+
+(defn- not-a-broker-page [id]
+  (layout
+   {:title "No such broker — MQTT Console"
+    :active :brokers
+    :sidebar-foot (broker-foot (:fields (cluster/page-view :brokers)))}
+   [:div.main
+    (page-head {:eyebrow [:a.cell-link {:href "/brokers"} "All brokers"]
+                :title "No such broker"})
+    [:div.panel
+     [:div.panel-head
+      [:div.event-empty (str "The cluster has no broker called " id
+                             " — it may have left. The brokers page lists those it has.")]]]]))
+
+(defn broker-page
+  "One broker, wherever it runs: what its own console shows, as it last
+   reported it to Rama — or live, for the broker serving the page. nil
+   when the cluster has no broker `id`."
+  [id]
+  (let [{:keys [fields topics clients view]} (page-view [:broker id])]
+    (when view
+      (let [{:keys [self address console stats]} view]
+        (layout
+         {:title (str id " — MQTT Console")
+          :active :brokers
+          :sidebar-foot (broker-foot fields)}
+         [:div.main.main--broker
+          (page-head
+           {:eyebrow [:a.cell-link {:href "/brokers"} "Brokers"]
+            :title id
+            :tools (list [:div.page-stamp.num {:id "stamp"} (fields "stamp")]
+                         (chart-tools))})
+
+          [:div.stat-row.stat-row--five
+           [:div.stat [:div.label "State"] [:div.stat-value.stat-value--text {:id "bd-state"} (fields "bd-state")]]
+           [:div.stat [:div.label "MQTT address"]
+            [:div.stat-value.stat-value--text (or address (mqtt-address))]]
+           [:div.stat [:div.label "Its own console"]
+            [:div.stat-value.stat-value--text
+             (cond
+               self    "this one"
+               console [:a.cell-link {:href (str "http://" console "/")} console]
+               :else   "—")]]
+           [:div.stat [:div.label "Version"]
+            [:div.stat-value.stat-value--text (or (:version stats) (when self sys/broker-version) "—")]]
+           [:div.stat [:div.label "Reported"] [:div.stat-value.stat-value--text {:id "bd-reported"} (fields "bd-reported")]]]
+
+          (overview-body fields)
+
+          [:div.panels
+           [:div.panel.panel--ruled
+            [:div.panel-head
+             [:h2.panel-title "Clients"]
+             [:div.chart-scale.num {:id "clients-note"} (fields "clients-note")]]
+            (client-table clients false)]
+           [:div.panel
+            [:div.panel-head
+             [:h2.panel-title "Active topics"]
+             [:div.chart-scale.num {:id "active-topics-note"} (fields "active-topics-note")]]
+            (active-topics-table topics)]]])))))
+
+(defn broker-or-missing-page
+  "The broker page, or a page saying there is no such broker, and the
+   status to serve it with."
+  [id]
+  (if-let [page (broker-page id)]
+    [200 page]
+    [404 (not-a-broker-page id)]))
+
 (defn rama-page
   "What the Rama module holds and has been through, as its own counts have
    it: `$$counts`, gathered once a second into `$$rama-stats`, pushed to
@@ -495,8 +613,7 @@
    this broker's view of the cluster — the brokers page is that — but the
    module's."
   []
-  (let [now    (state/current)
-        fields (merge (state/fields now) (state/rama-fields))]
+  (let [fields (:fields (page-view :rama))]
     (layout
      {:title "Rama — MQTT Console"
       :active :rama
@@ -545,9 +662,24 @@
            [:td.cell-right.num {:id "r-events"} (fields "r-events")]
            [:td]]]]]]]])))
 
+(defn- active-topics-table
+  "The busiest topics, rebuilt by the browser each second — see console.js.
+   Server-rendered first all the same, so the page is right before the
+   socket opens."
+  [topics]
+  [:div.table-wrap
+   [:table.table.table--fixed
+    [:colgroup [:col] [:col.col-value] [:col.col-rate]]
+    [:thead
+     [:tr [:th "Topic"] [:th.cell-right "Rate"] [:th.cell-right "Messages"]]]
+    [:tbody {:id "active-topics"}
+     (if (empty? topics)
+       [:tr {:id "active-topics-empty"}
+        [:td {:colspan 3} [:div.event-empty "Nothing published yet."]]]
+       (map active-topic-row topics))]]])
+
 (defn topics-page []
-  (let [now    (state/current)
-        fields (state/fields now)
+  (let [{:keys [fields topics]} (page-view :topics)
         rows   (topic-rows)]
     (layout
      {:title "Topics — MQTT Console"
@@ -555,9 +687,10 @@
       :sidebar-foot (broker-foot fields)}
      [:div.main
       (page-head
-       {:eyebrow "Topic activity"
+       {:eyebrow "Topic activity, every broker"
         :title "Topics"
-        :tools [:div.page-stamp.num {:id "stamp"} (fields "stamp")]})
+        :tools (list (cluster-note fields)
+                     [:div.page-stamp.num {:id "stamp"} (fields "stamp")])})
 
       [:div.stat-row
        ;; "Retained", not "listed": there are two tables on this page now, and
@@ -571,19 +704,7 @@
        [:div.panel-head
         [:h2.panel-title "Active topics"]
         [:div.chart-scale.num {:id "active-topics-note"} (fields "active-topics-note")]]
-       [:div.table-wrap
-        [:table.table.table--fixed
-         [:colgroup [:col] [:col.col-value] [:col.col-rate]]
-         [:thead
-          [:tr [:th "Topic"] [:th.cell-right "Rate"] [:th.cell-right "Messages"]]]
-         ;; Rebuilt by the browser each second — see console.js. Server-rendered
-         ;; first all the same, so the page is right before the socket opens.
-         [:tbody {:id "active-topics"}
-          (let [rows (:topics now)]
-            (if (empty? rows)
-              [:tr {:id "active-topics-empty"}
-               [:td {:colspan 3} [:div.event-empty "Nothing published yet."]]]
-              (map active-topic-row rows)))]]]]
+       (active-topics-table topics)]
 
       [:div.panel-head [:h2.panel-title "Retained topics"]]
       [:div.table-wrap

@@ -32,6 +32,14 @@
    seconds, and since every broker watches the registry, every broker's
    console can show every broker.
 
+   `$$broker-detail` and `$$broker-history` — what each broker's console
+   shows about it, for every other broker's console to show too: the
+   latest of its readings, its busiest topics, clients and events under
+   its id, and a second-by-second history of the figures its charts plot,
+   kept for `broker-history-millis`. Brokers can run on machines that
+   cannot see each other's memory; this is where the console on any one of
+   them reads the rest. Both go when the broker leaves the registry.
+
    `$$broker->clients` — which clients are connected on each run of each
    broker, keyed by [broker-id incarnation]: what a broker coming back needs
    to know about the run it replaced. `$$dead-runs` is the runs that have
@@ -80,7 +88,8 @@
      {:event :retain       :topic :message :at}
      {:event :unretain     :topic :at}
      {:event :broker-up    :broker-id :incarnation :host :port :at}
-     {:event :broker-stats :broker-id :incarnation :stats :at}
+     {:event :broker-stats :broker-id :incarnation :stats :at
+                           [:detail :samples]}          ; for the consoles
      {:event :broker-down  :broker-id :at}
      {:event :setting      :key :value :at}
      {:event :redirected   :client-id :to :at}
@@ -204,6 +213,20 @@
    and would otherwise be listed as stale for ever. One that is merely busy
    for a moment is a hundred reports short of this."
   600000)
+
+(def broker-history-millis
+  "How much of each broker's chart history `$$broker-history` keeps: the
+   half hour the console charts by default. Older points are dropped as
+   new ones arrive."
+  (* 30 60 1000))
+
+(defn history-cutoff
+  "The time before which a broker's history is dropped, given the samples
+   a report brings: `broker-history-millis` before the newest of them, or
+   nil when it brings none."
+  [samples]
+  (when (seq samples)
+    (- (long (reduce max (map #(long (get % :t 0)) samples))) broker-history-millis)))
 
 (def never-expires
   "0xFFFFFFFF — §3.1.2.11.2's \"do not expire\", not a very long timer."
@@ -395,6 +418,11 @@
     (declare-pstate s $$retained {Long (map-schema String Object)})
     (declare-pstate s $$brokers {String (map-schema String Object)})
     (declare-pstate s $$settings {String (map-schema String Object)})
+    ;; broker-id -> the broker's latest detail, a plain value, read whole.
+    (declare-pstate s $$broker-detail {String Object})
+    ;; broker-id -> millis -> one chart point. Subindexed: a point is one
+    ;; write, a range is one seek, and trimming is a range too.
+    (declare-pstate s $$broker-history {String (map-schema Long Object {:subindex? true})})
     (declare-pstate s $$broker->clients {Object (set-schema String {:subindex? true})})
     (declare-pstate s $$dead-runs {String (set-schema Object {:subindex? true})})
     ;; Subindexed, so a message is one write, a resume is one seek and a
@@ -457,7 +485,11 @@
           ;; sessions never parked, so never expired either.
           (local-transform> [(keypath *registry) NONE-ELEM
                              (termval (run-key *b (get *entry :incarnation)))]
-                            $$dead-runs))
+                            $$dead-runs)
+          ;; And what its console showed, which nobody will show again.
+          (|hash *b)
+          (local-transform> [(keypath *b) NONE>] $$broker-detail)
+          (local-transform> [(keypath *b) NONE>] $$broker-history))
         ;; And the runs that were replaced: a slice of each run's clients is
         ;; told :lost, on the client's own partition, which ends the
         ;; connection there unless the record already shows the client back
@@ -557,7 +589,22 @@
           (local-transform> [(keypath *registry *b)
                              (multi-path [:stats (termval (get *record :stats))]
                                          [:stats-at (termval *at)])]
-                            $$brokers))
+                            $$brokers)
+          ;; What its console shows, for the others' — on the broker's own
+          ;; partition, apart from the registry every broker proxies, which
+          ;; stays small. Each point is keyed by its time, so a report run
+          ;; twice writes the same points twice.
+          (get *record :detail :> *detail)
+          (get *record :samples [] :> *samples)
+          (history-cutoff *samples :> *cutoff)
+          (|hash *b)
+          (<<if *detail
+            (local-transform> [(keypath *b) (termval (assoc *detail :at *at))] $$broker-detail))
+          (<<if *cutoff
+            (local-transform> [(keypath *b) (sorted-map-range-to *cutoff {:max-amt 256}) MAP-VALS NONE>]
+                              $$broker-history))
+          (ops/explode *samples :> *point)
+          (local-transform> [(keypath *b (long (get *point :t))) (termval *point)] $$broker-history))
 
         (case> :broker-down)
         (get *record :broker-id :> *b)
@@ -571,6 +618,9 @@
           (local-transform> [(keypath *registry) NONE-ELEM
                              (termval (run-key *b (get *entry :incarnation)))]
                             $$dead-runs))
+        (|hash *b)
+        (local-transform> [(keypath *b) NONE>] $$broker-detail)
+        (local-transform> [(keypath *b) NONE>] $$broker-history)
 
         ;; ── the settings ───────────────────────────────────────────────
         (case> :setting)
