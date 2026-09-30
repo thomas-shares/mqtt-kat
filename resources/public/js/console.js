@@ -24,6 +24,12 @@
   var windowMs = 0;           // 0 means "everything the server has"
   var retry = 500;
 
+  // The cluster's brokers, as the overview draws them: [{id, colour, …}],
+  // and every broker's colour, id -> 0…6 or "other". Empty with no cluster,
+  // and then every chart is drawn as one broker's.
+  var members = [];
+  var palette = {};
+
   function storedWindow() {
     try { return parseInt(window.localStorage.getItem(WINDOW_KEY), 10) || 0; }
     catch (e) { return 0; }   // private windows and blocked storage
@@ -187,6 +193,75 @@
     return p.length ? p[p.length - 1] : null;
   }
 
+  // A band per broker, stacked in the overview's order, so the top edge is
+  // the cluster's total and the thickness of each band that broker's share.
+  // Drawn into a group of its own, made the first time and emptied when the
+  // cluster is one broker again.
+  function stackGroup(svg) {
+    var g = svg.querySelector("g.chart-stack");
+    if (!g) {
+      g = document.createElementNS(SVG_NS, "g");
+      g.setAttribute("class", "chart-stack");
+      svg.insertBefore(g, svg.querySelector(".chart-base"));
+    }
+    return g;
+  }
+
+  function colourClass(id) {
+    var c = palette[id];
+    return "broker-c-" + (c === undefined ? "other" : c);
+  }
+
+  function drawStack(svg, bands, max) {
+    var g = stackGroup(svg);
+    g.textContent = "";
+    if (!bands) return;
+    var b = box(svg);
+    var lower = null;
+    for (var i = 0; i < bands.length; i++) {
+      var upper = points(bands[i].values, b.w, b.h, max);
+      var top = curve(upper);
+      var bottom = lower ? curve(lower.slice().reverse()).replace(/^M/, "L")
+                         : "L" + b.w + "," + b.h + "L0," + b.h;
+      var group = document.createElementNS(SVG_NS, "g");
+      group.setAttribute("class", colourClass(bands[i].id));
+      var fill = document.createElementNS(SVG_NS, "path");
+      fill.setAttribute("class", "stack-fill");
+      fill.setAttribute("d", top ? top + bottom + "Z" : "");
+      var line = document.createElementNS(SVG_NS, "path");
+      line.setAttribute("class", "stack-line");
+      line.setAttribute("vector-effect", "non-scaling-stroke");
+      line.setAttribute("d", top);
+      group.appendChild(fill);
+      group.appendChild(line);
+      g.appendChild(group);
+      lower = upper;
+    }
+  }
+
+  // The bands, bottom up, when this page draws the cluster a broker at a
+  // time: [{id, values}], each value that broker's `of` its share of the
+  // point, the running total of those below it added. Null otherwise.
+  function bands(of) {
+    if (members.length < 2) return null;
+    var below = view.map(function () { return 0; });
+    return members.map(function (m) {
+      var values = view.map(function (s, i) {
+        var mine = s.by && s.by[m.id];
+        below[i] += mine ? of(mine) : 0;
+        return below[i];
+      });
+      return { id: m.id, values: values };
+    });
+  }
+
+  function hideSeries(svg, names) {
+    for (var i = 0; i < names.length; i++) {
+      var paths = svg.querySelectorAll("path.series-" + names[i] + "-line, path.series-" + names[i] + "-fill");
+      for (var j = 0; j < paths.length; j++) paths[j].setAttribute("d", "");
+    }
+  }
+
   // ── grid and labels ─────────────────────────────────────────────────
 
   var SVG_NS = "http://www.w3.org/2000/svg";
@@ -254,8 +329,27 @@
     el.style.top = ((point[1] / b.h) * 100).toFixed(3) + "%";
   }
 
+  function messages(p) { return (p.in || 0) + (p.out || 0); }
+
   function redrawThroughput() {
     if (!throughput) return;
+    var stack = bands(messages);
+    if (stack) {
+      // The cluster, a band per broker: its messages in and out together,
+      // as one broker's two lines a band each would be unreadable.
+      var total = stack[stack.length - 1].values;
+      var peak = Math.max.apply(null, total.concat([0]));
+      var top = rescale(throughput, peak);
+      drawGrid(throughput.wrap, throughput.svg, top, compact);
+      hideSeries(throughput.svg, ["in", "out"]);
+      drawStack(throughput.svg, stack, top);
+      place(throughput.wrap, throughput.svg, ".chart-dot--out", null);
+      place(throughput.wrap, throughput.svg, ".chart-dot--in", null);
+      if (throughput.peakEl) throughput.peakEl.textContent = "in + out · peak " + compact(peak) + " msg/s";
+      drawAxis("axis-throughput");
+      return;
+    }
+    drawStack(throughput.svg, null);
     var inn = field("in"), out = field("out");
     // One scale across both, or inbound and outbound would be drawn against
     // different axes and could not be compared by eye.
@@ -273,6 +367,20 @@
 
   function redrawClients() {
     if (!clients) return;
+    var stack = bands(function (p) { return p.clients || 0; });
+    if (stack) {
+      var total = stack[stack.length - 1].values;
+      var peak = Math.max.apply(null, total.concat([0]));
+      var top = rescale(clients, peak);
+      drawGrid(clients.wrap, clients.svg, top, compact);
+      hideSeries(clients.svg, ["out"]);
+      drawStack(clients.svg, stack, top);
+      place(clients.wrap, clients.svg, ".chart-dot--out", null);
+      if (clients.peakEl) clients.peakEl.textContent = "peak " + compact(peak);
+      drawAxis("axis-clients");
+      return;
+    }
+    drawStack(clients.svg, null);
     var c = field("clients");
     var max = rescale(clients, Math.max.apply(null, c));
     drawGrid(clients.wrap, clients.svg, max, compact);
@@ -357,6 +465,45 @@
     return '<a class="cell-link" href="' + escapeHtml(brokerHref(id)) + '">' + escapeHtml(id) + "</a>";
   }
 
+  // The swatch for broker `id`'s colour, when there is a cluster to tell
+  // brokers apart in.
+  function brokerKey(id) {
+    return palette[id] === undefined ? "" : '<span class="broker-key ' + colourClass(id) + '"></span> ';
+  }
+
+  // The brokers the overview adds up, and the legend that names each band.
+  function setMembers(list) {
+    if (!list) return;
+    members = list;
+    var strip = document.querySelector("[data-members]");
+    if (strip) {
+      var html = "";
+      for (var i = 0; i < list.length; i++) {
+        var m = list[i];
+        html += '<a class="member ' + colourClass(m.id) + (m.counted ? "" : " member--out") +
+                '" href="' + escapeHtml(brokerHref(m.id)) + '">' +
+                '<span class="member-name">' + brokerKey(m.id) + '<span class="member-id">' + escapeHtml(m.id) + "</span></span>" +
+                '<span class="member-state">' + escapeHtml(m.state) + "</span>" +
+                '<span class="member-figs num">' + escapeHtml(m.clients) + " clients · " + escapeHtml(m.rate) + "</span></a>";
+      }
+      if (strip.innerHTML !== html) strip.innerHTML = html;
+      strip.hidden = list.length < 2;
+    }
+    var legend = document.querySelector("[data-legend]");
+    if (legend) {
+      var keys = "";
+      if (list.length >= 2) {
+        for (var j = 0; j < list.length; j++) {
+          keys += '<div class="legend-item">' + brokerKey(list[j].id) + escapeHtml(list[j].id) + "</div>";
+        }
+      } else {
+        keys = '<div class="legend-item"><div class="legend-key"></div>Inbound</div>' +
+               '<div class="legend-item"><div class="legend-key legend-key--out"></div>Outbound</div>';
+      }
+      if (legend.innerHTML !== keys) legend.innerHTML = keys;
+    }
+  }
+
   function setClients(clients) {
     var body = document.getElementById("client-list");
     if (!body || !clients) return;
@@ -376,7 +523,7 @@
       // Client ids are chosen by whoever connected: untrusted text, escaped.
       html += "<tr>" +
         '<td class="cell-topic" title="' + escapeHtml(c.id) + '">' + escapeHtml(c.id) + "</td>" +
-        (withBroker ? '<td class="cell-topic">' + (c.broker ? brokerLink(c.broker) : "—") + "</td>" : "") +
+        (withBroker ? '<td class="cell-topic">' + (c.broker ? brokerKey(c.broker) + brokerLink(c.broker) : "—") + "</td>" : "") +
         "<td>" + pill(c.connected) + "</td>" +
         '<td class="cell-dim">' + escapeHtml(c.protocol) + "</td>" +
         '<td class="cell-dim">' + (c.clean ? "clean" : "persistent") + "</td>" +
@@ -419,7 +566,7 @@
       if (s) { clients += s.clients || 0; rate += (s["in"] || 0) + (s.out || 0); }
       // Broker ids come from the command line of whoever started them: untrusted text, escaped.
       html += "<tr>" +
-        '<td class="cell-topic" title="' + escapeHtml(b.id) + '">' + brokerLink(b.id) +
+        '<td class="cell-topic" title="' + escapeHtml(b.id) + '">' + brokerKey(b.id) + brokerLink(b.id) +
           (b.self ? '<span class="cell-dim"> (this one)</span>' : "") + "</td>" +
         "<td>" + brokerPill(b.stale) + "</td>" +
         '<td class="cell-dim">' + escapeHtml(b.address || "") + "</td>" +
@@ -553,7 +700,23 @@
     chart.wrap.addEventListener("mouseleave", function () { hideTip(chart.wrap); });
   }
 
+  // Per broker, in the overview's order, then the cluster's total.
+  function stackRows(s, of, format) {
+    var rows = [], total = 0;
+    for (var i = 0; i < members.length; i++) {
+      var mine = s.by && s.by[members[i].id];
+      var v = mine ? of(mine) : 0;
+      total += v;
+      rows.push({ name: escapeHtml(members[i].id), value: format(v), cls: colourClass(members[i].id) });
+    }
+    rows.push({ name: "Cluster", value: format(total), cls: "chart-tip-row--total" });
+    return rows;
+  }
+
   trackHover(throughput, function (s) {
+    if (members.length >= 2) {
+      return stackRows(s, messages, function (v) { return compact(v) + "/s"; });
+    }
     return [
       { name: "In", value: compact(s.in || 0) + "/s", cls: "chart-tip-row--in" },
       { name: "Out", value: compact(s.out || 0) + "/s", cls: "chart-tip-row--out" },
@@ -562,6 +725,9 @@
   });
 
   trackHover(clients, function (s) {
+    if (members.length >= 2) {
+      return stackRows(s, function (p) { return p.clients || 0; }, compact);
+    }
     return [
       { name: "Clients", value: compact(s.clients || 0), cls: "chart-tip-row--out" },
       { name: "Heap", value: bytes(s.heap || 0), cls: "chart-tip-row--out" }
@@ -598,7 +764,13 @@
     if (entry.broker) {
       var where = document.createElement("span");
       where.className = "event-where";
-      where.textContent = " on " + entry.broker;
+      where.appendChild(document.createTextNode(" on "));
+      if (palette[entry.broker] !== undefined) {
+        var key = document.createElement("span");
+        key.className = "broker-key " + colourClass(entry.broker);
+        where.appendChild(key);
+      }
+      where.appendChild(document.createTextNode(entry.broker));
       what.appendChild(where);
     }
     row.appendChild(when);
@@ -705,6 +877,12 @@
 
   function apply(message) {
     setFields(message.fields);
+    if (message.event === "snapshot" || message.event === "tick") {
+      // Before anything is drawn, so every swatch and band is in the
+      // colours of this frame's brokers.
+      palette = message.palette || {};
+      setMembers(message.members);
+    }
     if (message.event === "snapshot") {
       samples = message.history || [];
       intervalMs = message.interval || intervalMs;

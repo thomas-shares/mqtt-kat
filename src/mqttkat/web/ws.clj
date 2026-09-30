@@ -179,6 +179,8 @@
              :fields    (:fields pv)
              :history   (page-history page (:multi? pv) nil)
              :events    (:events pv)}
+      (:palette pv)              (assoc :palette (:palette pv))
+      (= page :overview)         (assoc :members (or (:members pv) []))
       (#{:topics} page)          (assoc :topics (:topics pv))
       (#{:clients} page)         (assoc :clients (:clients pv))
       (broker-page? page)        (assoc :topics (:topics pv) :clients (:clients pv))
@@ -263,6 +265,10 @@
                                                                         (- now tail-ms cluster/lag-ms)))
                 (not remote)              (assoc :sample point)
                 (:multi? pv)              (assoc :events (:events pv))
+                (:palette pv)             (assoc :palette (:palette pv))
+                ;; Empty rather than left out, so a page whose cluster has
+                ;; shrunk to one broker stops drawing it as a cluster.
+                (= page :overview)        (assoc :members (or (:members pv) []))
                 (= page :topics)          (assoc :topics (:topics pv))
                 (= page :clients)         (assoc :clients (:clients pv))
                 (broker-page? page)       (assoc :topics (:topics pv) :clients (:clients pv)

@@ -193,7 +193,7 @@ body { font-size: 14px; }
 .panel-body--split { margin-top: 22px; border-top: 2px solid var(--color-divider); padding-top: 20px; }
 
 .legend { display: flex; align-items: center; gap: 18px; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
-.legend-item { display: flex; align-items: center; gap: 7px; }
+.legend-item { display: flex; align-items: center; gap: 7px; white-space: nowrap; }
 .legend-key { width: 14px; height: 3px; background: var(--color-accent); }
 .legend-key--out { background: var(--color-neutral-800); }
 
@@ -382,3 +382,68 @@ body { font-size: 14px; }
        letter-spacing: 0.08em; text-transform: uppercase; }
 .tag-accent { background: var(--color-accent-200); color: var(--color-accent-700); }
 .tag-neutral { background: var(--color-neutral-200); color: var(--color-neutral-700); }
+
+/* ── one colour per broker ─────────────────────────────────────────── */
+
+/* The categorical order, fixed: a broker's colour is picked by
+   mqttkat.web.cluster/palette, never by its place in a list, so it keeps
+   it as others join and leave. Checked for colour-blind separation against
+   this page's background; four of them sit under 3:1 against it, which is
+   why every band is also named, in the legend, the strip and the tooltip.
+   Past seven brokers the rest share the grey. */
+:root {
+  --broker-0: #2a78d6;   /* blue */
+  --broker-1: #eb6834;   /* orange */
+  --broker-2: #1baf7a;   /* aqua */
+  --broker-3: #eda100;   /* yellow */
+  --broker-4: #e87ba4;   /* magenta */
+  --broker-5: #008300;   /* green */
+  --broker-6: #4a3aa7;   /* violet */
+  --broker-other: var(--color-neutral-600);
+}
+.broker-c-0 { --broker: var(--broker-0); }
+.broker-c-1 { --broker: var(--broker-1); }
+.broker-c-2 { --broker: var(--broker-2); }
+.broker-c-3 { --broker: var(--broker-3); }
+.broker-c-4 { --broker: var(--broker-4); }
+.broker-c-5 { --broker: var(--broker-5); }
+.broker-c-6 { --broker: var(--broker-6); }
+.broker-c-other { --broker: var(--broker-other); }
+
+.broker-key {
+  display: inline-block; flex: none; width: 10px; height: 10px;
+  background: var(--broker, var(--broker-other)); vertical-align: baseline;
+}
+.page-title .broker-key { width: 18px; height: 18px; }
+.legend .broker-key { width: 14px; height: 3px; }
+
+/* The overview's head: the page head, and under it the brokers it adds up.
+   One grid row between them, so .main keeps its three. */
+.overview-head { display: flex; flex-direction: column; }
+.members {
+  display: flex; flex-wrap: wrap;
+  border-bottom: 2px solid var(--color-divider);
+}
+.members[hidden] { display: none; }
+.member {
+  display: flex; flex-direction: column; gap: 4px;
+  min-width: 180px; padding: 12px var(--space-6) 12px calc(var(--space-6) - 4px);
+  border-left: 4px solid var(--broker, var(--broker-other));
+  border-right: 2px solid var(--color-divider);
+  color: inherit; text-decoration: none;
+}
+.member:hover { background: var(--color-neutral-200); }
+.member--out { opacity: 0.55; }
+.member-name { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 14px; }
+.member-name .broker-key { display: none; }  /* the border is the swatch */
+.member-state { font-size: 10px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: var(--color-neutral-700); }
+.member-figs { font-size: 12px; color: var(--color-neutral-700); }
+
+/* A cluster chart, a band per broker, stacked: the top edge is the
+   cluster's total, as the single-broker chart's line is the broker's. */
+.stack-fill { fill: var(--broker, var(--broker-other)); fill-opacity: 0.18; }
+.stack-line { fill: none; stroke: var(--broker, var(--broker-other)); stroke-width: 2; stroke-linejoin: round; }
+.chart-tip-row[class*="broker-c-"] .chart-tip-key { opacity: 1; }
+.chart-tip-row[class*="broker-c-"] .chart-tip-key::before { background: var(--broker); height: 8px; }
+.chart-tip-row--total { border-top: 1px solid currentColor; margin-top: 2px; padding-top: 2px; font-weight: 700; }
+.event-where .broker-key { width: 8px; height: 8px; margin: 0 4px 0 2px; }
