@@ -11,6 +11,7 @@
    `$share/name/filter` string and asserts that publishing once produces
    exactly one delivery across the group."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
+            [mqttkat.client :as client]
             [mqttkat.test-util :as tu]))
 
 (use-fixtures :once tu/broker-fixture)
@@ -149,23 +150,38 @@
               "protocol error"))
         (finally (tu/close! c))))))
 
+(defn- subscribe-to-bad-share!
+  "Subscribe to `bad` on a fresh connection and return the DISCONNECT's reason
+   code as an unsigned int, or nil when none came."
+  [bad]
+  (let [c (tu/connect-v5! "bad-share")]
+    (try
+      (tu/send-v5! c {:packet-type :SUBSCRIBE :packet-identifier 1
+                      :topics [{:qos 0 :topic-filter bad}]})
+      (let [msg (tu/take! (:ch c) 3000)]
+        (is (= :DISCONNECT (:packet-type msg))
+            (str bad ": expected a DISCONNECT, got " (pr-str (dissoc msg :client-key))))
+        (is (tu/wait-until #(not (client/connected? (:client c))) 3000)
+            (str bad ": and the connection closed"))
+        (some-> (:reason-code msg) long (bit-and 0xff)))
+      (finally (tu/close! c)))))
+
+(deftest ^:portable a-malformed-share-filter-disconnects
+  (testing "§4.8.2: a share name may not contain a wildcard (0x81)"
+    (doseq [bad ["$share/a+b/topic" "$share/a#b/topic" "$share/g/bad/#/x"]]
+      (is (= 0x81 (subscribe-to-bad-share! bad)) bad)))
+
+  (testing "and a share needs both a name and a filter (0x82)"
+    ;; The codes are Mosquitto's: a wildcard in the name is malformed, a part
+    ;; left out is a protocol error.
+    (doseq [bad ["$share/" "$share/group"]]
+      (is (= 0x82 (subscribe-to-bad-share! bad)) bad))))
+
 (deftest ^{:portable true
-           :diverges-on-mosquitto "Mosquitto disconnects over a bad share name instead of a SUBACK, and grants $share//topic outright (§4.8.2)"}
-  a-malformed-share-filter-is-refused
-  (testing "the group name may not be empty or contain wildcards or a slash"
-    ;; §4.8.2. Reported per filter on the SUBACK rather than by closing the
-    ;; connection: the client asked for something impossible, but the rest of
-    ;; the packet may be fine.
-    (doseq [bad ["$share/" "$share//topic" "$share/a+b/topic" "$share/a#b/topic"
-                 "$share/group"]]
-      (let [c (tu/connect-v5! "bad-share")]
-        (try
-          (tu/send-v5! c {:packet-type :SUBSCRIBE :packet-identifier 1
-                          :topics [{:qos 0 :topic-filter bad}]})
-          (let [ack (tu/expect! (:ch c) :SUBACK 3000)]
-            (is (= [0x8F] (vec (:response ack)))
-                (str bad " should be refused as an invalid topic filter")))
-          (finally (tu/close! c)))))))
+           :diverges-on-mosquitto "Mosquitto 2.0.22 grants $share//topic although the share name is empty (§4.8.2)"}
+  an-empty-share-name-disconnects
+  (testing "§4.8.2: the share name must be at least one character"
+    (is (= 0x82 (subscribe-to-bad-share! "$share//topic")))))
 
 (deftest ^:portable the-broker-now-advertises-shared-subscriptions
   (testing "the CONNACK no longer denies them"
