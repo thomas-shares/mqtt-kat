@@ -1,0 +1,40 @@
+;; N brokers, and the clients go where the brokers send them: every client
+;; connects to the first broker that is up, which keeps it or sends it on
+;; with a Server Reference (§4.13), by the cluster's redirect policy. The
+;; runner sets the policy through broker 1's console before anyone connects,
+;; the way the Brokers page does. Each progress line shows :per-broker, the
+;; connected clients on each broker.
+;;
+;;   bb scripts/chaos.bb chaos/redirect.edn
+;;
+;; For the load policy, or more brokers, lay a file over this one:
+;;
+;;   {:setup {:redirect {:policy :load}}}
+;;   {:setup {:brokers {:count 5}}}
+;;
+;; Version 5 only: a 3.1.1 client cannot be told to go elsewhere, and would
+;; all stay on the first broker. Needs Rama, as three-brokers.edn does.
+{:setup {:brokers  {:count 3 :port 1885 :http 8085 :heap "1g" :rama :external}
+         :rama     {:start? true :stop? false}
+         :redirect {:policy :round-robin :via :disconnect}}
+
+ :load {:publishers  20
+        :subscribers 60
+        :topics      10
+        :rate        500
+        :duration-s  60
+        :qos         {0 1, 1 2, 2 2}
+        :sub-qos     {0 1, 1 2, 2 2}
+        :persistent  0.75
+        :wildcard    0.2
+        ;; A weight of 0, not a missing key: maps merge over the defaults.
+        :mqtt        {4 0, 5 1}}
+
+ ;; Clients coming and going, so they are sent on again and again; each
+ ;; comes back through the first broker.
+ :chaos {:kill-client         {:every-ms [300 1000] :down-ms [0 3000] :who :any}
+         :disconnect-client   {:every-ms [1000 3000] :down-ms [0 2000] :who :any}
+         :toggle-subscription {:every-ms [200 600]}}
+
+ :check {:subscribe-settle-ms 2000
+         :drain-ms            10000}}

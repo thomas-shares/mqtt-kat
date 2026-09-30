@@ -52,6 +52,21 @@
    :setup {:brokers {:count 1 :host "127.0.0.1" :port 1885 :http 8085
                      :heap "1g" :rama "external"}
            :rama    {:start? true :stop? false}
+           ;; How the brokers share the clients that connect, set for the
+           ;; whole cluster through broker 1's console, as its Brokers page
+           ;; does, before any client connects:
+           ;;   :policy :off          every broker keeps whoever comes to it
+           ;;           :round-robin  each broker takes its turn
+           ;;           :load         the broker with the fewest clients
+           ;;   :via    :disconnect   accepted, then DISCONNECT with a Server Reference
+           ;;           :connack      a CONNACK with the Server Reference
+           ;; Set every run, so a policy a run leaves in the cluster does not
+           ;; carry into the next. With a policy on, every client connects to
+           ;; the first broker that is up and goes where it is sent; only
+           ;; version 5 clients can be sent, so a policy wants :mqtt {4 0, 5 1}.
+           ;; Off, clients start round-robin over the brokers and come back
+           ;; to any broker that is up, at random.
+           :redirect {:policy :off :via :disconnect}
            ;; This process: chaos.bb starts it with -Xmx :heap.
            :runner  {:heap "4g"}}
 
@@ -170,14 +185,21 @@
 
 ;; ── the run's state ───────────────────────────────────────────────────
 
+(defn redirecting?
+  "Whether the brokers are to send clients on, and the clients to follow."
+  [cfg]
+  (not= :off (get-in cfg [:setup :redirect :policy] :off)))
+
 (defn- make-clients [cfg ^Random rng lg run-id]
   (let [{:keys [publishers subscribers topics qos sub-qos persistent wildcard mqtt
                 window session-expiry-s]} (:load cfg)
+        follow?  (redirecting? cfg)
         topic-of #(str "chaos/" run-id "/t" %)
         subs (vec (for [i (range subscribers)]
                     (let [wild? (< (.nextDouble rng) (double wildcard))
                           opts  {:id (str "chaos-" run-id "-s" i) :kind :sub :idx i
                                  :mqtt5? (= 5 (pick-weighted rng mqtt))
+                                 :follow-redirects? follow?
                                  :persistent? (< (.nextDouble rng) (double persistent))
                                  :filter (if wild? (str "chaos/" run-id "/+") (topic-of (mod i topics)))
                                  :sub-qos (pick-weighted rng sub-qos)
@@ -187,6 +209,7 @@
         pubs (vec (for [i (range publishers)]
                     (c/make lg {:id (str "chaos-" run-id "-p" i) :kind :pub :idx i
                                 :mqtt5? (= 5 (pick-weighted rng mqtt))
+                                :follow-redirects? follow?
                                 :persistent? false :window window})))]
     {:subscribers subs
      :publishers  pubs
@@ -195,6 +218,44 @@
 
 (defn- up-brokers [state]
   (->> @(:brokers state) vals (filter :up?) (sort-by :n) vec))
+
+(defn- broker-at
+  "The broker up at `server-reference`, \"host:port\", or nil. By port:
+   the host a broker advertises need not be the one the runner reaches it
+   by."
+  [state ^String server-reference]
+  (let [port (some-> (subs server-reference (inc (.lastIndexOf server-reference ":"))) parse-long)]
+    (first (filter #(= port (:port %)) (up-brokers state)))))
+
+(defn- broker-for
+  "Where `cl` connects next: where a broker last sent it, if that one is up;
+   otherwise, with redirects on, the first broker up, which sends it on;
+   otherwise any broker up, at random."
+  [{:keys [rng cfg] :as state} cl]
+  (or (some->> (c/take-redirect! cl) (broker-at state))
+      (if (redirecting? cfg)
+        (first (up-brokers state))
+        (locking rng (choose rng (up-brokers state))))))
+
+(defn set-redirect!
+  "Set the cluster's redirect policy as the console's Brokers page does: a
+   form post to /brokers/redirect on broker 1's console. Returns the HTTP
+   status, or nil when the console could not be reached."
+  [cfg]
+  (let [{:keys [host http]} (get-in cfg [:setup :brokers])
+        {:keys [policy via]} (get-in cfg [:setup :redirect])
+        body    (str "policy=" (name (or policy :off)) "&via=" (name (or via :disconnect)))
+        client  (-> (java.net.http.HttpClient/newBuilder)
+                    (.followRedirects java.net.http.HttpClient$Redirect/NEVER)
+                    (.build))
+        request (-> (java.net.http.HttpRequest/newBuilder
+                     (java.net.URI. (str "http://" host ":" http "/brokers/redirect")))
+                    (.header "Content-Type" "application/x-www-form-urlencoded")
+                    (.POST (java.net.http.HttpRequest$BodyPublishers/ofString body))
+                    (.build))]
+    (try
+      (.statusCode (.send client request (java.net.http.HttpResponse$BodyHandlers/discarding)))
+      (catch Exception _ nil))))
 
 ;; ── the loops ─────────────────────────────────────────────────────────
 
@@ -206,7 +267,7 @@
     (doseq [cl clients]
       (c/check-connection! cl 10000)
       (when (c/wants-connection? cl)
-        (if-let [b (locking rng (choose rng (up-brokers state)))]
+        (if-let [b (broker-for state cl)]
           (when-not (c/connect! cl b)
             (c/back-off! cl 500))
           (c/back-off! cl 500))))
@@ -297,6 +358,8 @@
            :acked      (ledger/acked-count ledger)
            :delivered  (ledger/delivery-count ledger)
            :connected  (str (count (filter c/connected? clients)) "/" (count clients))
+           ;; Connected clients by broker: how the clients are spread.
+           :per-broker (into (sorted-map) (frequencies (keep #(when (c/connected? %) (c/broker-of %)) clients)))
            :brokers-up (mapv :n (up-brokers state))
            :chaos      @actions})))
 
@@ -359,9 +422,17 @@
       (throw (ex-info (str "not listening: " (str/join ", " (map #(str (:host %) ":" (:port %)) down))
                            " - start the brokers first (bb scripts/chaos.bb does)")
                       {:down down})))
-    ;; connect: subscribers first, spread round-robin
+    (let [{:keys [policy via]} (get-in cfg [:setup :redirect])
+          status (set-redirect! cfg)]
+      (println "redirect" (pr-str {:policy policy :via via})
+               (if (= 303 status) "set on the cluster" (str "not set: console answered " (pr-str status))))
+      (when (and (redirecting? cfg) (not= 303 status))
+        (throw (ex-info "could not set the redirect policy - is the console up, and the broker attached to Rama?"
+                        {:status status}))))
+    ;; connect: subscribers first, spread round-robin, or all to the first
+    ;; broker to be sent on
     (doseq [[i cl] (map-indexed vector (:clients state))]
-      (when-not (c/connect! cl (nth bs (mod i (count bs))))
+      (when-not (c/connect! cl (if (redirecting? cfg) (first bs) (nth bs (mod i (count bs)))))
         (c/back-off! cl 500)))
     (let [dog (start-thread #(watchdog state))]
       (when-not (wait-until #(every? c/subscribed? (:subscribers state)) (:connect-timeout-ms chk))

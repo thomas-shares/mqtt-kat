@@ -3,6 +3,7 @@
    broker: each case is a hand-written account of what the clients saw."
   (:require [clojure.test :refer [deftest is testing]]
             [mqttkat.chaos.check :as check]
+            [mqttkat.chaos.client :as c]
             [mqttkat.chaos.ledger :as ledger]
             [mqttkat.chaos.runner :as runner]))
 
@@ -180,6 +181,40 @@
   (testing "the scenarios in chaos/ read"
     (doseq [f (.listFiles (java.io.File. "chaos"))]
       (is (map? (runner/config [(str f)])) (str f)))))
+
+;; A redirect is followed, in either of its forms (§4.13), and nothing else
+;; is taken for one.
+(deftest a-client-goes-where-it-is-sent
+  (let [handle  @#'c/handle
+        client  (fn [follow?]
+                  (doto (c/make (ledger/ledger) {:id "s" :kind :sub :mqtt5? true :persistent? true
+                                                 :filter "t" :sub-qos 1 :follow-redirects? follow?})
+                    (-> :conn (reset! {:epoch 1}))))
+        sent-on (fn [packet-type code]
+                  {:packet-type packet-type :reason-code code
+                   :properties {:server-reference "127.0.0.1:1886"}})]
+    (testing "a CONNACK Use another server"
+      (let [cl (client true)]
+        (handle cl 1 (sent-on :CONNACK 0x9C))
+        (is (nil? @(:conn cl)) "the connection is let go")
+        (is (= "127.0.0.1:1886" (c/take-redirect! cl)))
+        (is (nil? (c/take-redirect! cl)) "once")))
+    (testing "a DISCONNECT Server moved"
+      (let [cl (client true)]
+        (handle cl 1 (sent-on :DISCONNECT 0x9D))
+        (is (= "127.0.0.1:1886" (c/take-redirect! cl)))))
+    (testing "not by a client that does not follow them"
+      (let [cl (client false)]
+        (handle cl 1 (sent-on :CONNACK 0x9C))
+        (is (nil? (c/take-redirect! cl)))))
+    (testing "nor any other refusal"
+      (let [cl (client true)]
+        (handle cl 1 (sent-on :CONNACK 0x87))
+        (is (nil? (c/take-redirect! cl)))
+        (is (nil? @(:conn cl)))))
+    (testing "and a policy is what turns following on"
+      (is (not (runner/redirecting? (runner/config []))))
+      (is (runner/redirecting? (runner/config ["chaos/redirect.edn"]))))))
 
 ;; The check looks each subscription's messages up by time rather than trying
 ;; every message against every subscription, which a long run could not

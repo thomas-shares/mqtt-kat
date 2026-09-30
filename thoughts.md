@@ -4,6 +4,34 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20260929
 
+### Chaos clients go where the brokers send them
+
+Until now a chaos client started on broker `i mod N` and, after every drop,
+came back to a random broker that was up. It never looked at a Server
+Reference, and the cluster's redirect policy was whatever the console last
+set. `:setup :redirect {:policy :via}` now sets that policy through broker
+1's console before any client connects, with the same form post the Brokers
+page makes. It is set on every run, `:off` by default, because the policy
+lives in Rama and would otherwise carry over from one run to the next. With a
+policy on, every client connects to the first broker that is up and follows
+a CONNACK or DISCONNECT that sends it elsewhere. Progress lines show the
+connected clients per broker.
+
+The first run had two problems. `{:mqtt {5 1}}` merged over the default
+`{4 1, 5 1}`, so half the clients were 3.1.1, which can't be sent anywhere,
+and broker 1 kept two thirds of them. A weight of 0 is the way to take a
+version out. Also, the `:disconnect` form accepts the client with a CONNACK
+before sending it on, without making a session. The client took that CONNACK
+as a session, and the next broker's Session Present 0 then read as a lost
+session. The client now counts a session only from a CONNACK that is not
+followed by a redirect.
+
+On three brokers for a minute, with clients killed, disconnected and
+toggling, round robin spread them 32/24/24 and the check was clean. Load
+spread them 27/30/23 and lost 2 QoS 2 messages for one persistent client
+that had been sent between brokers twice in a few seconds. I haven't looked
+into those yet.
+
 ### The unexpected deliveries were the check's, and the Rama writes were mine
 
 Every `:unexpected` delivery in the three-broker runs had been acknowledged
