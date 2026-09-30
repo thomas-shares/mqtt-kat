@@ -277,6 +277,7 @@ bb scripts/chaos.bb chaos/single-broker.edn                          # no cluste
 bb scripts/chaos.bb --keep chaos/single-broker.edn                   # leave the brokers up afterwards
 bb scripts/chaos.bb chaos/single-broker.edn chaos/long.edn           # ten minutes, heavier
 bb scripts/chaos.bb chaos/redirect.edn                               # clients go where the brokers send them
+bb scripts/chaos.bb chaos/load.edn                                   # N brokers, X clients, Y seconds of load, no chaos
 ```
 
 By default a chaos client starts on broker `i mod N` and comes back to any
@@ -288,6 +289,8 @@ shows `:per-broker`, the connected clients on each broker.
 `chaos/redirect.edn` does this on three brokers; lay
 `{:setup {:brokers {:count 5}}}` or `{:setup {:redirect {:policy :load}}}` over
 it for more brokers or the other policy.
+`chaos/load.edn` is the same spread with no chaos at all, a steady load for
+a set time; the broker count, the clients and the duration are its first lines.
 
 `chaos/long.edn` is an overlay: it sets no `:setup`, so put it after a
 scenario. For brokers on an external cluster, `chaos.bb` starts Rama if its
