@@ -83,7 +83,10 @@
         (is (= 0x81 (expect-disconnect! c "bad/#/filter")))
         (finally (tu/close! c))))))
 
-(deftest ^:portable a-malformed-subscribe-leaves-nothing-subscribed
+;; Not ^:portable: pins mqtt-kat's choice. The spec closes the connection on a
+;; malformed packet but says nothing about the filters before the bad one;
+;; Mosquitto keeps those subscribed, mqtt-kat checks the whole packet first.
+(deftest a-malformed-subscribe-leaves-nothing-subscribed
   (testing "a session that outlives the connection holds none of the packet"
     ;; A persistent session, so a subscription taken from the packet before
     ;; the broker noticed the bad filter would still be there on reconnect,
