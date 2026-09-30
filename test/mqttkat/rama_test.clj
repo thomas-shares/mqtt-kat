@@ -1685,6 +1685,8 @@
           (let [cv (web-cluster/cluster-view)]
             (is (:multi? cv))
             (is (= (+ 4 (:clients (state/reading))) (get-in cv [:reading :clients])))
+            (is (<= (get-in cv [:reading :clients]) (get-in cv [:reading :max-clients]))
+                "and never has more clients than its most at once")
             (is (some #(= "far/topic" (:topic %)) (:topics cv)))
             (is (some #(= {:id "far-client" :broker "far-away"} (select-keys % [:id :broker]))
                       (get-in cv [:clients :rows])))

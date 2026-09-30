@@ -7,10 +7,10 @@
             [mqttkat.web.state :as state]))
 
 (deftest the-cluster-reading-adds-up-what-is-per-broker
-  (let [a {:t 1000 :clients 3 :parked 1 :heap 100 :heap-max 400 :cores 2 :retained 7 :listed 9
+  (let [a {:t 1000 :clients 3 :max-clients 5 :parked 1 :heap 100 :heap-max 400 :cores 2 :retained 7 :listed 9
            :uptime 50 :client-total 4 :tracked-topics 3
            :rates {"in" 1.5 "out" 3.0 "retained" 0.5} :cpu 0.25}
-        b {:t 2000 :clients 5 :parked 0 :heap 200 :heap-max 400 :cores 4 :retained 7 :listed 9
+        b {:t 2000 :clients 5 :max-clients 6 :parked 0 :heap 200 :heap-max 400 :cores 4 :retained 7 :listed 9
            :uptime 90 :client-total 5 :tracked-topics 2 :topics-truncated true
            :rates {"in" 2.5 "out" 1.0 "retained" 0.5} :cpu nil}
         r (cluster/cluster-reading [a b])]
@@ -24,6 +24,10 @@
       (is (= 7 (:retained r)))
       (is (= 9 (:listed r)))
       (is (= 0.5 (get-in r [:rates "retained"]))))
+    (testing "the most clients at once is not the brokers' peaks added up, which need not have coincided"
+      (is (= 8 (:max-clients r)) "the most the readings can say: now, as that is more than either broker's peak")
+      (is (= 6 (:max-clients (cluster/cluster-reading [a (assoc b :clients 0)])))
+          "or one broker's peak, when that is more"))
     (testing "rates add up"
       (is (= 4.0 (get-in r [:rates "in"])))
       (is (= 4.0 (get-in r [:rates "out"]))))
