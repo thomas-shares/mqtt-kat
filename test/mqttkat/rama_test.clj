@@ -1103,6 +1103,68 @@
                         (finally
                           (tu/close! pub)))))
 
+                  (testing "the publisher is acknowledged once the away session's copy is in the cluster"
+                    ;; Not before: a broker killed between the two had told its
+                    ;; publisher it had a message that was only in its memory.
+                    ;; So the queue is read the moment the answer arrives, with
+                    ;; no wait, at QoS 1 on the PUBACK and at QoS 2 on the
+                    ;; PUBCOMP.
+                    (let [c   (on-broker (cluster/->connect (connect-map "acked-after" :clean? false))
+                                         "peer-x" "run-9")
+                          pub (tu/connect! "acked-after-pub" :ordered? true)]
+                      (try
+                        (record! conn c)
+                        (record! conn (cluster/->subscribe {:connect-id (:connect-id c) :client-id "acked-after"
+                                                            :filter "acked/#" :entry (entry "acked/#" 2)}))
+                        (record! conn (cluster/->disconnect c))
+                        (is (tu/wait-until #(and (contains? (matches conn "acked/t") "acked-after")
+                                                 (not (present-in-trie? conn "acked/t" "acked-after")))))
+                        (client/send-message (:client pub) (publish-msg "acked/t" "one" 1 41 :version 4))
+                        (tu/expect-eventually! (:ch pub) :PUBACK)
+                        (is (= ["one"] (map #(String. ^bytes (:payload (second %)))
+                                            (cluster/queued conn "acked-after"))))
+                        (client/send-message (:client pub) (publish-msg "acked/t" "two" 2 42 :version 4))
+                        (tu/expect-eventually! (:ch pub) :PUBREC)
+                        (client/send-message (:client pub) {:packet-type :PUBREL :packet-identifier 42})
+                        (tu/expect-eventually! (:ch pub) :PUBCOMP)
+                        (is (= ["one" "two"] (map #(String. ^bytes (:payload (second %)))
+                                                  (cluster/queued conn "acked-after"))))
+                        (finally
+                          (tu/close! pub)))))
+
+                  (testing "a live copy a kept session has no room for is put on the cluster's queue first"
+                    ;; Held here behind a full window, it died with the broker,
+                    ;; and the session resumed elsewhere without it. What is
+                    ;; sent at once is not: it is in the socket's hands.
+                    (let [sub (tu/connect-v5! "held-back" :id "held-back" :clean-session? false
+                                              :properties {:session-expiry-interval 3600
+                                                           :receive-maximum 1})
+                          pub (tu/connect! "held-back-pub" :ordered? true)]
+                      (try
+                        (tu/send-v5! sub (subscribe-msg "held/#" 1 1 :version 5))
+                        (tu/expect-eventually! (:ch sub) :SUBACK)
+                        (client/send-message (:client pub) (publish-msg "held/t" "sent" 1 51 :version 4))
+                        (tu/expect-eventually! (:ch pub) :PUBACK)
+                        (let [first-got (tu/expect-eventually! (:ch sub) :PUBLISH)]
+                          (is (= "sent" (tu/payload-str first-got)))
+                          (client/send-message (:client pub) (publish-msg "held/t" "held" 1 52 :version 4))
+                          (tu/expect-eventually! (:ch pub) :PUBACK)
+                          (is (= ["held"] (map #(String. ^bytes (:payload (second %)))
+                                               (cluster/queued conn "held-back")))
+                              "the one held back, not the one sent")
+                          (tu/send-v5! sub {:packet-type :PUBACK :packet-identifier (:packet-identifier first-got)})
+                          (let [got (tu/expect-eventually! (:ch sub) :PUBLISH)]
+                            (is (= "held" (tu/payload-str got)))
+                            (Thread/sleep 200)
+                            (is (= 1 (count (cluster/queued conn "held-back")))
+                                "sent, not acknowledged: still on the cluster's queue")
+                            (tu/send-v5! sub {:packet-type :PUBACK :packet-identifier (:packet-identifier got)}))
+                          (is (tu/wait-until #(empty? (cluster/queued conn "held-back")))
+                              "acknowledged: off it")
+                          (is (nil? (tu/take! (:ch sub) 300)) "and delivered once"))
+                        (finally
+                          (tu/close! sub pub)))))
+
                   (testing "a version 5 session back from the cluster is answered in version 5, and stays kept"
                     ;; adopt-session! parks what the cluster has, which is the
                     ;; subscriptions and no more. add-client! resumed that as the
