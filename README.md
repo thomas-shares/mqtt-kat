@@ -15,49 +15,33 @@ There is no TLS support or support for username/passwords. Anything will be acce
 No idea yet. Depends (but I don't know what it depends)
 
 ## Are there any bugs?
-Probably, but testing has become a lot better:
+Probably, but testing has improved a lot recently:
 
 ```
-Ran 271 tests containing 2806 assertions.
+Ran 334 tests containing 80523 assertions.
 0 failures, 0 errors.
 ```
 and
-
 ```
-lein test mqttkat.client-generator-2
-13:47:01.776 INFO  [main] m.client-generator-2 - simulation summary
-    events         10000 events in 10.34s
-    publishes      qos0 4965  qos1 2551  qos2 2481  (total 9997, 3 skipped)
-  round trip, milliseconds (publish sent -> last acknowledgement)
-    all            n 9997  min 0.02     med 0.29     mean 0.71     sd 1.11     p95 2.84     p99 5.71     max 16.22
-    qos 0          n 4965  min 0.02     med 0.16     mean 0.40     sd 0.67     p95 1.75     p99 2.73     max 16.22
-    qos 1          n 2551  min 0.05     med 0.30     mean 0.53     sd 0.63     p95 1.78     p99 2.79     max 10.92
-    qos 2          n 2481  min 0.37     med 0.65     mean 1.50     sd 1.68     p95 5.08     p99 6.91     max 13.07
-  client-side prepare, milliseconds (spec generation + encode)
-    all            n 9997  min 0.15     med 0.26     mean 0.30     sd 0.27     p95 0.47     p99 0.60     max 14.36
-  broker throughput over this test only
-    messages       3865.62 msg/s in, 3865.62 msg/s out
-    bytes          551.24 KB/s in, 560.55 KB/s out
-
-Ran 2 tests containing 24958 assertions.
+Ran 4 tests containing 22499 assertions.
 0 failures, 0 errors.
 ```
+And I have the test cases that are working on a socket level also tested against a real Mosquitto broker:
 
-most of these tests pass now as well: https://github.com/eclipse-paho/paho.mqtt.testing
-The one failing there is a SUBACK failure.
+```
+Ran 119 tests containing 909 assertions.
+0 failures, 0 errors.
+```
+So our test cases also work against the official reference implementation of MQTT.
 
 ## What about the name?
 
 I first thought of calling it mqtt-kit... but then decide that mqtt-kat made more sense. Somehow.
 
 ## Will it ever be a proper MQTT broker supporting QOS > 0?
-
-It actually does now... but memory only, there is no storing to disk. So a broker crash would loose most inflight message (I guess some would be recovered if a client retries)
-
+It does now, and backed by Rama.
 ## Will it ever support MQTT version 5?
-
-Maybe... with Claude's help I might be able to add this now.
-
+Yes it does. See test cases above.
 ## Rama
 
 The answer to "memory only" above is going to be [Rama](https://redplanetlabs.com/):
@@ -194,7 +178,12 @@ the module to come back up after a start:
 
 ```
 bb scripts/rama.bb start | stop | kill | restart | status   # --rama-dir, or $RAMA_HOME, default ~/projects/rama
+bb scripts/rama.bb update                                   # lein jar, then deploy: update if deployed, launch if not
 ```
+
+`update` does the build and the deploy below in one go, keeps the uberjar that
+`lein jar` would remove, and waits until the module is `RUNNING` again.
+`--no-build` deploys the thin jar already in `target/`.
 
 The module goes to the cluster as the thin jar — `lein jar`, not `lein uberjar`:
 the workers have Rama and Clojure already, and the module's namespace depends on

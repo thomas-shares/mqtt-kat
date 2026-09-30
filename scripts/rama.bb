@@ -13,6 +13,12 @@
 ;;                                  module is RUNNING, however the cluster was
 ;;                                  started; exits 1 after --timeout s
 ;;   bb scripts/rama.bb status      what is running, and on which ports
+;;   bb scripts/rama.bb update      build the module's thin jar (`lein jar`) and
+;;                                  deploy it: an update, keeping the data, when
+;;                                  the module is deployed already, a launch when
+;;                                  it is not; then wait until it is RUNNING.
+;;                                  --no-build deploys target/ as it is. The
+;;                                  uberjar the brokers run survives the build.
 ;;
 ;; The Rama distribution is --rama-dir, or $RAMA_HOME, or ~/projects/rama. The
 ;; daemons are started with setsid, so closing the terminal does not take them
@@ -36,7 +42,11 @@
                            (str (fs/path (System/getProperty "user.home") "projects" "rama")))
               :desc "the Rama distribution: rama, rama.yaml, local-rama-data"}
    :grace    {:default 15 :coerce :long :desc "seconds between SIGTERM and SIGKILL on stop"}
-   :timeout  {:default 180 :coerce :long :desc "seconds wait gives the Conductor and the module"}})
+   :timeout  {:default 180 :coerce :long :desc "seconds wait gives the Conductor and the module"}
+   :build    {:default true :coerce :boolean :desc "update: run `lein jar` first (--no-build to skip)"}
+   :tasks    {:default 4 :coerce :long :desc "update, first launch only: tasks"}
+   :threads  {:default 2 :coerce :long :desc "update, first launch only: threads"}
+   :workers  {:default 1 :coerce :long :desc "update, first launch only: workers"}})
 
 ;; ── finding Rama ─────────────────────────────────────────────────────────
 
@@ -216,6 +226,69 @@
       (System/exit 1))
     (println "module     not checked: no Rama at" rama-dir "to ask (--rama-dir, or RAMA_HOME)")))
 
+;; ── deploying the module ─────────────────────────────────────────────────
+
+(defn- jars
+  "The project's jars in target/, newest first: the thin ones, or with
+   `standalone?` the uberjars."
+  [standalone?]
+  (->> (fs/glob (fs/path root "target") "mqtt-kat-*.jar")
+       (filter #(= standalone? (str/ends-with? (str %) "-standalone.jar")))
+       (sort-by #(fs/last-modified-time %))
+       reverse))
+
+(defn- build-jar!
+  "`lein jar` in the project. It removes the uberjar from target/ on the
+   way, and the brokers run from that: a hard link keeps it, and it is put
+   back where it was."
+  []
+  (let [uber (first (jars true))
+        kept (fs/path root ".uberjar-kept-by-rama-bb.jar")]
+    (fs/delete-if-exists kept)
+    (when uber (fs/create-link kept uber))
+    (try
+      (println "building   lein jar")
+      (let [{:keys [exit]} (p/shell {:dir root :continue true :out :string :err :string} "lein" "jar")]
+        (when-not (zero? exit)
+          (println "lein jar failed; run it by hand to see why")
+          (System/exit 1)))
+      (finally
+        (when uber
+          (if (fs/exists? uber)
+            (fs/delete-if-exists kept)
+            (do (fs/move kept uber)
+                (println "kept      " (str (fs/relativize root uber)) "(lein jar removes it)"))))))))
+
+(defn update!
+  [{:keys [rama-dir timeout build tasks threads workers]}]
+  (when-not (fs/exists? (fs/path rama-dir "rama"))
+    (println "no Rama at" rama-dir "- give --rama-dir, or set RAMA_HOME")
+    (System/exit 1))
+  (when-not (listening? 1973)
+    (println "the Conductor is not listening on :1973 - start Rama first (`bb scripts/rama.bb start`)")
+    (System/exit 1))
+  (when build (build-jar!))
+  (let [jar (first (jars false))]
+    (when-not jar
+      (println "no thin jar in target/ - run without --no-build, or `lein jar`")
+      (System/exit 1))
+    (println "jar       " (str (fs/relativize root jar)) "built" (str (fs/last-modified-time jar)))
+    (let [state  (module-state rama-dir)
+          action (cond (= :not-deployed state) "launch"
+                       (string? state)         "update"
+                       :else (do (println "the Conductor did not say whether" module "is deployed - see" rama-dir "/logs")
+                                 (System/exit 1)))
+          args   (cond-> ["./rama" "deploy" "--action" action "--jar" (str (fs/absolutize jar)) "--module" module]
+                   (= "launch" action) (into ["--tasks" (str tasks) "--threads" (str threads) "--workers" (str workers)]))]
+      (println (str "deploying  " action (when (= "update" action) (str " (was " state ")"))))
+      (let [{:keys [exit out err]} (apply p/sh {:dir rama-dir :continue true} args)]
+        (when-not (zero? exit)
+          (println (str/trim (str out err)))
+          (println "deploy failed")
+          (System/exit 1)))
+      (when-not (wait-module! rama-dir timeout)
+        (System/exit 1)))))
+
 (defn -main [& args]
   (let [{:keys [args opts]} (cli/parse-args args {:spec spec})]
     (case (first args)
@@ -225,7 +298,9 @@
       "restart" (do (stop! opts "TERM") (start! opts))
       "status"  (status! opts)
       "wait"    (wait! opts)
-      (do (println "usage: bb scripts/rama.bb start | stop | kill | restart | status | wait [--rama-dir DIR] [--grace 15] [--timeout 180]")
+      "update"  (update! opts)
+      (do (println "usage: bb scripts/rama.bb start | stop | kill | restart | status | wait | update")
+          (println "       [--rama-dir DIR] [--grace 15] [--timeout 180] [--no-build] [--tasks 4 --threads 2 --workers 1]")
           (System/exit 2)))))
 
 (apply -main *command-line-args*)
