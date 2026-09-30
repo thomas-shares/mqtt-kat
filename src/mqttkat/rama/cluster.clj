@@ -39,7 +39,7 @@
    with one more proxy, is where each announces where it listens."
   (:require [clojure.tools.logging :as log]
             [com.rpl.rama :as r]
-            [com.rpl.rama.path :refer [keypath ALL]]
+            [com.rpl.rama.path :refer [keypath ALL sorted-map-range]]
             [com.rpl.rama.test :as rtest]
             [mqttkat.bridge :as bridge]
             [mqttkat.events :as events]
@@ -131,6 +131,10 @@
      :brokers        atom, the in-memory copy of the registry:
                      broker-id -> {:host :port :at}; empty until watch!
      :settings       atom, the cluster's settings: name -> value
+     :detail-state   PState client, broker-id -> what that broker's console
+                     shows: `$$broker-detail`
+     :history-state  PState client, broker-id -> millis -> chart point:
+                     `$$broker-history`
      :stats-state    PState client, the module's counts: `$$rama-stats`
      :stats          atom, the in-memory copy of them:
                      task -> {\"sessions\" n … \"at\" millis}
@@ -161,6 +165,8 @@
      :retained-state (r/foreign-pstate cluster module-name "$$retained")
      :queued-state  (r/foreign-pstate cluster module-name "$$queued")
      :stats-state   (r/foreign-pstate cluster module-name "$$rama-stats")
+     :detail-state  (r/foreign-pstate cluster module-name "$$broker-detail")
+     :history-state (r/foreign-pstate cluster module-name "$$broker-history")
      :trie          (atom (trie/make-trie))
      :brokers       (atom {})
      :settings      (atom {})
@@ -307,13 +313,18 @@
   {:event :dequeue :client-id client-id :keys (vec keys) :at (System/currentTimeMillis)})
 
 (defn ->broker-stats
-  "The record of how this broker is doing, for the others' consoles."
-  [stats]
-  {:event       :broker-stats
-   :broker-id   broker-id
-   :incarnation incarnation
-   :stats       stats
-   :at          (System/currentTimeMillis)})
+  "The record of how this broker is doing, for the others' consoles: the
+   few figures the registry carries, and — when given — the detail its own
+   console shows and the chart points taken since the last report."
+  ([stats] (->broker-stats stats nil nil))
+  ([stats detail samples]
+   (cond-> {:event       :broker-stats
+            :broker-id   broker-id
+            :incarnation incarnation
+            :stats       stats
+            :at          (System/currentTimeMillis)}
+     detail        (assoc :detail detail)
+     (seq samples) (assoc :samples (vec samples)))))
 
 (defn ->setting
   "The record of an operator's choice for the whole cluster."
@@ -859,6 +870,24 @@
   []
   (some? @*connection*))
 
+(defn broker-detail
+  "What broker `id` last told the cluster its console shows, or nil: not
+   attached, not a broker, or one that has not reported yet. Of `conn`
+   when given, else of the running broker's connection."
+  ([id] (some-> @*connection* (broker-detail id)))
+  ([{:keys [detail-state]} id]
+   (r/foreign-select-one (keypath id) detail-state)))
+
+(defn broker-history
+  "Broker `id`'s chart points after `after` millis (all of them for nil),
+   oldest first."
+  ([id after] (if-let [c @*connection*] (broker-history c id after) []))
+  ([{:keys [history-state]} id after]
+   (let [from (if after (inc (long after)) 0)
+         upto Long/MAX_VALUE]
+     (vec (vals (r/foreign-select-one [(keypath id) (sorted-map-range from upto)]
+                                      history-state))))))
+
 (def gauges
   "The counts in `$$counts` that go up and down with what the module
    holds, as against the event counts, which only go up."
@@ -1056,7 +1085,9 @@
                              (when-let [port @announced-port]
                                (when-not (get @(:brokers c) broker-id)
                                  (record! c (->broker-up advertised-host port))))
-                             (record! c (->broker-stats (:stats broker-event))))
+                             (record! c (->broker-stats (:stats broker-event)
+                                                        (:detail broker-event)
+                                                        (:samples broker-event))))
       nil)))
 
 (defn attach!

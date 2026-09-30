@@ -348,12 +348,24 @@
     return Math.floor(ms / 3600000) + "h";
   }
 
+  // A broker's page, as the server links it: the id as one path segment.
+  function brokerHref(id) {
+    return "/brokers/" + encodeURIComponent(id);
+  }
+
+  function brokerLink(id) {
+    return '<a class="cell-link" href="' + escapeHtml(brokerHref(id)) + '">' + escapeHtml(id) + "</a>";
+  }
+
   function setClients(clients) {
     var body = document.getElementById("client-list");
     if (!body || !clients) return;
+    // The cluster's list says which broker each client is on; a broker's
+    // own page does not need to.
+    var withBroker = body.dataset.withBroker === "true";
     if (clients.length === 0) {
       if (!body.querySelector("#client-list-empty")) {
-        body.innerHTML = '<tr id="client-list-empty"><td colspan="8">' +
+        body.innerHTML = '<tr id="client-list-empty"><td colspan="' + (withBroker ? 9 : 8) + '">' +
                          '<div class="event-empty">No clients connected.</div></td></tr>';
       }
       return;
@@ -364,6 +376,7 @@
       // Client ids are chosen by whoever connected: untrusted text, escaped.
       html += "<tr>" +
         '<td class="cell-topic" title="' + escapeHtml(c.id) + '">' + escapeHtml(c.id) + "</td>" +
+        (withBroker ? '<td class="cell-topic">' + (c.broker ? brokerLink(c.broker) : "—") + "</td>" : "") +
         "<td>" + pill(c.connected) + "</td>" +
         '<td class="cell-dim">' + escapeHtml(c.protocol) + "</td>" +
         '<td class="cell-dim">' + (c.clean ? "clean" : "persistent") + "</td>" +
@@ -406,7 +419,7 @@
       if (s) { clients += s.clients || 0; rate += (s["in"] || 0) + (s.out || 0); }
       // Broker ids come from the command line of whoever started them: untrusted text, escaped.
       html += "<tr>" +
-        '<td class="cell-topic" title="' + escapeHtml(b.id) + '">' + escapeHtml(b.id) +
+        '<td class="cell-topic" title="' + escapeHtml(b.id) + '">' + brokerLink(b.id) +
           (b.self ? '<span class="cell-dim"> (this one)</span>' : "") + "</td>" +
         "<td>" + brokerPill(b.stale) + "</td>" +
         '<td class="cell-dim">' + escapeHtml(b.address || "") + "</td>" +
@@ -581,6 +594,13 @@
     subject.textContent = entry.subject;
     what.appendChild(subject);
     what.appendChild(document.createTextNode(" " + entry.text));
+    // Which broker, when the list is the whole cluster's.
+    if (entry.broker) {
+      var where = document.createElement("span");
+      where.className = "event-where";
+      where.textContent = " on " + entry.broker;
+      what.appendChild(where);
+    }
     row.appendChild(when);
     row.appendChild(what);
     return row;
@@ -701,8 +721,21 @@
       setTopics(message.topics);
       setClients(message.clients);
       setBrokers(message.brokers);
-      if (message.sample) {
-        samples.push(message.sample);
+      setEvents(message.events);
+      // A chart drawn from Rama — the cluster's, or another broker's — gets
+      // the last few points every tick, since they arrive there five at a
+      // time and late: only those newer than the chart already has go on.
+      if (message.samples) {
+        var last = samples.length ? samples[samples.length - 1].t : -Infinity;
+        for (var k = 0; k < message.samples.length; k++) {
+          if (message.samples[k].t > last) {
+            samples.push(message.samples[k]);
+            last = message.samples[k].t;
+          }
+        }
+      }
+      if (message.sample || message.samples) {
+        if (message.sample) samples.push(message.sample);
         // Trimmed to what the server itself keeps, so a tab left open all day
         // holds no more than a reconnecting one would be given.
         var cap = Math.max(2, Math.round(retentionMs / intervalMs));
@@ -724,12 +757,18 @@
     var scheme = location.protocol === "https:" ? "wss:" : "ws:";
     // The page tells the socket what it is, so the server sends the one table
     // this page has somewhere to put rather than all of them to all of us.
-    var page = location.pathname === "/topics" ? "topics"
-             : location.pathname === "/clients" ? "clients"
-             : location.pathname === "/brokers" ? "brokers"
-             : location.pathname === "/rama" ? "rama"
+    var path = location.pathname;
+    var page = path === "/topics" ? "topics"
+             : path === "/clients" ? "clients"
+             : path === "/brokers" ? "brokers"
+             : path === "/rama" ? "rama"
+             : path.indexOf("/brokers/") === 0 ? "broker"
              : "overview";
-    var socket = new WebSocket(scheme + "//" + location.host + "/ws?page=" + page);
+    // One broker's page names the broker, as its path does.
+    var query = page === "broker"
+      ? "broker&id=" + encodeURIComponent(decodeURIComponent(path.slice("/brokers/".length)))
+      : page;
+    var socket = new WebSocket(scheme + "//" + location.host + "/ws?page=" + query);
 
     socket.onopen = function () {
       retry = 500;

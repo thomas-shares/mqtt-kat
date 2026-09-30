@@ -25,6 +25,7 @@
             [mqttkat.rama.module :as module]
             [mqttkat.retained :as retained]
             [mqttkat.test-util :as tu]
+            [mqttkat.web.cluster :as web-cluster]
             [mqttkat.web.console :as console]
             [mqttkat.web.state :as state])
   (:import [org.mqttkat MqttHandler]
@@ -1629,3 +1630,100 @@
       (is (empty? @(:proxies conn)))
       (finally
         (cluster/close! conn)))))
+
+(deftest every-console-sees-every-broker
+  ;; A cluster of its own, attached as the running broker's connection so
+  ;; the console reads it as it would in production: another broker, on a
+  ;; machine this one knows only by the address it advertised, reports what
+  ;; its console shows, and this broker's console shows it.
+  (with-redefs [cluster/in-process-config {:tasks (rand-nth [2 4 8]) :threads 2 :workers 1}
+                module/REPLACE-TICK-DEPOT true]
+    (let [conn    (cluster/watch! (cluster/connect :in-process))
+          expiry  (r/foreign-depot (:cluster conn) (:module-name conn) "*expiry-tick")
+          now     (System/currentTimeMillis)
+          point   (fn [t n] {:t t :clients n :in 10 :out 20 :queued 0 :heap 1000})
+          detail  {:reading      {:t now :clients 4 :parked 1 :subscriptions 2 :publish-in 50
+                                  :heap 1000 :heap-max 4000 :cores 2 :client-total 1
+                                  :retained 3 :listed 3 :uptime 60 :tracked-topics 1
+                                  :rates {"in" 10.0 "out" 20.0 "retained" 0.0} :cpu 0.5}
+                   :topics       [{:topic "far/topic" :total 5 :rate 2.0}]
+                   :clients      {:rows [{:id "far-client" :connected true :protocol "5.0" :clean false
+                                          :subscriptions 2 :inflight 0 :queued 0 :age-ms 1000}]
+                                  :total 1}
+                   :events       [{:t now :text "connected" :subject "far-client"}]
+                   :console-port 8081}
+          report  (fn [broker samples & [incarnation]]
+                    {:event :broker-stats :broker-id broker :incarnation (or incarnation "f1")
+                     :stats {:clients 4 :console-port 8081} :detail detail
+                     :samples samples :at (System/currentTimeMillis)})
+          history (fn [] (mapv :t (cluster/broker-history conn "far-away" nil)))
+          fresh!  (fn [] (web-cluster/forget!) (web-cluster/refresh!))]
+      (reset! cluster/*connection* conn)
+      (try
+        (record! conn {:event :broker-up :broker-id "far-away" :incarnation "f1"
+                       :host "10.0.0.9" :port 1883 :at now})
+        (record! conn (report "far-away" [(point (- now 2000) 3) (point (- now 1000) 4)]))
+        (is (tu/wait-until #(get-in @(:brokers conn) ["far-away" :stats])))
+
+        (testing "what a broker's console shows is kept in Rama, under its id"
+          (is (= 4 (get-in (cluster/broker-detail conn "far-away") [:reading :clients])))
+          (is (= [(- now 2000) (- now 1000)] (history)) "and its chart, a point a second, oldest first")
+          (is (= [(- now 1000)] (mapv :t (cluster/broker-history conn "far-away" (- now 2000))))
+              "read from a time, for what is new"))
+
+        (testing "a report from a run that is not the announced one is not kept"
+          (record! conn (report "far-away" [(point now 99)] "old-run"))
+          (is (= [(- now 2000) (- now 1000)] (history))))
+
+        (testing "nor one from a broker that never announced itself"
+          (record! conn (report "ghost" [(point now 1)]))
+          (is (nil? (cluster/broker-detail conn "ghost")))
+          (is (empty? (cluster/broker-history conn "ghost" nil))))
+
+        (testing "the console adds it to this broker's figures"
+          (fresh!)
+          (let [cv (web-cluster/cluster-view)]
+            (is (:multi? cv))
+            (is (= (+ 4 (:clients (state/reading))) (get-in cv [:reading :clients])))
+            (is (some #(= "far/topic" (:topic %)) (:topics cv)))
+            (is (some #(= {:id "far-client" :broker "far-away"} (select-keys % [:id :broker]))
+                      (get-in cv [:clients :rows])))
+            (is (some #(= "far-away" (:broker %)) (:events cv)) "its events say where"))
+          (is (str/includes? (console/clients-page) "far-client"))
+          (is (str/includes? (console/clients-page) "href=\"/brokers/far-away\"")
+              "each client links to the broker it is on"))
+
+        (testing "and the broker has a page of its own, wherever it runs"
+          (let [page (console/broker-page "far-away")]
+            (is (str/includes? page "<title>far-away — MQTT Console</title>"))
+            (is (str/includes? page "far-client"))
+            (is (str/includes? page "far/topic"))
+            (is (str/includes? page "href=\"http://10.0.0.9:8081/\"")
+                "linking to its own console at the address it advertises"))
+          (is (= [(- now 2000) (- now 1000)] (mapv :t (web-cluster/broker-history "far-away" nil)))
+              "with its chart from Rama")
+          (is (nil? (console/broker-page "nobody")) "and a broker that is not listed has none"))
+
+        (testing "a chart point older than the history keeps is dropped as new ones arrive"
+          ;; Kept for broker-history-millis before the newest: this one
+          ;; puts the first of the two before that, and the second after.
+          (let [later (+ (- now 1500) module/broker-history-millis)]
+            (record! conn (report "far-away" [(point later 5)]))
+            (is (= [(- now 1000) later] (history)))))
+
+        (testing "a broker that withdraws takes its console's state with it"
+          (record! conn {:event :broker-down :broker-id "far-away" :at now})
+          (is (nil? (cluster/broker-detail conn "far-away")))
+          (is (empty? (history))))
+
+        (testing "and so does one forgotten for saying nothing"
+          (record! conn {:event :broker-up :broker-id "quiet" :incarnation "q1" :host "h" :port 1 :at now})
+          (record! conn (assoc (report "quiet" [(point now 1)] "q1") :broker-id "quiet"))
+          (is (some? (cluster/broker-detail conn "quiet")))
+          @(r/foreign-append-async! expiry {:now (+ now module/broker-forgotten-after-millis 60000)} :ack)
+          (is (tu/wait-until #(nil? (cluster/broker-detail conn "quiet"))))
+          (is (empty? (cluster/broker-history conn "quiet" nil))))
+        (finally
+          (reset! cluster/*connection* nil)
+          (web-cluster/forget!)
+          (cluster/close! conn))))))

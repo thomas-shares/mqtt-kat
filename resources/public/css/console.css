@@ -78,6 +78,11 @@ body { font-size: 14px; }
 .main--settings { grid-template-rows: auto minmax(min-content, 1fr) auto; }
 /* Head, stats, the redirect form, then the table takes the rest. */
 .main--brokers { grid-template-rows: auto auto auto minmax(min-content, 1fr); }
+/* Head, facts, metrics, charts, then clients and topics taking the rest. */
+.main--broker { grid-template-rows: auto auto auto auto minmax(min-content, 1fr); }
+/* Two rows of panels here, not one: the first is in an auto row, and with
+   .panels' min-height of 0 that row would shrink under the second. */
+.main--broker > .panels { min-height: auto; }
 /* Head, stats, then the two tables side by side, taking the rest. */
 .main--rama { grid-template-rows: auto auto minmax(min-content, 1fr); }
 
@@ -165,6 +170,13 @@ body { font-size: 14px; }
   font-family: var(--font-heading); font-weight: var(--font-heading-weight);
   font-size: 24px; line-height: 1; font-variant-numeric: tabular-nums;
 }
+/* A fact rather than a figure — a state, an address — at the size a table
+   cell would have it, so a long host name is not a headline. */
+.stat-value--text { font-family: var(--font-body); font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+/* A broker's name, wherever it is listed: it goes to that broker's page. */
+.cell-link { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.cell-link:hover { color: var(--color-accent); }
+.event-where { color: var(--color-neutral-700); }
 .stat-value small { font-family: var(--font-body); font-size: 12px; font-weight: 600; color: var(--color-neutral-700); }
 
 /* ── panels & charts ───────────────────────────────────────────────── */

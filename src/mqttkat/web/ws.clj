@@ -8,12 +8,21 @@
    change. And, to the Rama page, the module's counts the moment Rama's
    proxy pushes them.
 
+   What \"the broker's state\" is depends on the page. The overview, topics
+   and clients pages show the cluster, added up from every broker's report
+   to Rama (see mqttkat.web.cluster); a broker's own page, /brokers/<id>,
+   shows that one, wherever it runs. With no cluster, the cluster is this
+   broker, and every page shows it live.
+
    Every message carries whole values rather than deltas, so a page that
    missed a frame or has only just opened is right after the next one, and
    there is nothing to replay on reconnect."
   (:require [cheshire.core :as json]
+            [clojure.string :as str]
             [clojure.tools.logging :as log]
             [mqttkat.events :as events]
+            [mqttkat.rama.cluster :as rama]
+            [mqttkat.web.cluster :as cluster]
             [mqttkat.web.state :as state]
             [org.httpkit.server :as http]))
 
@@ -99,24 +108,58 @@
           (log/debug t "dropping a websocket that could not be written to")
           (swap! sockets dissoc ch))))))
 
-(defn- page-of
-  "Which page a socket belongs to, from ?page= on the websocket URL.
+(defn- query-params [^String qs]
+  (into {}
+        (keep (fn [pair]
+                (let [[k v] (str/split pair #"=" 2)]
+                  (when (seq k)
+                    [(java.net.URLDecoder/decode (str k) "UTF-8")
+                     (java.net.URLDecoder/decode (str v) "UTF-8")]))))
+        (str/split (or qs "") #"&")))
+
+(defn page-of
+  "Which page a socket belongs to, from ?page= on the websocket URL: a
+   keyword, or [:broker id] for one broker's page, from ?page=broker&id=.
 
    Anything unrecognised is the overview, which is the page that wants least —
    an unknown page getting the smallest payload is the safe way round."
   [request]
-  (case (second (re-find #"(?:^|&)page=([^&]*)" (or (:query-string request) "")))
-    "topics"  :topics
-    "clients" :clients
-    "brokers" :brokers
-    "rama"    :rama
-    :overview))
+  (let [params (query-params (:query-string request))]
+    (case (get params "page")
+      "topics"  :topics
+      "clients" :clients
+      "brokers" :brokers
+      "rama"    :rama
+      "broker"  (if-let [id (not-empty (get params "id"))] [:broker id] :overview)
+      :overview)))
 
-(defn- page-fields
-  "The readings for `page`: every page's, and the Rama page's own on it."
-  [page reading]
-  (cond-> (state/fields reading)
-    (= page :rama) (merge (state/rama-fields))))
+(def ^:private broker-page? cluster/broker-page?)
+(def ^:private page-view cluster/page-view)
+
+(defn- self-page?
+  "Whether `page` shows this broker's own events: the cluster's pages do,
+   and this broker's own."
+  [page]
+  (or (keyword? page) (= page [:broker rama/broker-id])))
+
+(defn page-fields
+  "The readings for `page`."
+  [page]
+  (:fields (page-view page)))
+
+(defn- local-since [since]
+  (if since (filterv #(> (long (:t %)) (long since)) @history) @history))
+
+(defn- page-history
+  "The chart points `page` draws, after `since` millis or all of them: the
+   cluster's added up, a broker's own, or this broker's."
+  [page multi? since]
+  (cond
+    (broker-page? page)   (if (= (second page) rama/broker-id)
+                            (local-since since)
+                            (cluster/broker-history (second page) since))
+    (and multi? (= page :overview)) (cluster/cluster-history @history since)
+    :else                 (local-since since)))
 
 (defn snapshot
   "What a page needs to be completely up to date the moment it connects: the
@@ -126,18 +169,20 @@
    lives on one page only, so sending both to all three would be idle bandwidth
    on two of them."
   [page]
-  (let [now (state/current)]
+  (cluster/refresh!)
+  (let [pv (page-view page)]
     (cond-> {:event     "snapshot"
              :interval  sample-interval-ms
              ;; So the page can offer windows it can actually fill, rather than
              ;; hard-coding a guess at what the server keeps.
              :retention (* history-size sample-interval-ms)
-             :fields    (page-fields page now)
-             :history   @history
-             :events    (recent-events)}
-      (= page :topics)  (assoc :topics (:topics now))
-      (= page :clients) (assoc :clients (:rows (state/client-rows)))
-      (= page :brokers) (assoc :brokers (state/broker-rows)))))
+             :fields    (:fields pv)
+             :history   (page-history page (:multi? pv) nil)
+             :events    (:events pv)}
+      (#{:topics} page)          (assoc :topics (:topics pv))
+      (#{:clients} page)         (assoc :clients (:clients pv))
+      (broker-page? page)        (assoc :topics (:topics pv) :clients (:clients pv))
+      (= page :brokers)          (assoc :brokers (state/broker-rows)))))
 
 (defn handler [request]
   (let [page (page-of request)]
@@ -168,24 +213,61 @@
 
 (defonce ^:private ticks (atom 0))
 
+(defonce ^:private reported-up-to
+  ;; The time of the last chart point sent to the cluster.
+  (atom 0))
+
+(def ^:private tail-ms
+  "How far back a tick's points reach on a page drawn from Rama. The page
+   keeps the ones newer than it has, so this only has to be longer than a
+   report is late."
+  15000)
+
+(defn- report!
+  "Tell the cluster how this broker is doing: the registry's few figures,
+   what its console shows, and the chart points since the last report.
+   Onto the event bus, for whoever keeps the cluster's registry — the
+   console does not know whether there is one, and need not."
+  [reading detail]
+  (let [since   @reported-up-to
+        samples (filterv #(> (long (:t %)) (long since)) @history)]
+    (when (seq samples) (reset! reported-up-to (:t (peek samples))))
+    (events/emit! {:event   :broker-sample
+                   :stats   (state/broker-stats reading)
+                   :detail  detail
+                   :samples samples})))
+
 (defn- tick! []
   (let [reading (state/sample!)
         _       (state/rama-sample!)
-        point   (remember! (state/sample-point reading))]
-    ;; Onto the event bus, for whoever keeps the cluster's registry — the
-    ;; console does not know whether there is one, and need not.
+        point   (remember! (state/sample-point reading))
+        detail  (cluster/local-detail reading)]
+    (cluster/note-local! detail)
     (when (zero? (mod (swap! ticks inc) report-every))
-      (events/emit! {:event :broker-sample :stats (state/broker-stats reading)}))
+      (report! reading detail))
     (when (seq @sockets)
-      (broadcast!
-       (fn [page]
-         (json/generate-string
-          (cond-> {:event  "tick"
-                   :fields (page-fields page reading)
-                   :sample point}
-            (= page :topics)  (assoc :topics (:topics reading))
-            (= page :clients) (assoc :clients (:rows (state/client-rows)))
-            (= page :brokers) (assoc :brokers (state/broker-rows)))))))))
+      (cluster/refresh!)
+      (let [cv  (delay (cluster/cluster-view))
+            now (System/currentTimeMillis)]
+        (broadcast!
+         (fn [page]
+           (let [pv     (page-view page cv)
+                 remote (or (and (broker-page? page) (not= (second page) rama/broker-id))
+                            (and (:multi? pv) (= page :overview)))]
+             (json/generate-string
+              (cond-> {:event  "tick"
+                       :fields (:fields pv)}
+                ;; A page drawn from Rama gets the last few points and keeps
+                ;; the ones it has not got: they arrive five at a time, late.
+                remote                    (assoc :samples (page-history page (:multi? pv)
+                                                                        (- now tail-ms cluster/lag-ms)))
+                (not remote)              (assoc :sample point)
+                (:multi? pv)              (assoc :events (:events pv))
+                (= page :topics)          (assoc :topics (:topics pv))
+                (= page :clients)         (assoc :clients (:clients pv))
+                (broker-page? page)       (assoc :topics (:topics pv) :clients (:clients pv)
+                                                 :events (:events pv))
+                (= page :brokers)         (assoc :brokers (state/broker-rows)))))))))))
 
 (defn- describe
   "One line for the events list. The broker emits keywords and ids; turning
@@ -202,6 +284,7 @@
 (defn- log-event! [broker-event]
   (let [entry (assoc (describe broker-event) :t (System/currentTimeMillis))]
     (swap! event-log (fn [l] (vec (take-last event-log-size (conj l entry)))))
+    (cluster/note-events! (recent-events))
     entry))
 
 (defn- push-rama!
@@ -225,16 +308,25 @@
     ;; holes in it.
     (when (>= (- now sent) min-event-gap-ms)
       (swap! last-event assoc event now)
-      (let [payload (json/generate-string
-                     {:event  (name event)
-                      :fields (state/fields (state/current))
-                      :entry  entry})]
-        ;; The same for every page: an event is a reading, not a table.
-        (broadcast! (constantly payload))))))
+      ;; The readings as each page shows them — the cluster's, or one
+      ;; broker's — and the entry only to the pages whose events include
+      ;; this broker's.
+      (let [cv (delay (cluster/cluster-view))]
+        (broadcast!
+         (fn [page]
+           (json/generate-string
+            (cond-> {:event  (name event)
+                     :fields (:fields (page-view page cv))}
+              (self-page? page) (assoc :entry (cond-> entry
+                                                (and (keyword? page) (:multi? @cv))
+                                                (assoc :broker rama/broker-id)))))))))))
 
 (defn- on-broker-event [{:keys [event] :as broker-event}]
-  (if (= :rama-stats event)
-    (push-rama!)
+  (case event
+    :rama-stats    (push-rama!)
+    ;; The console's own report to the cluster, sent from the tick: not
+    ;; something that happened to the broker.
+    :broker-sample nil
     (on-broker-news broker-event)))
 
 (defn start!
@@ -265,6 +357,8 @@
     (try (http/close ch) (catch Throwable _ nil)))
   (reset! sockets {})
   (reset! last-event {})
+  (reset! reported-up-to 0)
+  (cluster/forget!)
   (state/forget!))
 
 (defn connected

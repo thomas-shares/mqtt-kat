@@ -9,12 +9,14 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [mqttkat.handlers :as handlers]
+            [mqttkat.rama.cluster :as rama]
             [mqttkat.sys :as sys]
             [mqttkat.test-util :as tu]
             [mqttkat.web.console :as console]
             [mqttkat.web.page :as page]
             [mqttkat.web.server :as web]
-            [mqttkat.web.state :as state])
+            [mqttkat.web.state :as state]
+            [mqttkat.web.ws :as ws])
   (:import [java.net URI]
            [java.net.http HttpClient HttpRequest HttpResponse$BodyHandlers]))
 
@@ -211,6 +213,7 @@
     ;; kept for when it is wired up, and this is what stops those rules being
     ;; dropped as unused in the meantime.
     (let [markup   (str (console/overview-page) (console/topics-page) (console/brokers-page)
+                        (console/clients-page) (console/broker-page rama/broker-id)
                         (console/rama-page) (console/settings-page))
           used     (into #{} (mapcat #(str/split % #"\s+"))
                          (map second (re-seq #"class=\"([^\"]+)\"" markup)))
@@ -290,3 +293,29 @@
       (is (= 400 (:status (post ""))))
       (is (= 405 (:status (web/handler {:request-method :post :uri "/brokers"})))
           "and nothing else takes a post"))))
+
+(deftest every-broker-has-a-page
+  (testing "this broker's, at its id, even with no cluster"
+    (let [ok (web/handler {:request-method :get :uri (console/broker-href rama/broker-id)})]
+      (is (= 200 (:status ok)))
+      (is (str/includes? (:body ok) (str "<title>" rama/broker-id " — MQTT Console</title>")))
+      (is (str/includes? (:body ok) "id=\"chart-throughput\"") "with its charts")
+      (is (str/includes? (:body ok) "id=\"client-list\"") "its clients")
+      (is (str/includes? (:body ok) "id=\"active-topics\"") "and its topics")))
+  (testing "and a broker the cluster does not have is not found, and says so"
+    (let [missing (web/handler {:request-method :get :uri "/brokers/no%20such"})]
+      (is (= 404 (:status missing)))
+      (is (str/includes? (:body missing) "no broker called no such"))))
+  (testing "an id is one path segment, however odd"
+    (is (= "/brokers/a%2Fb%20c%2Bd" (console/broker-href "a/b c+d")))))
+
+(deftest the-cluster-pages-say-what-they-add-up
+  (testing "with no cluster, the cluster is this broker"
+    (is (str/includes? (console/overview-page) "this broker"))
+    (is (str/includes? (console/clients-page) ">Broker</th>")
+        "and the client list has a column saying where each client is")))
+
+(deftest a-socket-knows-which-broker-its-page-is
+  (is (= [:broker "far away"] (ws/page-of {:query-string "page=broker&id=far%20away"})))
+  (is (= :overview (ws/page-of {:query-string "page=broker"})) "no id, no broker")
+  (is (= :clients (ws/page-of {:query-string "page=clients"}))))

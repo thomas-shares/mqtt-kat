@@ -9,6 +9,7 @@
             [mqttkat.rama.cluster :as cluster]
             [mqttkat.web.console :as console]
             [mqttkat.web.page :as page]
+            [mqttkat.web.state :as state]
             [mqttkat.web.ws :as ws]
             [org.httpkit.server :as http]
             [ring.middleware.content-type :refer [wrap-content-type]]
@@ -44,6 +45,15 @@
                          (java.net.URLDecoder/decode (str v) "UTF-8")]))))
             (str/split text #"&")))))
 
+(defn- broker-id-of
+  "The broker id in a /brokers/<id> path, decoded, or nil for any other
+   path. Decoded as a path segment: a + is a +, not a space."
+  [^String uri]
+  (when-let [[_ enc] (re-matches #"/brokers/([^/]+)" uri)]
+    (try
+      (java.net.URLDecoder/decode (str/replace enc "+" "%2B") "UTF-8")
+      (catch IllegalArgumentException _ nil))))
+
 (defn handler
   "Routing, such as it is. A function of a request map, so it can be called
    directly in a test without going near a socket.
@@ -74,6 +84,11 @@
 
     (not= :get request-method)
     {:status 405 :headers {"Allow" "GET"} :body "method not allowed"}
+
+    ;; One broker, wherever it runs.
+    (broker-id-of uri)
+    (let [[status body] (console/broker-or-missing-page (broker-id-of uri))]
+      (assoc (html body) :status status))
 
     :else
     (case uri
@@ -121,6 +136,9 @@
      (http/server-port @server)
      (try
        (let [s (http/run-server app {:port port :legacy-return-value? false})]
+         ;; Reported with this broker's figures, for the other brokers'
+         ;; consoles to link to.
+         (reset! state/console-port (http/server-port s))
          (ws/start!)
          (reset! server s)
          (log/info "http status page on port" (http/server-port s))
@@ -134,4 +152,5 @@
   (ws/stop!)
   (when-let [s @server]
     (http/server-stop! s)
+    (reset! state/console-port nil)
     (reset! server nil)))
