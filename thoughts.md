@@ -4,6 +4,21 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20260930
 
+### The cluster's "max" clients
+
+The overview's "of N max" for a cluster was each broker's own peak added
+up. Those peaks need not have happened at the same time, and a broker that
+restarts starts its peak again from zero, so the figure could be less than
+the chart had just drawn: 80 max under a chart that reached 105. It is now
+the cluster's own peak, the top of its chart over the history kept, and
+never less than the clients connected now.
+
+The tile and the chart also measure different moments. The tile is now:
+this broker live, the others as of their last report, at most five seconds
+old. The chart ends seven seconds ago, so each second has every broker's
+point in it. So when clients leave, the tile shows it up to about twelve
+seconds before the chart does.
+
 ### A colour per broker
 
 With a cluster the overview added the brokers up, but said so only in a

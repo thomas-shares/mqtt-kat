@@ -92,12 +92,28 @@
   []
   (assoc (or @local (local-detail (state/current))) :events @local-events))
 
+(defonce ^:private own-history
+  ;; This broker's chart points, oldest first, as a function: the websocket
+  ;; keeps them, and says where with `chart-from!`.
+  (atom (constantly [])))
+
+(defonce ^:private peak-cache
+  ;; [what it was worked out from, the cluster's peak]: see cluster-peak.
+  (atom nil))
+
+(defn chart-from!
+  "Read this broker's chart points from `f`, a function of no arguments."
+  [f]
+  (reset! own-history f))
+
 (defn forget!
   "Drop the copies. For tests and restarts."
   []
+  (reset! own-history (constantly []))
   (reset! local nil)
   (reset! local-events [])
-  (reset! remote {:at 0 :brokers {}}))
+  (reset! remote {:at 0 :brokers {}})
+  (reset! peak-cache nil))
 
 ;; ── the others, from Rama ─────────────────────────────────────────────
 
@@ -166,7 +182,7 @@
 
 (def ^:private summed
   "Reading keys that are per broker and add up to the cluster's."
-  [:clients :parked :max-clients :packets-in :packets-out :bytes-in :bytes-out
+  [:clients :parked :packets-in :packets-out :bytes-in :bytes-out
    :queued :inflight :dropped :throttled :sockets :connects :disconnects
    :publish-in :publish-out :subscriptions :heap :heap-max :cores :client-total])
 
@@ -187,6 +203,12 @@
      (into {} (map (fn [k] [k (add k)])) summed)
      (into {} (map (fn [k] [k (top k)])) shared)
      {:t                (reduce max (System/currentTimeMillis) (keep :t rs))
+      ;; Each broker's is the most it has had at once since it started, so
+      ;; adding them up would count peaks that never coincided, and a
+      ;; broker restarted since would drop its own: the most any one
+      ;; broker has had is all the readings alone can say. cluster-view
+      ;; puts the cluster's own peak, from its chart, over this.
+      :max-clients      (reduce max (add :clients) (keep :max-clients rs))
       :topics-truncated (boolean (some :topics-truncated rs))
       :cpu              (when (seq cpus) (reduce + 0.0 cpus))
       ;; Per second, and added up like the counters they come from, but for
@@ -283,6 +305,20 @@
          clip   (fn [[id h]] [id (filter #(>= (long (:t %)) (* 1000 (- from-s carry-seconds))) h)])]
      (combine-series (map clip (cons [rama/broker-id own] others)) from-s to-s))))
 
+(defn- cluster-peak
+  "The most clients the cluster has had connected at once, over the chart's
+   history: the top of its chart. Worked out again only when a report or a
+   point of this broker's has come in since."
+  []
+  (let [own (@own-history)
+        key [(:at @remote) (:t (peek (vec own)))]
+        [k v] @peak-cache]
+    (if (= k key)
+      v
+      (let [v (reduce max 0 (map :clients (cluster-history own)))]
+        (reset! peak-cache [key v])
+        v))))
+
 (defn broker-history
   "Broker `id`'s own chart points after `since`, from Rama's copy."
   [id since]
@@ -355,7 +391,10 @@
      :counted (count cs)
      ;; Alone, this broker's reading as it is: added up with nothing, it
      ;; would only lose its own timestamp.
-     :reading (if (multi? vs) (cluster-reading (map :reading d)) (:reading (first d)))
+     :reading (if (multi? vs)
+                (let [r (cluster-reading (map :reading d))]
+                  (update r :max-clients max (cluster-peak)))
+                (:reading (first d)))
      :topics  (merge-topics (map :topics d))
      :clients (merge-clients (map (juxt :id (comp :clients :detail)) cs))
      :events  (merge-events (map (juxt :id (comp :events :detail)) cs))

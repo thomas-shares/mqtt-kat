@@ -339,6 +339,7 @@
   "Begin sampling and forwarding. Idempotent."
   []
   (events/listen! ::console on-broker-event)
+  (cluster/chart-from! (fn [] @history))
   (when (compare-and-set! ticker nil ::starting)
     (let [running (atom true)]
       (reset! ticker running)
