@@ -62,14 +62,28 @@
 
 (deftest the-cluster-chart-is-a-sum-a-second
   (let [p (fn [t n] {:t t :clients n :in n :out n :queued 0 :heap n})]
-    (testing "each second is the brokers' points for it, added"
-      (is (= [{:t 10000 :clients 3 :in 3 :out 3 :queued 0 :heap 3}
-              {:t 11000 :clients 5 :in 5 :out 5 :queued 0 :heap 5}]
-             (cluster/combine-series [[(p 10100 1) (p 11050 2)] [(p 10900 2) (p 11900 3)]] 10 11))))
+    (testing "each second is the brokers' points for it, added, and each one's share"
+      (is (= [{:t 10000 :clients 3 :in 3 :out 3 :queued 0 :heap 3
+               :by {"a" {:clients 1 :in 1 :out 1} "b" {:clients 2 :in 2 :out 2}}}
+              {:t 11000 :clients 5 :in 5 :out 5 :queued 0 :heap 5
+               :by {"a" {:clients 2 :in 2 :out 2} "b" {:clients 3 :in 3 :out 3}}}]
+             (cluster/combine-series [["a" [(p 10100 1) (p 11050 2)]] ["b" [(p 10900 2) (p 11900 3)]]] 10 11))))
     (testing "a second a broker has no point for takes its last one, for a while"
       (is (= [[10000 3] [11000 3] [12000 3] [14000 1]]
              (mapv (juxt :t :clients)
-                   (cluster/combine-series [[(p 10000 1) (p 14000 1)] [(p 10000 2)]] 10 14)))
+                   (cluster/combine-series [["a" [(p 10000 1) (p 14000 1)]] ["b" [(p 10000 2)]]] 10 14)))
           "sampled on its own clock, a broker now and then skips a second; after a few, it has stopped"))
     (testing "and a second nobody has a point for is left out, not drawn as zero"
-      (is (= [10000] (mapv :t (cluster/combine-series [[(p 10000 1)]] 9 10)))))))
+      (is (= [10000] (mapv :t (cluster/combine-series [["a" [(p 10000 1)]]] 9 10)))))))
+
+(deftest every-broker-keeps-its-colour
+  (let [ids ["broker-a" "broker-b" "broker-c"]
+        p   (cluster/palette ids)]
+    (is (= (set ids) (set (keys p))))
+    (is (apply distinct? (vals p)) "no two brokers share a colour")
+    (is (every? #(<= 0 % (dec cluster/colours)) (vals p)))
+    (is (= p (cluster/palette (reverse ids))) "every console, whatever its order, agrees"))
+  (let [many (map #(str "b" %) (range 10))
+        p    (cluster/palette many)]
+    (is (= cluster/colours (count (filter number? (vals p)))))
+    (is (= 3 (count (filter #{"other"} (vals p)))) "past seven, the rest share the grey")))

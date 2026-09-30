@@ -4,6 +4,26 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20260930
 
+### A colour per broker
+
+With a cluster the overview added the brokers up, but said so only in a
+small stamp, so it read like one broker's page. Now it is titled "Cluster
+overview", has a card per broker under the head, and draws both charts as
+stacked bands, one per broker, so the top edge is still the cluster's total
+and each band is that broker's share. Hovering names each broker's figure.
+
+Each broker gets a colour from a fixed seven-colour categorical palette
+(checked for colour-blind separation against the page's background).
+`cluster/palette` hashes the id to a preferred slot and probes for the next
+free one, in sorted id order. So every console agrees without talking, and
+a broker keeps its colour as others join and leave unless it collided with
+one. Past seven brokers the rest share a grey rather than colours nobody
+could tell apart. The same swatch marks the broker on the clients and
+brokers pages, in the events list and on the broker's own page.
+
+The throughput chart stacks in + out per broker: two lines per broker
+stacked would be unreadable.
+
 ### One console for the whole cluster
 
 The console was one broker's: its overview, topics and clients were read

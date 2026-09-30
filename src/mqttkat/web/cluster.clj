@@ -247,19 +247,26 @@
 
 (def ^:private plotted [:clients :in :out :queued :heap])
 
+(def ^:private stacked
+  "What each broker's share of a cluster chart point is: the two charts'
+   series, drawn one band per broker."
+  [:clients :in :out])
+
 (defn combine-series
   "One chart point a second, from second `from-s` to `to-s`, each the sum
    over the brokers of that broker's point for the second — or its last
-   one, for up to `carry-seconds`. `histories` is one seq of points per
-   broker, in any order."
+   one, for up to `carry-seconds` — and, under :by, each broker's share.
+   `histories` is one [broker-id points] pair per broker, in any order."
   [histories from-s to-s]
-  (let [by-second (for [h histories]
-                    (into (sorted-map) (map (fn [p] [(quot (long (:t p)) 1000) p])) h))]
+  (let [by-second (for [[id h] histories]
+                    [id (into (sorted-map) (map (fn [p] [(quot (long (:t p)) 1000) p])) h)])]
     (vec (for [s (range from-s (inc (long to-s)))
-               :let [ps (keep #(point-of % s) by-second)]
+               :let [ps (keep (fn [[id h]] (when-let [p (point-of h s)] [id p])) by-second)]
                :when (seq ps)]
-           (reduce (fn [acc p] (merge-with + acc (select-keys p plotted)))
-                   (assoc (zipmap plotted (repeat 0)) :t (* 1000 (long s)))
+           (reduce (fn [acc [id p]]
+                     (-> (merge-with + acc (select-keys p plotted))
+                         (assoc-in [:by id] (select-keys p stacked))))
+                   (assoc (zipmap plotted (repeat 0)) :t (* 1000 (long s)) :by {})
                    ps)))))
 
 (defn cluster-history
@@ -269,18 +276,63 @@
   ([own] (cluster-history own nil))
   ([own since]
    (let [vs     (counted (views))
-         others (keep #(when-not (:self %) (:history (remote-of (:id %)))) vs)
+         others (keep #(when-not (:self %) [(:id %) (:history (remote-of (:id %)))]) vs)
          now    (System/currentTimeMillis)
          to-s   (quot (- now lag-ms) 1000)
          from-s (quot (long (or since (- now history-ms))) 1000)
-         clip   (fn [h] (filter #(>= (long (:t %)) (* 1000 (- from-s carry-seconds))) h))]
-     (combine-series (map clip (cons own others)) from-s to-s))))
+         clip   (fn [[id h]] [id (filter #(>= (long (:t %)) (* 1000 (- from-s carry-seconds))) h)])]
+     (combine-series (map clip (cons [rama/broker-id own] others)) from-s to-s))))
 
 (defn broker-history
   "Broker `id`'s own chart points after `since`, from Rama's copy."
   [id since]
   (let [h (:history (remote-of id))]
     (if since (filterv #(> (long (:t %)) (long since)) h) (vec h))))
+
+;; ── one colour per broker ─────────────────────────────────────────────
+
+(def colours
+  "How many brokers get a colour of their own: the console's categorical
+   palette (console.css, --broker-0 on). Past that the rest share one
+   grey, \"other\", rather than hues made up to order that nobody could
+   tell apart."
+  7)
+
+(defn palette
+  "Broker id -> its colour, 0 to `colours` - 1, or \"other\".
+
+   Each id asks for the slot its hash picks, and takes the next free one
+   if that is gone, the ids going in sorted order. So a broker keeps its
+   colour as others come and go, unless one it clashed with leaves, and
+   every console — each works this out for itself — agrees on it."
+  [ids]
+  (loop [[id & more] (sort (distinct ids)) taken #{} out {}]
+    (cond
+      (nil? id)                 out
+      (>= (count taken) colours) (recur more taken (assoc out id "other"))
+      :else (let [want (mod (hash id) colours)
+                  slot (first (remove taken (map #(mod (+ want %) colours) (range colours))))]
+              (recur more (conj taken slot) (assoc out id slot))))))
+
+(defn- member-state [{:keys [self stale detail]}]
+  (cond self "this broker" stale "stale" (nil? detail) "not reported yet" :else "up"))
+
+(defn members
+  "The brokers the overview adds up, each with its colour and the two
+   figures its charts draw: [{:id :colour :state :clients :rate}]."
+  [vs]
+  (let [p (palette (map :id vs))]
+    (mapv (fn [{:keys [id] :as v}]
+            (let [r     (get-in v [:detail :reading])
+                  rates (:rates r {})]
+              {:id      id
+               :colour  (get p id)
+               :state   (member-state v)
+               :counted (boolean (some #{v} (counted vs)))
+               :clients (state/commas (:clients r 0))
+               :rate    (str (state/commas (Math/round (double (+ (get rates "in" 0.0) (get rates "out" 0.0)))))
+                             " msg/s")}))
+          vs)))
 
 ;; ── what a page shows ─────────────────────────────────────────────────
 
@@ -306,15 +358,18 @@
      :reading (if (multi? vs) (cluster-reading (map :reading d)) (:reading (first d)))
      :topics  (merge-topics (map :topics d))
      :clients (merge-clients (map (juxt :id (comp :clients :detail)) cs))
-     :events  (merge-events (map (juxt :id (comp :events :detail)) cs))}))
+     :events  (merge-events (map (juxt :id (comp :events :detail)) cs))
+     :members (when (multi? vs) (members vs))}))
 
 (defn cluster-fields
   "The readings the cluster pages have besides a broker's own."
   [{:keys [multi? brokers counted]}]
-  {"cluster-note" (cond
-                    (not multi?)          "this broker"
-                    (= brokers counted)   (str brokers " brokers, added up")
-                    :else                 (str counted " of " brokers " brokers reporting, added up"))})
+  {"cluster-note"   (cond
+                      (not multi?)          "this broker"
+                      (= brokers counted)   (str brokers " brokers, added up")
+                      :else                 (str counted " of " brokers " brokers reporting, added up"))
+   "overview-kind"  (if multi? "Cluster health" "Broker health")
+   "overview-title" (if multi? "Cluster overview" "Overview")})
 
 (defn broker-fields
   "The readings the broker page has besides the broker's own figures."
@@ -355,4 +410,6 @@
                    (= page :rama) (merge (state/rama-fields)))
         :topics  (:topics c)
         :clients (:rows (:clients c))
-        :events  (:events c)}))))
+        :events  (:events c)
+        :members (:members c)
+        :palette (when (:multi? c) (palette (map :id (:members c))))}))))

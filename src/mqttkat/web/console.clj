@@ -166,6 +166,11 @@
 (defn- broker-link [id]
   [:a.cell-link {:href (broker-href id)} id])
 
+(defn- broker-key
+  "The swatch that says which colour is broker `colour`'s."
+  [colour]
+  [:span {:class (str "broker-key broker-c-" colour)}])
+
 (defn- cluster-note [fields]
   [:div.page-stamp.num {:id "cluster-note"} (fields "cluster-note")])
 
@@ -282,32 +287,57 @@
       [:div.event-list {:id "event-list"}
        [:div.event-empty "Nothing yet — connects and disconnects appear here."]]]]]))
 
+(defn- in-out-legend []
+  (list [:div.legend-item [:div.legend-key] "Inbound"]
+        [:div.legend-item [:div.legend-key.legend-key--out] "Outbound"]))
+
 (defn- chart-tools
-  "The chart window picker and legend, beside a page's stamp."
-  []
-  (list
-   ;; Filled in by the browser from the retention the server
-   ;; reports, so the options match what this broker actually
-   ;; keeps. Empty until then rather than guessed at here — a
-   ;; server-rendered "2m" that the page then replaced would be
-   ;; one flicker on every load.
-   [:div.chart-window {:id "chart-window" :role "group"}]
-   [:div.legend
-    [:div.legend-item [:div.legend-key] "Inbound"]
-    [:div.legend-item [:div.legend-key.legend-key--out] "Outbound"]]))
+  "The chart window picker and legend, beside a page's stamp. With
+   `members`, the charts are drawn a band per broker, and the legend says
+   whose each band is; console.js keeps it so as brokers come and go."
+  ([] (chart-tools nil))
+  ([members]
+   (list
+    ;; Filled in by the browser from the retention the server
+    ;; reports, so the options match what this broker actually
+    ;; keeps. Empty until then rather than guessed at here — a
+    ;; server-rendered "2m" that the page then replaced would be
+    ;; one flicker on every load.
+    [:div.chart-window {:id "chart-window" :role "group"}]
+    [:div.legend {:data-legend (if (seq members) "brokers" "in-out")}
+     (if (seq members)
+       (for [{:keys [id colour]} members]
+         [:div.legend-item (broker-key colour) id])
+       (in-out-legend))])))
+
+(defn- member-card [{:keys [id colour state clients rate counted]}]
+  [:a {:class (str "member broker-c-" colour (when-not counted " member--out")) :href (broker-href id)}
+   [:span.member-name (broker-key colour) [:span.member-id id]]
+   [:span.member-state state]
+   [:span.member-figs.num (str clients " clients · " rate)]])
+
+(defn- members-strip
+  "The brokers the overview adds up, one card each in its colour: what
+   says, at a glance, that this is a cluster and whose part is whose.
+   Hidden with no cluster, and kept by console.js as brokers come and go."
+  [members]
+  [:div.members {:data-members "" :hidden (empty? members)}
+   (map member-card members)])
 
 (defn overview-page []
-  (let [fields (:fields (page-view :overview))]
+  (let [{:keys [fields members]} (page-view :overview)]
     (layout
      {:title "Overview — MQTT Console" :active :overview :sidebar-foot (broker-foot fields)}
      [:div.main
-      (page-head
-       {:eyebrow "Cluster health"
-        :title "Overview"
-        :tools (list
-                (cluster-note fields)
-                [:div.page-stamp.num {:id "stamp"} (fields "stamp")]
-                (chart-tools))})
+      [:div.overview-head
+       (page-head
+        {:eyebrow [:span {:id "overview-kind"} (fields "overview-kind")]
+         :title [:span {:id "overview-title"} (fields "overview-title")]
+         :tools (list
+                 (cluster-note fields)
+                 [:div.page-stamp.num {:id "stamp"} (fields "stamp")]
+                 (chart-tools members))})
+       (members-strip members)]
       (overview-body fields)])))
 
 ;; ── topics ────────────────────────────────────────────────────────────
@@ -382,11 +412,18 @@
 
 (defn- client-row
   "One client. With `with-broker?`, which broker it is on: the cluster's
-   list has every broker's clients, a broker's page only its own."
+   list has every broker's clients, a broker's page only its own. It is
+   the cluster's palette when there is one, to mark the broker in its
+   colour."
   [with-broker? {:keys [id broker connected protocol clean subscriptions inflight queued age-ms]}]
   [:tr
    [:td.cell-topic {:title id} id]
-   (when with-broker? [:td.cell-topic (if broker (broker-link broker) "—")])
+   (when with-broker?
+     [:td.cell-topic (if broker
+                       (list (when-let [c (and (map? with-broker?) (get with-broker? broker))]
+                               (list (broker-key c) " "))
+                             (broker-link broker))
+                       "—")])
    [:td [:span {:class (str "pill" (when-not connected " pill--dim"))}
          (if connected "connected" "parked")]]
    [:td.cell-dim protocol]
@@ -414,7 +451,7 @@
        (map (partial client-row with-broker?) rows))]]])
 
 (defn clients-page []
-  (let [{:keys [fields clients]} (page-view :clients)]
+  (let [{:keys [fields clients palette]} (page-view :clients)]
     (layout
      {:title "Clients — MQTT Console"
       :active :clients
@@ -435,7 +472,7 @@
        [:div.panel-head
         [:h2.panel-title "Clients"]
         [:div.chart-scale.num {:id "clients-note"} (fields "clients-note")]]
-       (client-table clients true)]])))
+       (client-table clients (or palette true))]])))
 
 (defn- broker-row
   "One broker as the cluster's registry has it. The same shape console.js
@@ -566,7 +603,8 @@
          [:div.main.main--broker
           (page-head
            {:eyebrow [:a.cell-link {:href "/brokers"} "Brokers"]
-            :title id
+            :title (let [p (cluster/palette (map :id (cluster/views)))]
+                     (if (next p) (list (broker-key (get p id)) " " id) id))
             :tools (list [:div.page-stamp.num {:id "stamp"} (fields "stamp")]
                          (chart-tools))})
 
