@@ -214,7 +214,8 @@
         (is (nil? @(:conn cl)))))
     (testing "and a policy is what turns following on"
       (is (not (runner/redirecting? (runner/config []))))
-      (is (runner/redirecting? (runner/config ["chaos/redirect.edn"]))))))
+      (is (runner/redirecting? (runner/config ["chaos/redirect.edn"])))
+      (is (runner/redirecting? (runner/config ["chaos/load.edn"]))))))
 
 ;; The check looks each subscription's messages up by time rather than trying
 ;; every message against every subscription, which a long run could not

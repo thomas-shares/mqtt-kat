@@ -1,0 +1,45 @@
+;; A steady load on N brokers, and nothing else: no client is killed, no
+;; subscription toggled, no broker touched. Every client connects to broker 1,
+;; which spreads them over the cluster round robin with a Server Reference
+;; (§4.13), and the publishers then publish at :rate for :duration-s.
+;; Afterwards the usual check that every message arrived as its QoS promised.
+;;
+;;   bb scripts/chaos.bb chaos/load.edn
+;;
+;; The three knobs are the first lines below:
+;;
+;;   N  :setup :brokers :count
+;;   X  :load :publishers + :load :subscribers (the clients)
+;;   Y  :load :duration-s
+;;
+;; or lay a small file over this one instead of editing it:
+;;
+;;   bb scripts/chaos.bb chaos/load.edn my-load.edn
+;;   ;; my-load.edn
+;;   {:setup {:brokers {:count 5}}
+;;    :load  {:publishers 100 :subscribers 400 :duration-s 1800}}
+;;
+;; Version 5 clients only, since a 3.1.1 client cannot be redirected and would
+;; stay on broker 1. Needs Rama, as redirect.edn does.
+{:setup {:brokers  {:count 3                ; N
+                    :port 1885 :http 8085 :heap "2g" :rama :external}
+         :rama     {:start? true :stop? false}
+         :redirect {:policy :round-robin :via :disconnect}}
+
+ :load {:publishers  40                     ; X = 40 + 160
+        :subscribers 160
+        :duration-s  300                    ; Y
+        :rate        1000                   ; messages a second, all publishers together
+        :size        256
+        :topics      20
+        :qos         {0 1, 1 2, 2 1}
+        :sub-qos     {0 1, 1 2, 2 1}
+        :persistent  0.5
+        :wildcard    0.1
+        ;; A weight of 0, not a missing key: maps merge over the defaults.
+        :mqtt        {4 0, 5 1}}
+
+ :chaos {}
+
+ :check {:subscribe-settle-ms 2000
+         :drain-ms            10000}}
