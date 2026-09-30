@@ -987,6 +987,7 @@
   ;; {:resume    (fn [client-id] -> {:session :subscriptions :queued} or nil)
   ;;  :enqueue!  (fn [client-id msg key]) — key nil for a new one
   ;;  :dequeue!  (fn [client-id keys])
+  ;;  :settled!  (fn [broker-id msg-keys])
   ;;  :takeover! (fn [broker-id client-id connect-id])} or nil.
   ;; Installed by mqttkat.rama.cluster when the broker is attached to a
   ;; cluster: sessions then live there, a client may come back to any
@@ -1049,14 +1050,117 @@
     (when (empty? before)
       (at/after dequeue-batch-millis flush-dequeues! my-pool))))
 
+(defonce ^:private origin-holds
+  ;; {[origin msg-key] {:clients #{client-id ...} :at millis}}: messages
+  ;; another broker forwarded here, and the clients here that keep their
+  ;; sessions it was delivered to and that have not acknowledged it yet.
+  ;; ::fanout stands in the set while the message is being delivered, so it
+  ;; cannot empty before every client has been counted.
+  (atom {}))
+
+(defonce ^:private settle-batch
+  ;; {origin #{msg-key ...}}: word to the forwarding broker waiting to go.
+  (atom {}))
+
+(def settle-batch-millis
+  "How long word that forwarded messages are delivered gathers before it
+   goes back to their broker: one message per broker per batch."
+  100)
+
+(def origin-hold-limit-millis
+  "How long a forwarded message is held for its clients here before it is
+   let go without them: the forwarding broker stops waiting at about this
+   long too (mqttkat.bridge/awaiting-limit-ms)."
+  60000)
+
+(declare sweep-origin-holds!)
+
+(defonce ^:private origin-holds-swept (atom 0))
+
+(defn- flush-settled! []
+  (let [now (System/currentTimeMillis)]
+    (when (> (- now (long @origin-holds-swept)) 5000)
+      (reset! origin-holds-swept now)
+      (sweep-origin-holds!)))
+  (let [[batch _] (reset-vals! settle-batch {})]
+    (when-let [{:keys [settled!]} @session-source]
+      (doseq [[origin ks] batch]
+        (try
+          (settled! origin ks)
+          (catch Exception e
+            (log/warn e "could not tell" origin "that" (count ks) "messages are delivered")))))))
+
+(defn- settle-soon!
+  "Tell `origin` with the next batch that `k` has reached everyone here."
+  [origin k]
+  (let [[before _] (swap-vals! settle-batch update origin (fnil conj #{}) k)]
+    (when (empty? before)
+      (at/after settle-batch-millis flush-settled! my-pool))))
+
+(defn- release-origin-hold!
+  "`member` — a client-id, or ::fanout — no longer holds the message `k`
+   that `origin` forwarded here. The last one out tells `origin`, which has
+   been keeping it in case this broker died first (see mqttkat.bridge,
+   \"delivered, not only taken\")."
+  [origin k member]
+  (let [[before after] (swap-vals! origin-holds
+                                   (fn [m]
+                                     (if-let [{:keys [clients]} (get m [origin k])]
+                                       (let [left (disj clients member)]
+                                         (if (empty? left)
+                                           (dissoc m [origin k])
+                                           (assoc-in m [[origin k] :clients] left)))
+                                       m)))]
+    (when (and (contains? before [origin k]) (not (contains? after [origin k])))
+      (settle-soon! origin k))))
+
+(defn- hold-for-origin!
+  "Count `client-id` among those holding `origin`'s message `k`."
+  [origin k client-id]
+  (swap! origin-holds (fn [m]
+                        (if (contains? m [origin k])
+                          (update-in m [[origin k] :clients] conj client-id)
+                          m))))
+
+(defn- sweep-origin-holds!
+  "Let go of holds older than origin-hold-limit-millis, without word."
+  []
+  (let [cutoff (- (System/currentTimeMillis) (long origin-hold-limit-millis))]
+    (swap! origin-holds (fn [m]
+                          (if (some #(< (long (:at (val %))) cutoff) m)
+                            (into {} (remove #(< (long (:at (val %))) cutoff)) m)
+                            m)))))
+
+(defn- delivering-for-origin
+  "Call `deliver`, which delivers `msg` here, holding the message for its
+   broker of origin — if it came over a bridge — until every client that
+   keeps its session and was sent it has acknowledged it. Returns what
+   `deliver` returns."
+  [{origin ::origin k ::msg-key} deliver]
+  (if-not (and origin k)
+    (deliver)
+    (do
+      (swap! origin-holds (fn [m]
+                            (if (contains? m [origin k])
+                              (update-in m [[origin k] :clients] conj ::fanout)
+                              (assoc m [origin k] {:clients #{::fanout}
+                                                   :at      (System/currentTimeMillis)}))))
+      (try
+        (deliver)
+        (finally
+          (release-origin-hold! origin k ::fanout))))))
+
 (defn- settled!
   "A message has been acknowledged, or found expired: it is done. One from
    the cluster's queue comes off it there. One delivered live under its
    message key, to a client another broker may have taken for away and
    queued it for, comes off the queue too, now and once more a little
    later: the client has it, and a copy queued anywhere would be a second
-   delivery on its next resume. Any other message was never on it."
+   delivery on its next resume. Any other message was never on it. One
+   another broker forwarded here is no longer held for it by this client."
   [client-id msg]
+  (when-let [origin (::origin msg)]
+    (release-origin-hold! origin (::msg-key msg) client-id))
   (when-let [{:keys [dequeue!]} @session-source]
     (when-let [k (::cluster-key msg)]
       (dequeue! client-id [k]))
@@ -1111,7 +1215,13 @@
             ;; in between repeats it rather than losing it.
             (when-let [old (::cluster-key msg)]
               (when-not (= old k)
-                (dequeue! client-id [old])))))))))
+                (dequeue! client-id [old])))))
+        ;; On the cluster's queue now, under the message's key, or had by
+        ;; the client already: either way no longer this broker's alone.
+        (doseq [msg (concat (vals inflight) pending)
+                :let [origin (::origin msg)]
+                :when origin]
+          (release-origin-hold! origin (::msg-key msg) client-id))))))
 
 (defn- restore-queued!
   "Put a message from the cluster's queue on `client-id`'s outbound state: in
@@ -2049,13 +2159,22 @@
   [delivery msg key client-id]
   (if-let [k (::msg-key msg)]
     (let [client  (get @*clients* key)
-          recent? (and (keep-session? client)
+          kept?   (keep-session? client)
+          recent? (and kept?
                        (< (- (System/currentTimeMillis) (long (or (:connected-at client) 0)))
-                          (long reconcile-window-millis)))]
+                          (long reconcile-window-millis)))
+          ;; Forwarded by another broker, to a client whose session outlives
+          ;; this broker: held for it until the client has it, see
+          ;; delivering-for-origin.
+          origin  (when kept? (::origin msg))
+          held    #(if origin
+                     (do (hold-for-origin! origin k client-id)
+                         (assoc % ::origin origin))
+                     %)]
       (cond
-        (not recent?)                (assoc delivery ::msg-key k)
+        (not recent?)                (held (assoc delivery ::msg-key k))
         (holds-message? client-id k) nil
-        :else                        (assoc delivery ::msg-key k ::reconcile? true)))
+        :else                        (held (assoc delivery ::msg-key k ::reconcile? true))))
     delivery))
 
 (defn qos-1-send
@@ -2348,9 +2467,11 @@
       ;; is in both tries for a moment, and whether it is live is decided
       ;; once, by the delivery. A subscriber back since, whose queue was
       ;; flushed without this, is flushed again by queue-for-offline-sessions!.
-      1 (let [live (qos-1 keys topic msg)]
-          (queue-for-offline-sessions! topic msg live)
-          (forward-to-brokers! plan topic msg live))
+      1 (delivering-for-origin
+         msg
+         #(let [live (qos-1 keys topic msg)]
+            (queue-for-offline-sessions! topic msg live)
+            (forward-to-brokers! plan topic msg live)))
       ;; Not for QoS 2: that message is not published until its PUBREL
       ;; arrives (§4.3.3), so it is kept for offline sessions there — and
       ;; routed there, for the same reason: the subscribers are whoever
@@ -2465,9 +2586,13 @@
   (if (and (:user-properties properties)
            (bridge/bridge? (:client-id (get @*clients* client-key))))
     (let [only?                (bridge/groups-only? properties)
-          [shares properties'] (bridge/take-shares properties)]
+          [shares properties'] (bridge/take-shares properties)
+          k                    (bridge/msg-key properties)]
       (cond-> (assoc msg :properties properties' ::shares shares ::groups-only? only?)
-        (bridge/msg-key properties) (assoc ::msg-key (bridge/msg-key properties))))
+        k (assoc ::msg-key k)
+        ;; Where it came from, for word back once it is delivered. Not for
+        ;; a copy for groups only: its sender holds nothing for it.
+        (and k (not only?)) (assoc ::origin (bridge/origin (:client-id (get @*clients* client-key))))))
     msg))
 
 (def control-prefix
@@ -2498,10 +2623,14 @@
 
 (defn- control!
   "Act on an instruction from another broker."
-  [{:keys [topic properties]}]
+  [{:keys [topic properties payload client-key]}]
   (let [ups (into {} (map vec) (:user-properties properties))]
     (case (subs topic (count control-prefix))
       "takeover" (take-over-for-elsewhere! (get ups "client-id") (get ups "connect-id"))
+      ;; The messages this broker forwarded that the other one has now
+      ;; delivered to everyone there it was for.
+      "settled"  (bridge/settled-by! (bridge/origin (:client-id (get @*clients* client-key)))
+                                     (str/split-lines (String. ^bytes payload "UTF-8")))
       (log/warn "unknown instruction from another broker:" topic))))
 
 (defn- control-message?
@@ -2631,10 +2760,12 @@
       ;; §4.3.3 publishes on the PUBREL, so the subscribers are whoever matches
       ;; now — but they are chosen the same way as on any other publish.
       (let [{:keys [plan serve-group? groups-only?]} (route topic msg)]
-        (let [live (qos-2-send (subscribers-for topic (:client-key msg) serve-group? groups-only?)
-                               topic msg)]
-          (queue-for-offline-sessions! topic msg live)
-          (forward-to-brokers! plan topic msg live))))
+        (delivering-for-origin
+         msg
+         #(let [live (qos-2-send (subscribers-for topic (:client-key msg) serve-group? groups-only?)
+                                 topic msg)]
+            (queue-for-offline-sessions! topic msg live)
+            (forward-to-brokers! plan topic msg live)))))
     (when (contains? @*inflight* [client-id packet-identifier])
       ;; The slot is given back on PUBREL, which is what makes the quota a
       ;; limit on messages in flight rather than on messages ever sent.

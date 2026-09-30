@@ -4,6 +4,51 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20260930
 
+### A broker that dies no longer takes its subscribers' messages with it
+
+A message forwarded to another broker stopped being the forwarding broker's
+business at the other one's PUBACK. That only says the other broker has it,
+not that its subscribers do. If it died then, with the message still on its
+way to a persistent subscriber or waiting for its acknowledgement, nothing
+else had a copy, and the subscriber came back on another broker to a session
+that had never heard of it.
+
+Now the publisher's broker keeps each forwarded QoS 1 or 2 message after the
+PUBACK (or the PUBREC, for QoS 2) in `awaiting` in `mqttkat.bridge`, until
+the receiving broker says it is delivered. The receiving broker holds a
+forwarded message for each client there that keeps its session and was sent
+it, and lets it go when the client acknowledges it or when its session is
+handed to the cluster's queue. When the last one lets go, it sends back
+`$mqttkat/settled` with the message's key. Those go in batches every 100 ms,
+one publish per broker, and for a message that no kept session here was sent,
+the word goes back straight after the fan-out.
+
+If the link to the receiving broker goes, the link now notices on its next
+poll, not only on its next write. What that broker had taken and not said was
+delivered is then queued in the cluster for the clients it was for, under the
+message's key, a second later. The second is so word already on its way
+still counts. A registry drop gives up at once. A hand-over queues under the
+same key, so a broker that stopped cleanly and a publisher that gave up on it
+make one queue entry, not two. This broker leaving the cluster forgets what
+it was waiting for rather than queuing it, because its peers are still alive.
+A message nobody has answered for after a minute is taken as delivered, on
+both sides, so neither holds memory for a subscriber that never acknowledges.
+
+What is still open around it:
+
+- A client that had acknowledged the message on the dead broker, before
+  that broker's word got back, gets it again on its next resume. For QoS 1
+  that is allowed. For QoS 2 it is the "delivered twice across a crash" item
+  that was already open.
+- The copy is queued a second or so after the broker dies. A client that
+  reconnected elsewhere before that gets it on its next reconnect, not
+  straight away.
+- A shared group's member on the dead broker is not covered: a copy for a
+  group is let go at the PUBACK as before.
+- A message a broker's own client published to its own persistent
+  subscribers never crossed a bridge, so a crash still loses it in flight.
+  The fix above has nothing to hold it with.
+
 ### The cluster's "max" clients
 
 The overview's "of N max" for a cluster was each broker's own peak added
@@ -364,7 +409,9 @@ broker is queued in Rama for them, and a client that comes back on another
 broker gets it there. A shared group whose chosen broker is dead is served by
 another member's broker. Left over:
 
-- **Messages at the dead broker when it died are lost.** A message the dead
+- ~~**Messages at the dead broker when it died are lost.**~~ Fixed for
+  forwarded messages on 20260930, see "A broker that dies no longer takes its
+  subscribers' messages with it". A message the dead
   broker had acknowledged over the bridge, and was still sending to its
   subscriber, died with it. Nothing else holds a copy. Fixing it means the
   publisher's broker keeps each message until the end subscriber has
