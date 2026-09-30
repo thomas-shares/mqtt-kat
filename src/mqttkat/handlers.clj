@@ -8,7 +8,9 @@
             [mqttkat.bridge :as bridge]
             [mqttkat.retained :as retained]
             [mqttkat.trie :refer [trie-insert trie-delete trie-matching-vals sieve-dollar]])
-  (:import [java.util.concurrent.atomic LongAdder]
+  (:import [java.util.concurrent CompletableFuture]
+           [java.util.concurrent.atomic LongAdder]
+           [java.util.function BiConsumer]
            [org.mqttkat MqttStat MqttReasonCode TopicStats]
            [java.nio.channels SelectionKey]
            [org.mqttkat.server Connection MqttServer]
@@ -1150,6 +1152,33 @@
         (finally
           (release-origin-hold! origin k ::fanout))))))
 
+(def ^:dynamic *hand-offs*
+  "While a publish is handled on a cluster: the writes to Rama that must land
+   before its publisher is told the broker has it. Nil otherwise."
+  nil)
+
+(defn hand-off!
+  "Note `fut`, a write of the message being published to somewhere that
+   outlives this broker, so its acknowledgement waits for it. Returns `fut`.
+   Outside a publish, nothing waits: a write a lost bridge copy makes later
+   is for a message its publisher was told of long ago."
+  [fut]
+  (when (and fut *hand-offs*)
+    (.add ^java.util.List *hand-offs* fut))
+  fut)
+
+(defn- once-handed-off!
+  "Call `ack!` once every write in `held` has landed, or failed: a failure is
+   logged where the write was made, and holding the acknowledgement for ever
+   would only keep the publisher's slot. At once when there are none, which
+   is every publish with nobody away and nobody behind."
+  [^java.util.List held ack!]
+  (if (.isEmpty held)
+    (ack!)
+    (.whenComplete (CompletableFuture/allOf (into-array CompletableFuture held))
+                   (reify BiConsumer
+                     (accept [_ _ _] (ack!))))))
+
 (defn- settled!
   "A message has been acknowledged, or found expired: it is done. One from
    the cluster's queue comes off it there. One delivered live under its
@@ -1531,6 +1560,34 @@
                      (not (re-find #"[/+#]" group)))
             {:filter subscription-filter :topic-filter inner :share-group group}))))))
 
+(defn subscription-filter-error
+  "Why the broker cannot accept `subscription-filter`, as the reason code it
+   disconnects with, or nil when the filter is fine.
+
+   A malformed filter is a protocol violation, not a refusal (§4.7.1, §4.8.2).
+   0x8F Topic Filter Invalid is for a filter that is \"correctly formed but is
+   not accepted\"; one with a wildcard in the wrong place is not correctly
+   formed at all, and 3.1.1 §4.8 says to close the connection on a protocol
+   violation. The codes are the ones Mosquitto sends, so the two brokers can be
+   held to the same test:
+
+     - 0x81 Malformed Packet: an empty filter, a wildcard that is not a whole
+       level, a level after `#`, or a share name containing + or #;
+     - 0x82 Protocol Error: a share that is missing its group or its filter,
+       `$share/`, `$share/group`, `$share//topic` or `$share/group/`."
+  [^String subscription-filter]
+  (if-not (and subscription-filter (.startsWith subscription-filter share-prefix))
+    (when-not (valid-topic-filter? subscription-filter)
+      MqttReasonCode/MALFORMED_PACKET)
+    (let [rest  (subs subscription-filter (count share-prefix))
+          slash (.indexOf rest "/")
+          group (if (neg? slash) rest (subs rest 0 slash))
+          inner (when-not (neg? slash) (subs rest (inc slash)))]
+      (cond
+        (re-find #"[+#]" group)            MqttReasonCode/MALFORMED_PACKET
+        (or (empty? group) (empty? inner)) MqttReasonCode/PROTOCOL_ERROR
+        (not (valid-topic-filter? inner))  MqttReasonCode/MALFORMED_PACKET))))
+
 (defonce ^:private shared-cursor
   ;; Which member of each group gets the next message. §4.8.2 leaves the choice
   ;; to the implementation — the reference broker picks at random — but a
@@ -1861,6 +1918,26 @@
       (when (<= (pending-count client-id) resume-threshold)
         (.ackDrained subscriber)))))
 
+(defn- hold-back!
+  "queue-pending!, for a live delivery the client has no room for yet. A copy
+   for a session that outlives its connection is put on the cluster's queue
+   too, under its message key, before the publisher is told the broker has
+   it: waiting in this broker's memory for a window slot, it died with the
+   broker, and the session resumed elsewhere without it. From then on it is
+   one of the queue's own, and comes off it when the client acknowledges it
+   (settled!). What is sent at once is in the socket's hands, which outlive
+   the process."
+  [key client-id msg]
+  (let [k     (::msg-key msg)
+        keep? (and k (nil? (::cluster-key msg)) @session-source
+                   (keep-session? (get @*clients* key)))
+        msg   (cond-> msg keep? (assoc ::cluster-key k))]
+    (when (queue-pending! client-id msg)
+      (when keep?
+        (hand-off! ((:enqueue! @session-source)
+                    client-id (select-keys msg [:topic :payload :qos :properties]) k)))
+      true)))
+
 (declare deliver-now-or-queue!)
 
 (defn- deliver-or-queue!
@@ -1878,7 +1955,7 @@
     ;; CONNACK. Unless that flush has been and gone while this was queued,
     ;; which the second look catches.
     (awaiting-connack? key)
-    (do (queue-pending! client-id msg)
+    (do (hold-back! key client-id msg)
         (when-not (awaiting-connack? key)
           (flush-pending! key client-id)))
 
@@ -1895,7 +1972,7 @@
     (when-not (send-publish! key msg packet-identifier)
       (release-packet-identifier! client-id packet-identifier))
     (do
-      (when-not (queue-pending! client-id msg)
+      (when-not (hold-back! key client-id msg)
         (.increment ^LongAdder MqttStat/droppedMessages))
       (when (>= (pending-count client-id) pause-threshold)
         (throttle-publisher! key publisher-key client-id)))))
@@ -2241,18 +2318,25 @@
                           MqttReasonCode/SUCCESS
                           MqttReasonCode/NO_MATCHING_SUBSCRIBERS))))
 
-(defn qos-1 [keys topic {:keys [client-key packet-identifier] :as msg}]
+(defn qos-1
+  "Deliver a QoS 1 publish to `keys`, this broker's subscribers, and return
+   the client-ids it reached live. The PUBACK first, unless `ack?` is false:
+   on a cluster publish-keyed sends it itself, once the message is safe from
+   this broker's death."
+  ([keys topic msg] (qos-1 keys topic msg true))
+  ([keys topic {:keys [client-key packet-identifier] :as msg} ack?]
   #_(log/trace  "qos 1 received... " (count keys))
-  (send-buffer [client-key]
-               (MqttPubAck/encode
-                (ack-for :PUBACK client-key packet-identifier (seq keys))))
+  (when ack?
+    (send-buffer [client-key]
+                 (MqttPubAck/encode
+                  (ack-for :PUBACK client-key packet-identifier (seq keys)))))
   (some-> (filter qos-0? keys)
           (seq)
           (qos-0 topic msg false))
   (or (some-> (filter qos-1-or-2? keys)
               (seq)
               (qos-1-send topic msg))
-      #{}))
+      #{})))
 
 ;  (doseq [k qos-1-keys]
 ;    (log/trace "K" k)
@@ -2309,8 +2393,9 @@
    Only for version 5 clients: 3.1.1 has no Receive Maximum, so there is no
    promise to break, and no DISCONNECT it could read if there were.
 
-   QoS 1 is not counted because it is never outstanding here — the broker sends
-   the PUBACK as it handles the publish, so the window is microseconds wide.
+   QoS 1 is not counted because it is barely outstanding here — the broker sends
+   the PUBACK as it handles the publish, or on a cluster once the writes to
+   Rama it made have landed, so the window is milliseconds wide.
    QoS 2 is the one a client can fill, by publishing and never releasing."
   [client-key]
   (and (>= (protocol-version-of client-key) 5)
@@ -2467,11 +2552,29 @@
       ;; is in both tries for a moment, and whether it is live is decided
       ;; once, by the delivery. A subscriber back since, whose queue was
       ;; flushed without this, is flushed again by queue-for-offline-sessions!.
-      1 (delivering-for-origin
-         msg
-         #(let [live (qos-1 keys topic msg)]
+      ;; On a cluster the PUBACK waits for the writes to Rama this publish
+      ;; made: one for each session that is away, and one for each held back
+      ;; here behind a full window (hold-back!). Sent first, as it was, a
+      ;; broker killed a moment later had told the publisher it had a
+      ;; message that was only ever in its memory, and the sessions it was
+      ;; for resumed elsewhere without it. It is still the receiver's
+      ;; answer, not a report on delivery: nothing waits for a subscriber.
+      ;; A copy from another broker is also held for its broker of origin
+      ;; until the sessions here have it (delivering-for-origin).
+      1 (if-not @session-source
+          (let [live (qos-1 keys topic msg)]
             (queue-for-offline-sessions! topic msg live)
-            (forward-to-brokers! plan topic msg live)))
+            (forward-to-brokers! plan topic msg live))
+          (let [held (java.util.ArrayList.)
+                ack  (MqttPubAck/encode
+                      (ack-for :PUBACK (:client-key msg) (:packet-identifier msg) (seq keys)))]
+            (binding [*hand-offs* held]
+              (delivering-for-origin
+               msg
+               #(let [live (qos-1 keys topic msg false)]
+                  (queue-for-offline-sessions! topic msg live)
+                  (forward-to-brokers! plan topic msg live))))
+            (once-handed-off! held #(send-buffer [(:client-key msg)] ack))))
       ;; Not for QoS 2: that message is not published until its PUBREL
       ;; arrives (§4.3.3), so it is kept for offline sessions there — and
       ;; routed there, for the same reason: the subscribers are whoever
@@ -2755,31 +2858,37 @@
   [{:keys [packet-identifier client-key]}]
   #_(log/debug "received (PUBREL:" packet-identifier)
   (let [client-id (:client-id (get @*clients* client-key))
-        {:keys [topic msg]} (get @*inflight* [client-id packet-identifier])]
+        {:keys [topic msg]} (get @*inflight* [client-id packet-identifier])
+        held      (java.util.ArrayList.)]
     (when topic
       ;; §4.3.3 publishes on the PUBREL, so the subscribers are whoever matches
       ;; now — but they are chosen the same way as on any other publish.
-      (let [{:keys [plan serve-group? groups-only?]} (route topic msg)]
-        (delivering-for-origin
-         msg
-         #(let [live (qos-2-send (subscribers-for topic (:client-key msg) serve-group? groups-only?)
-                                 topic msg)]
-            (queue-for-offline-sessions! topic msg live)
-            (forward-to-brokers! plan topic msg live)))))
+      ;; Collecting the writes to Rama it makes, as a QoS 1 publish does for
+      ;; its PUBACK: see publish-keyed.
+      (binding [*hand-offs* (when @session-source held)]
+        (let [{:keys [plan serve-group? groups-only?]} (route topic msg)]
+          (delivering-for-origin
+           msg
+           #(let [live (qos-2-send (subscribers-for topic (:client-key msg) serve-group? groups-only?)
+                                   topic msg)]
+              (queue-for-offline-sessions! topic msg live)
+              (forward-to-brokers! plan topic msg live))))))
     (when (contains? @*inflight* [client-id packet-identifier])
       ;; The slot is given back on PUBREL, which is what makes the quota a
       ;; limit on messages in flight rather than on messages ever sent.
       (swap! *clients* update-in [client-key :inbound-inflight]
              (fn [n] (max 0 (dec (or n 0))))))
-    (swap! *inflight* dissoc [client-id packet-identifier]))
-  ;; Last, not first: the PUBCOMP tells the publisher it is done with this
-  ;; identifier. Sent before the message was queued for the sessions that
-  ;; are away, a subscriber reconnecting on it could miss it; sent before
-  ;; the entry was removed, a new publish reusing the identifier at once
-  ;; had its own entry removed by the dissoc above.
-  (send-buffer [client-key]
-               (MqttPubComp/encode {:packet-type       :PUBCOMP
-                                    :packet-identifier packet-identifier})))
+    (swap! *inflight* dissoc [client-id packet-identifier])
+    ;; Last, not first: the PUBCOMP tells the publisher it is done with this
+    ;; identifier. Sent before the message was queued for the sessions that
+    ;; are away, a subscriber reconnecting on it could miss it; sent before
+    ;; the entry was removed, a new publish reusing the identifier at once
+    ;; had its own entry removed by the dissoc above. And on a cluster not
+    ;; before those writes have landed, for the reason the PUBACK waits.
+    (once-handed-off! held
+                      #(send-buffer [client-key]
+                                    (MqttPubComp/encode {:packet-type       :PUBCOMP
+                                                         :packet-identifier packet-identifier})))))
 
 (defn pubcomp [{:keys [packet-identifier client-key] :as msg}]
   #_(log/debug "received PUBCOMP:" (dissoc msg :client-key))
@@ -2891,14 +3000,27 @@
   (let [version    (protocol-version-of client-key)
         ;; §3.8.2.1.2: at most one, and it applies to every filter in the packet.
         identifier (first (:subscription-identifiers properties))
-        parsed     (mapv #(assoc % :parsed (parse-subscription-filter (:topic-filter %))) topics)]
-    ;; §3.8.3.1: No Local on a shared subscription is a Protocol Error, not a
-    ;; filter this broker happens to refuse — there is no single publisher it
-    ;; could mean, so the specification declines to define one.
-    (if (some #(and (:no-local? %) (:share-group (:parsed %))) parsed)
+        parsed     (mapv #(assoc % :parsed (parse-subscription-filter (:topic-filter %))) topics)
+        malformed  (some #(when-let [code (subscription-filter-error (:topic-filter %))]
+                            [code (:topic-filter %)])
+                         topics)]
+    (cond
+      ;; One malformed filter ends the connection, and none of the packet is
+      ;; subscribed: there is no SUBACK to report the good ones on. See
+      ;; subscription-filter-error for why this is not a per-filter 0x8F.
+      malformed
+      (let [[code topic-filter] malformed]
+        (disconnect-with-reason! client-key code (str "malformed topic filter: " topic-filter)))
+
+      ;; §3.8.3.1: No Local on a shared subscription is a Protocol Error, not a
+      ;; filter this broker happens to refuse — there is no single publisher it
+      ;; could mean, so the specification declines to define one.
+      (some #(and (:no-local? %) (:share-group (:parsed %))) parsed)
       (disconnect-with-reason! client-key
                                MqttReasonCode/PROTOCOL_ERROR
                                "no local is not allowed on a shared subscription")
+
+      :else
       (let [accepted (filter :parsed parsed)
             ;; Worked out before the subscriptions are added, because adding one
             ;; is exactly what makes it stop being new.
@@ -2935,20 +3057,9 @@
                      (MqttSubAck/encode
                       (cond-> {:packet-type       :SUBACK
                                :packet-identifier packet-identifier
-                               ;; A filter the broker cannot make sense of is
-                               ;; refused on its own line rather than by
-                               ;; dropping the connection: the others in the
-                               ;; packet may be perfectly good.
-                               ;; §3.9.3: 3.1.1 has exactly one failure code
-                               ;; and 0x8F would be read as a return code it
-                               ;; does not know.
-                               :response          (let [refused (if (>= version 5)
-                                                                  (long MqttReasonCode/TOPIC_FILTER_INVALID)
-                                                                  0x80)]
-                                                    (mapv #(if (:parsed %)
-                                                             (long (:qos %))
-                                                             refused)
-                                                          parsed))}
+                               ;; Every filter here parsed: a malformed one
+                               ;; closed the connection above.
+                               :response          (mapv #(long (:qos %)) parsed)}
                         (>= version 5) (assoc :protocol-version 5 :properties {}))))
         (process-retained-messages client-key replay))))))
 

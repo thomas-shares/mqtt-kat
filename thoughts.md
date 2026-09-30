@@ -49,6 +49,41 @@ What is still open around it:
   subscribers never crossed a bridge, so a crash still loses it in flight.
   The fix above has nothing to hold it with.
 
+### Acknowledged, then killed
+
+A three-broker run lost one QoS 1 message: published on broker 2 and
+acknowledged at 25.9 s, then broker 2 was killed. Every other subscriber had
+it, and one persistent session did not. This is not the bridge gap in "What
+is still open" (a *peer* dying after taking a copy). Here the broker that
+died was the publisher's own. It sent the PUBACK first and then did the
+work, so for a moment the only copy for that session was in its memory. The
+copy was in one of two places:
+
+- a Rama append for the session's queue, sent with `foreign-append-async!`
+  and not yet out of the client's buffer, when the session was away;
+- the session's pending queue on this broker, waiting behind a full window,
+  when it was connected here.
+
+On a cluster the PUBACK now goes out after the deliveries, once those writes
+have landed. For QoS 2 the PUBCOMP waits the same way. `*hand-offs*` collects
+the writes a publish makes: `forward-publish!`'s enqueues for away sessions,
+and `hold-back!`'s. `hold-back!` is new. A live copy that a kept session has
+no room for is put on the cluster's queue under its message key as well as
+held here, and it carries that key as its `::cluster-key`. From then on it is
+one of the queue's own messages, and comes off when the client acknowledges
+it, like anything read from there on a resume. A copy sent at once is left
+alone, because a write the process has made reaches the peer even if the
+process is killed. Nothing waits for a subscriber either. The PUBACK is still
+the receiver's answer, and a stalled subscriber still holds its publisher
+only through the pause threshold, as before.
+
+The cost is a Rama round trip on the PUBACK of a publish that has someone
+away or held back. A single broker, with no cluster, still acknowledges first.
+The copies still waiting in this broker's bridge links are not covered. A link's queue
+is usually empty, but a message in it when the broker dies is lost for every
+subscriber on that peer. Waiting for the peer's PUBACK would add the bridge's
+tail latency to every publish.
+
 ### The cluster's "max" clients
 
 The overview's "of N max" for a cluster was each broker's own peak added
