@@ -1421,6 +1421,34 @@
                      (not (re-find #"[/+#]" group)))
             {:filter subscription-filter :topic-filter inner :share-group group}))))))
 
+(defn subscription-filter-error
+  "Why the broker cannot accept `subscription-filter`, as the reason code it
+   disconnects with, or nil when the filter is fine.
+
+   A malformed filter is a protocol violation, not a refusal (§4.7.1, §4.8.2).
+   0x8F Topic Filter Invalid is for a filter that is \"correctly formed but is
+   not accepted\"; one with a wildcard in the wrong place is not correctly
+   formed at all, and 3.1.1 §4.8 says to close the connection on a protocol
+   violation. The codes are the ones Mosquitto sends, so the two brokers can be
+   held to the same test:
+
+     - 0x81 Malformed Packet: an empty filter, a wildcard that is not a whole
+       level, a level after `#`, or a share name containing + or #;
+     - 0x82 Protocol Error: a share that is missing its group or its filter,
+       `$share/`, `$share/group`, `$share//topic` or `$share/group/`."
+  [^String subscription-filter]
+  (if-not (and subscription-filter (.startsWith subscription-filter share-prefix))
+    (when-not (valid-topic-filter? subscription-filter)
+      MqttReasonCode/MALFORMED_PACKET)
+    (let [rest  (subs subscription-filter (count share-prefix))
+          slash (.indexOf rest "/")
+          group (if (neg? slash) rest (subs rest 0 slash))
+          inner (when-not (neg? slash) (subs rest (inc slash)))]
+      (cond
+        (re-find #"[+#]" group)            MqttReasonCode/MALFORMED_PACKET
+        (or (empty? group) (empty? inner)) MqttReasonCode/PROTOCOL_ERROR
+        (not (valid-topic-filter? inner))  MqttReasonCode/MALFORMED_PACKET))))
+
 (defonce ^:private shared-cursor
   ;; Which member of each group gets the next message. §4.8.2 leaves the choice
   ;; to the implementation — the reference broker picks at random — but a
@@ -2760,14 +2788,27 @@
   (let [version    (protocol-version-of client-key)
         ;; §3.8.2.1.2: at most one, and it applies to every filter in the packet.
         identifier (first (:subscription-identifiers properties))
-        parsed     (mapv #(assoc % :parsed (parse-subscription-filter (:topic-filter %))) topics)]
-    ;; §3.8.3.1: No Local on a shared subscription is a Protocol Error, not a
-    ;; filter this broker happens to refuse — there is no single publisher it
-    ;; could mean, so the specification declines to define one.
-    (if (some #(and (:no-local? %) (:share-group (:parsed %))) parsed)
+        parsed     (mapv #(assoc % :parsed (parse-subscription-filter (:topic-filter %))) topics)
+        malformed  (some #(when-let [code (subscription-filter-error (:topic-filter %))]
+                            [code (:topic-filter %)])
+                         topics)]
+    (cond
+      ;; One malformed filter ends the connection, and none of the packet is
+      ;; subscribed: there is no SUBACK to report the good ones on. See
+      ;; subscription-filter-error for why this is not a per-filter 0x8F.
+      malformed
+      (let [[code topic-filter] malformed]
+        (disconnect-with-reason! client-key code (str "malformed topic filter: " topic-filter)))
+
+      ;; §3.8.3.1: No Local on a shared subscription is a Protocol Error, not a
+      ;; filter this broker happens to refuse — there is no single publisher it
+      ;; could mean, so the specification declines to define one.
+      (some #(and (:no-local? %) (:share-group (:parsed %))) parsed)
       (disconnect-with-reason! client-key
                                MqttReasonCode/PROTOCOL_ERROR
                                "no local is not allowed on a shared subscription")
+
+      :else
       (let [accepted (filter :parsed parsed)
             ;; Worked out before the subscriptions are added, because adding one
             ;; is exactly what makes it stop being new.
@@ -2804,20 +2845,9 @@
                      (MqttSubAck/encode
                       (cond-> {:packet-type       :SUBACK
                                :packet-identifier packet-identifier
-                               ;; A filter the broker cannot make sense of is
-                               ;; refused on its own line rather than by
-                               ;; dropping the connection: the others in the
-                               ;; packet may be perfectly good.
-                               ;; §3.9.3: 3.1.1 has exactly one failure code
-                               ;; and 0x8F would be read as a return code it
-                               ;; does not know.
-                               :response          (let [refused (if (>= version 5)
-                                                                  (long MqttReasonCode/TOPIC_FILTER_INVALID)
-                                                                  0x80)]
-                                                    (mapv #(if (:parsed %)
-                                                             (long (:qos %))
-                                                             refused)
-                                                          parsed))}
+                               ;; Every filter here parsed: a malformed one
+                               ;; closed the connection above.
+                               :response          (mapv #(long (:qos %)) parsed)}
                         (>= version 5) (assoc :protocol-version 5 :properties {}))))
         (process-retained-messages client-key replay))))))
 
