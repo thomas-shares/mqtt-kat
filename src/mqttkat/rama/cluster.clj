@@ -775,13 +775,16 @@
                     (doseq [{:keys [client-id] sub-qos :qos} clients
                             :when (pos? (long sub-qos))]
                       ;; Under the message's key, so that a client queued
-                      ;; for by more than one broker has it once.
-                      (record! conn (cond-> (->enqueue client-id {:topic      topic
-                                                                  :payload    payload
-                                                                  :properties properties
-                                                                  :qos        (min qos (long sub-qos))}
-                                                       msg-key)
-                                      if-kept? (assoc :if-kept? true)))))]
+                      ;; for by more than one broker has it once. Noted as a
+                      ;; hand-off, so the publisher's acknowledgement waits
+                      ;; for it: see handlers/publish-keyed.
+                      (handlers/hand-off!
+                       (record! conn (cond-> (->enqueue client-id {:topic      topic
+                                                                   :payload    payload
+                                                                   :properties properties
+                                                                   :qos        (min qos (long sub-qos))}
+                                                        msg-key)
+                                       if-kept? (assoc :if-kept? true))))))]
     (letfn [(reroute! [group-keys tried]
               ;; The shared groups a lost copy was to serve, served by another
               ;; of their brokers: this one if it has a member, which takes

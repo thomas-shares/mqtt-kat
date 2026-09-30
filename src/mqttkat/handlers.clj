@@ -8,7 +8,9 @@
             [mqttkat.bridge :as bridge]
             [mqttkat.retained :as retained]
             [mqttkat.trie :refer [trie-insert trie-delete trie-matching-vals sieve-dollar]])
-  (:import [java.util.concurrent.atomic LongAdder]
+  (:import [java.util.concurrent CompletableFuture]
+           [java.util.concurrent.atomic LongAdder]
+           [java.util.function BiConsumer]
            [org.mqttkat MqttStat MqttReasonCode TopicStats]
            [java.nio.channels SelectionKey]
            [org.mqttkat.server Connection MqttServer]
@@ -1049,6 +1051,33 @@
     (when (empty? before)
       (at/after dequeue-batch-millis flush-dequeues! my-pool))))
 
+(def ^:dynamic *hand-offs*
+  "While a publish is handled on a cluster: the writes to Rama that must land
+   before its publisher is told the broker has it. Nil otherwise."
+  nil)
+
+(defn hand-off!
+  "Note `fut`, a write of the message being published to somewhere that
+   outlives this broker, so its acknowledgement waits for it. Returns `fut`.
+   Outside a publish, nothing waits: a write a lost bridge copy makes later
+   is for a message its publisher was told of long ago."
+  [fut]
+  (when (and fut *hand-offs*)
+    (.add ^java.util.List *hand-offs* fut))
+  fut)
+
+(defn- once-handed-off!
+  "Call `ack!` once every write in `held` has landed, or failed: a failure is
+   logged where the write was made, and holding the acknowledgement for ever
+   would only keep the publisher's slot. At once when there are none, which
+   is every publish with nobody away and nobody behind."
+  [^java.util.List held ack!]
+  (if (.isEmpty held)
+    (ack!)
+    (.whenComplete (CompletableFuture/allOf (into-array CompletableFuture held))
+                   (reify BiConsumer
+                     (accept [_ _ _] (ack!))))))
+
 (defn- settled!
   "A message has been acknowledged, or found expired: it is done. One from
    the cluster's queue comes off it there. One delivered live under its
@@ -1751,6 +1780,26 @@
       (when (<= (pending-count client-id) resume-threshold)
         (.ackDrained subscriber)))))
 
+(defn- hold-back!
+  "queue-pending!, for a live delivery the client has no room for yet. A copy
+   for a session that outlives its connection is put on the cluster's queue
+   too, under its message key, before the publisher is told the broker has
+   it: waiting in this broker's memory for a window slot, it died with the
+   broker, and the session resumed elsewhere without it. From then on it is
+   one of the queue's own, and comes off it when the client acknowledges it
+   (settled!). What is sent at once is in the socket's hands, which outlive
+   the process."
+  [key client-id msg]
+  (let [k     (::msg-key msg)
+        keep? (and k (nil? (::cluster-key msg)) @session-source
+                   (keep-session? (get @*clients* key)))
+        msg   (cond-> msg keep? (assoc ::cluster-key k))]
+    (when (queue-pending! client-id msg)
+      (when keep?
+        (hand-off! ((:enqueue! @session-source)
+                    client-id (select-keys msg [:topic :payload :qos :properties]) k)))
+      true)))
+
 (declare deliver-now-or-queue!)
 
 (defn- deliver-or-queue!
@@ -1768,7 +1817,7 @@
     ;; CONNACK. Unless that flush has been and gone while this was queued,
     ;; which the second look catches.
     (awaiting-connack? key)
-    (do (queue-pending! client-id msg)
+    (do (hold-back! key client-id msg)
         (when-not (awaiting-connack? key)
           (flush-pending! key client-id)))
 
@@ -1785,7 +1834,7 @@
     (when-not (send-publish! key msg packet-identifier)
       (release-packet-identifier! client-id packet-identifier))
     (do
-      (when-not (queue-pending! client-id msg)
+      (when-not (hold-back! key client-id msg)
         (.increment ^LongAdder MqttStat/droppedMessages))
       (when (>= (pending-count client-id) pause-threshold)
         (throttle-publisher! key publisher-key client-id)))))
@@ -2122,18 +2171,25 @@
                           MqttReasonCode/SUCCESS
                           MqttReasonCode/NO_MATCHING_SUBSCRIBERS))))
 
-(defn qos-1 [keys topic {:keys [client-key packet-identifier] :as msg}]
+(defn qos-1
+  "Deliver a QoS 1 publish to `keys`, this broker's subscribers, and return
+   the client-ids it reached live. The PUBACK first, unless `ack?` is false:
+   on a cluster publish-keyed sends it itself, once the message is safe from
+   this broker's death."
+  ([keys topic msg] (qos-1 keys topic msg true))
+  ([keys topic {:keys [client-key packet-identifier] :as msg} ack?]
   #_(log/trace  "qos 1 received... " (count keys))
-  (send-buffer [client-key]
-               (MqttPubAck/encode
-                (ack-for :PUBACK client-key packet-identifier (seq keys))))
+  (when ack?
+    (send-buffer [client-key]
+                 (MqttPubAck/encode
+                  (ack-for :PUBACK client-key packet-identifier (seq keys)))))
   (some-> (filter qos-0? keys)
           (seq)
           (qos-0 topic msg false))
   (or (some-> (filter qos-1-or-2? keys)
               (seq)
               (qos-1-send topic msg))
-      #{}))
+      #{})))
 
 ;  (doseq [k qos-1-keys]
 ;    (log/trace "K" k)
@@ -2190,8 +2246,9 @@
    Only for version 5 clients: 3.1.1 has no Receive Maximum, so there is no
    promise to break, and no DISCONNECT it could read if there were.
 
-   QoS 1 is not counted because it is never outstanding here — the broker sends
-   the PUBACK as it handles the publish, so the window is microseconds wide.
+   QoS 1 is not counted because it is barely outstanding here — the broker sends
+   the PUBACK as it handles the publish, or on a cluster once the writes to
+   Rama it made have landed, so the window is milliseconds wide.
    QoS 2 is the one a client can fill, by publishing and never releasing."
   [client-key]
   (and (>= (protocol-version-of client-key) 5)
@@ -2348,9 +2405,25 @@
       ;; is in both tries for a moment, and whether it is live is decided
       ;; once, by the delivery. A subscriber back since, whose queue was
       ;; flushed without this, is flushed again by queue-for-offline-sessions!.
-      1 (let [live (qos-1 keys topic msg)]
-          (queue-for-offline-sessions! topic msg live)
-          (forward-to-brokers! plan topic msg live))
+      ;; On a cluster the PUBACK waits for the writes to Rama this publish
+      ;; made: one for each session that is away, and one for each held back
+      ;; here behind a full window (hold-back!). Sent first, as it was, a
+      ;; broker killed a moment later had told the publisher it had a
+      ;; message that was only ever in its memory, and the sessions it was
+      ;; for resumed elsewhere without it. It is still the receiver's
+      ;; answer, not a report on delivery: nothing waits for a subscriber.
+      1 (if-not @session-source
+          (let [live (qos-1 keys topic msg)]
+            (queue-for-offline-sessions! topic msg live)
+            (forward-to-brokers! plan topic msg live))
+          (let [held (java.util.ArrayList.)
+                ack  (MqttPubAck/encode
+                      (ack-for :PUBACK (:client-key msg) (:packet-identifier msg) (seq keys)))]
+            (binding [*hand-offs* held]
+              (let [live (qos-1 keys topic msg false)]
+                (queue-for-offline-sessions! topic msg live)
+                (forward-to-brokers! plan topic msg live)))
+            (once-handed-off! held #(send-buffer [(:client-key msg)] ack))))
       ;; Not for QoS 2: that message is not published until its PUBREL
       ;; arrives (§4.3.3), so it is kept for offline sessions there — and
       ;; routed there, for the same reason: the subscribers are whoever
@@ -2626,29 +2699,35 @@
   [{:keys [packet-identifier client-key]}]
   #_(log/debug "received (PUBREL:" packet-identifier)
   (let [client-id (:client-id (get @*clients* client-key))
-        {:keys [topic msg]} (get @*inflight* [client-id packet-identifier])]
+        {:keys [topic msg]} (get @*inflight* [client-id packet-identifier])
+        held      (java.util.ArrayList.)]
     (when topic
       ;; §4.3.3 publishes on the PUBREL, so the subscribers are whoever matches
       ;; now — but they are chosen the same way as on any other publish.
-      (let [{:keys [plan serve-group? groups-only?]} (route topic msg)]
-        (let [live (qos-2-send (subscribers-for topic (:client-key msg) serve-group? groups-only?)
-                               topic msg)]
-          (queue-for-offline-sessions! topic msg live)
-          (forward-to-brokers! plan topic msg live))))
+      ;; Collecting the writes to Rama it makes, as a QoS 1 publish does for
+      ;; its PUBACK: see publish-keyed.
+      (binding [*hand-offs* (when @session-source held)]
+        (let [{:keys [plan serve-group? groups-only?]} (route topic msg)]
+          (let [live (qos-2-send (subscribers-for topic (:client-key msg) serve-group? groups-only?)
+                                 topic msg)]
+            (queue-for-offline-sessions! topic msg live)
+            (forward-to-brokers! plan topic msg live)))))
     (when (contains? @*inflight* [client-id packet-identifier])
       ;; The slot is given back on PUBREL, which is what makes the quota a
       ;; limit on messages in flight rather than on messages ever sent.
       (swap! *clients* update-in [client-key :inbound-inflight]
              (fn [n] (max 0 (dec (or n 0))))))
-    (swap! *inflight* dissoc [client-id packet-identifier]))
-  ;; Last, not first: the PUBCOMP tells the publisher it is done with this
-  ;; identifier. Sent before the message was queued for the sessions that
-  ;; are away, a subscriber reconnecting on it could miss it; sent before
-  ;; the entry was removed, a new publish reusing the identifier at once
-  ;; had its own entry removed by the dissoc above.
-  (send-buffer [client-key]
-               (MqttPubComp/encode {:packet-type       :PUBCOMP
-                                    :packet-identifier packet-identifier})))
+    (swap! *inflight* dissoc [client-id packet-identifier])
+    ;; Last, not first: the PUBCOMP tells the publisher it is done with this
+    ;; identifier. Sent before the message was queued for the sessions that
+    ;; are away, a subscriber reconnecting on it could miss it; sent before
+    ;; the entry was removed, a new publish reusing the identifier at once
+    ;; had its own entry removed by the dissoc above. And on a cluster not
+    ;; before those writes have landed, for the reason the PUBACK waits.
+    (once-handed-off! held
+                      #(send-buffer [client-key]
+                                    (MqttPubComp/encode {:packet-type       :PUBCOMP
+                                                         :packet-identifier packet-identifier})))))
 
 (defn pubcomp [{:keys [packet-identifier client-key] :as msg}]
   #_(log/debug "received PUBCOMP:" (dissoc msg :client-key))
