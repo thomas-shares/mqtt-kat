@@ -179,6 +179,27 @@
             (record! conn (cluster/->disconnect {:connect-id "x" :client-id "nobody"}))
             (is (nil? (cluster/session conn "nobody")))))
 
+        (testing "record! has at most its permits' worth of appends out at once"
+          (let [permits (java.util.concurrent.Semaphore. 2)
+                bounded (assoc conn :append-permits permits)
+                nobody  #(cluster/->disconnect {:connect-id "x" :client-id "nobody"})]
+            (run! deref (mapv (fn [_] (cluster/record! bounded (nobody))) (range 50)))
+            (is (tu/wait-until #(= 2 (.availablePermits permits)))
+                "every append gives its permit back once it lands")
+            (.acquire permits 2)
+            (let [waiting (future @(cluster/record! bounded (nobody)))]
+              (Thread/sleep 300)
+              (is (not (realized? waiting)) "with none free, the next one waits")
+              (.release permits)
+              (is (not= ::timed-out (deref waiting 10000 ::timed-out)) "and goes once one is")
+              (is (tu/wait-until #(= 1 (.availablePermits permits)))))
+            (testing "but not on Rama's own thread, which may be what gives one back"
+              (.acquire permits 1)
+              (is (not= ::timed-out (deref (with-bindings {#'cluster/*on-rama-thread* true}
+                                 (cluster/record! bounded (nobody)))
+                               10000 ::timed-out)))
+              (is (= 0 (.availablePermits permits)) "and takes none it did not get"))))
+
         (testing "one connect: the session is what it asked for"
           (let [c (cluster/->connect (connect-map "sensor-7" :version 5 :clean? false
                                                  :keep-alive 45 :expiry 600))]
