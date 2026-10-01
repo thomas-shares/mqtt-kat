@@ -84,6 +84,8 @@
      {:event :unsubscribe  :connect-id :client-id :filter :at}
      {:event :enqueue      :client-id :key :message :at
                            [:if-kept?]}                 ; only for a session that is kept
+     {:event :enqueue      :client-id :messages :at     ; [[key message] ...], in order
+                           [:if-kept?]}
      {:event :dequeue      :client-id :keys :at}
      {:event :retain       :topic :message :at}
      {:event :unretain     :topic :at}
@@ -297,6 +299,12 @@
                     (kept? (:protocol-version session)
                            (:clean-session? session)
                            (:session-expiry-interval session))))))
+
+(defn enqueued
+  "The [key message] pairs an :enqueue carries: `:messages`, as a broker
+   sends them, gathered per client; or the one `:key` and `:message`."
+  [record]
+  (or (:messages record) [[(:key record) (:message record)]]))
 
 (def lost-per-sweep
   "How many of a dead run's clients one sweep lets go — and one run per
@@ -650,13 +658,16 @@
 
         ;; ── what is queued for a session that is away ──────────────────
         (case> :enqueue)
-        (local-select> [(keypath *client-id) (view count)] $$queued :> *n)
         (local-select> [(keypath *client-id)] $$sessions :> *session)
-        (<<if (and> (< *n queue-limit) (enqueue-allowed? *record *session))
-          (local-select> [(keypath *client-id (get *record :key))] $$queued :> *had)
-          (local-transform> [(keypath *client-id (get *record :key)) (termval (get *record :message))]
-                            $$queued)
-          (count> (presence-delta "queued" *had true)))
+        (<<if (enqueue-allowed? *record *session)
+          ;; One at a time, in order, each counted against the limit as the
+          ;; one before it left the queue.
+          (ops/explode (enqueued *record) :> [*key *message])
+          (local-select> [(keypath *client-id) (view count)] $$queued :> *n)
+          (local-select> [(keypath *client-id *key)] $$queued :> *had)
+          (<<if (or> *had (< *n queue-limit))
+            (local-transform> [(keypath *client-id *key) (termval *message)] $$queued)
+            (count> (presence-delta "queued" *had true))))
 
         (case> :dequeue)
         (ops/explode (get *record :keys) :> *key)

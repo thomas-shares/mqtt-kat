@@ -112,7 +112,7 @@
   (r/open-cluster-manager {"conductor.host" conductor-host
                            "foreign.depot.flush.delay.millis" append-flush-millis}))
 
-(declare connect-to)
+(declare connect-to queue-writer)
 
 (defn connect
   "Open the module in `mode` (default: what -Dmqttkat.rama says) and return
@@ -167,6 +167,7 @@
      :stats-state   (r/foreign-pstate cluster module-name "$$rama-stats")
      :detail-state  (r/foreign-pstate cluster module-name "$$broker-detail")
      :history-state (r/foreign-pstate cluster module-name "$$broker-history")
+     :queue-writer  (queue-writer)
      :trie          (atom (trie/make-trie))
      :brokers       (atom {})
      :settings      (atom {})
@@ -206,7 +207,8 @@
 (defn close!
   "Release the connection. In-process, when this connection opened the
    cluster, that shuts it down and deletes its data."
-  [{:keys [cluster owns-cluster?] :as conn}]
+  [{:keys [cluster owns-cluster? queue-writer] :as conn}]
+  (some-> ^java.util.concurrent.atomic.AtomicBoolean (:stopped? queue-writer) (.set true))
   (unwatch! conn)
   (when owns-cluster?
     (r/close! cluster)))
@@ -387,6 +389,167 @@
                        (when e
                          (log/warn e "could not record the" (name event) "of"
                                    (or client-id broker-id (:topic record)))))))))
+
+;; ── the queues, written in order and until they land ─────────────────────
+
+(def queue-writes-in-flight
+  "How many clients' queue writes may be waiting on Rama at once, for this
+   broker as a whole. The foreign client refuses an append once ten
+   thousand are pending, and its depot buffer once it holds ten thousand;
+   a few hundred subscribers dropping together while the broker is behind
+   asked for more than that, and every write refused was a message lost or
+   a take-off that never happened. Past this, a client's writes wait their
+   turn here and gather into one."
+  256)
+
+(def queue-retry-millis
+  "How long a queue write that failed waits before it is tried again: the
+   first wait, and the longest it grows to as it keeps failing."
+  [200 5000])
+
+(defonce ^:private retry-timer
+  (delay (java.util.concurrent.Executors/newSingleThreadScheduledExecutor
+          (reify java.util.concurrent.ThreadFactory
+            (newThread [_ r]
+              (doto (Thread. ^Runnable r "rama-queue-retry") (.setDaemon true)))))))
+
+(defn queue-writer
+  "What `enqueue!` and `dequeue!` write through: one lane per client, which
+   has one batch on its way to Rama at a time. What a client's queue is
+   asked for while one is out waits in its lane, and goes as the next batch
+   — every enqueue in a row one append, every take-off in a row another —
+   so a client the broker hands thousands of messages at once costs a few
+   appends rather than thousands, and its writes reach Rama in the order
+   they were made. A batch that fails is sent again, the same batch in the
+   same order, until it lands: an enqueue replaces under its key and a
+   take-off deletes, so a batch that landed once and is sent again ends
+   where it did."
+  []
+  {:lanes    (java.util.concurrent.ConcurrentHashMap.)
+   :permits  (java.util.concurrent.Semaphore. (int queue-writes-in-flight))
+   :waiting  (java.util.concurrent.ConcurrentLinkedQueue.)
+   :stopped? (java.util.concurrent.atomic.AtomicBoolean. false)
+   :failures (java.util.concurrent.atomic.AtomicLong. 0)
+   :warned   (java.util.concurrent.atomic.AtomicLong. 0)})
+
+(defn- queue-records
+  "`ops` for `client-id` — [:enqueue key message if-kept?] and [:dequeue
+   keys], in the order they were asked for — as the records to append:
+   neighbours of a kind together."
+  [client-id ops]
+  (let [now (System/currentTimeMillis)]
+    (reduce (fn [acc [kind a b c]]
+              (let [prev (peek acc)]
+                (case kind
+                  :enqueue (if (and (= :enqueue (:event prev)) (= (boolean c) (boolean (:if-kept? prev))))
+                             (conj (pop acc) (update prev :messages conj [a b]))
+                             (conj acc (cond-> {:event :enqueue :client-id client-id :messages [[a b]] :at now}
+                                         c (assoc :if-kept? true))))
+                  :dequeue (if (= :dequeue (:event prev))
+                             (conj (pop acc) (update prev :keys into a))
+                             (conj acc {:event :dequeue :client-id client-id :keys (vec a) :at now})))))
+            [] ops)))
+
+(defn- run-waiting!
+  "Start what waits for a permit, while there are permits."
+  [{:keys [^java.util.concurrent.Semaphore permits
+           ^java.util.concurrent.ConcurrentLinkedQueue waiting]}]
+  (loop []
+    (when (.tryAcquire permits)
+      (if-let [f (.poll waiting)]
+        (do (f) (recur))
+        (.release permits)))))
+
+(defn- with-permit! [w f]
+  (.add ^java.util.concurrent.ConcurrentLinkedQueue (:waiting w) f)
+  (run-waiting! w))
+
+(defn- note-queue-failure! [{:keys [^java.util.concurrent.atomic.AtomicLong failures
+                                    ^java.util.concurrent.atomic.AtomicLong warned]}
+                            client-id ^Throwable e]
+  (let [n    (.incrementAndGet failures)
+        now  (System/currentTimeMillis)
+        last (.get warned)]
+    (when (and (> (- now last) 5000) (.compareAndSet warned last now))
+      (log/warn "queue writes failing, trying them again -" n "so far; the last for"
+                client-id "-" (or (ex-message e) (str e))))))
+
+(declare start-lane!)
+
+(defn- send-batch! [w conn client-id lane records futs delay-ms]
+  (with-permit! w
+    (fn []
+      (let [done (fn [_ e]
+                   (.release ^java.util.concurrent.Semaphore (:permits w))
+                   (run-waiting! w)
+                   (cond
+                     (nil? e)
+                     (do (run! #(.complete ^java.util.concurrent.CompletableFuture % nil) futs)
+                         (start-lane! w conn client-id lane))
+
+                     (.get ^java.util.concurrent.atomic.AtomicBoolean (:stopped? w))
+                     (run! #(.completeExceptionally ^java.util.concurrent.CompletableFuture % e) futs)
+
+                     :else
+                     (do (note-queue-failure! w client-id e)
+                         (.schedule ^java.util.concurrent.ScheduledExecutorService @retry-timer
+                                    ^Runnable #(send-batch! w conn client-id lane records futs
+                                                            (min (* 2 (long delay-ms))
+                                                                 (long (second queue-retry-millis))))
+                                    (long delay-ms) java.util.concurrent.TimeUnit/MILLISECONDS))))]
+        (try
+          (.whenComplete (java.util.concurrent.CompletableFuture/allOf
+                          (into-array java.util.concurrent.CompletableFuture
+                                      (mapv #(r/foreign-append-async! (:events conn) % :ack) records)))
+                         (reify BiConsumer (accept [_ v e] (done v e))))
+          (catch Throwable e (done nil e)))))))
+
+(defn- start-lane!
+  "Send what `lane` has gathered, or let it go idle — and out of the map —
+   when it has nothing."
+  [w conn client-id lane]
+  (let [[before _] (swap-vals! lane (fn [s] (if (seq (:ops s))
+                                              (assoc s :ops [] :futs [])
+                                              (assoc s :busy? false :gone? true))))]
+    (if (seq (:ops before))
+      (send-batch! w conn client-id lane (queue-records client-id (:ops before)) (:futs before)
+                   (first queue-retry-millis))
+      (.remove ^java.util.concurrent.ConcurrentHashMap (:lanes w) client-id lane))))
+
+(defn- queue-op!
+  "Put `op` in `client-id`'s lane, and start the lane if it was idle.
+   Returns a future that completes once Rama has it."
+  [{:keys [queue-writer] :as conn} client-id op]
+  (let [w   queue-writer
+        fut (java.util.concurrent.CompletableFuture.)]
+    (loop []
+      (let [lane (.computeIfAbsent ^java.util.concurrent.ConcurrentHashMap (:lanes w) client-id
+                                   (reify java.util.function.Function
+                                     (apply [_ _] (atom {:ops [] :futs [] :busy? false}))))
+            [before after] (swap-vals! lane (fn [s] (if (:gone? s)
+                                                      s
+                                                      (-> s (update :ops conj op)
+                                                          (update :futs conj fut)
+                                                          (assoc :busy? true)))))]
+        (cond
+          ;; Going idle as this arrived: the next lookup finds a new lane.
+          (:gone? after)       (do (Thread/onSpinWait) (recur))
+          (not (:busy? before)) (start-lane! w conn client-id lane))))
+    fut))
+
+(defn enqueue!
+  "Queue `message` for `client-id` under `key` (a new one when nil), and
+   only if the client's session is kept when `if-kept?`. Returns a future
+   that completes once the cluster has it."
+  ([conn client-id message key] (enqueue! conn client-id message key false))
+  ([conn client-id message key if-kept?]
+   (let [{:keys [key message]} (->enqueue client-id message key)]
+     (queue-op! conn client-id [:enqueue key message if-kept?]))))
+
+(defn dequeue!
+  "Take `keys` off `client-id`'s queue. A future, as enqueue! returns."
+  [conn client-id keys]
+  (queue-op! conn client-id [:dequeue (vec keys)]))
 
 (defn session
   "The record for `client-id`, or nil if it has never connected."
@@ -779,12 +942,11 @@
                       ;; hand-off, so the publisher's acknowledgement waits
                       ;; for it: see handlers/publish-keyed.
                       (handlers/hand-off!
-                       (record! conn (cond-> (->enqueue client-id {:topic      topic
-                                                                   :payload    payload
-                                                                   :properties properties
-                                                                   :qos        (min qos (long sub-qos))}
-                                                        msg-key)
-                                       if-kept? (assoc :if-kept? true))))))]
+                       (enqueue! conn client-id {:topic      topic
+                                                 :payload    payload
+                                                 :properties properties
+                                                 :qos        (min qos (long sub-qos))}
+                                 msg-key if-kept?))))]
     (letfn [(reroute! [group-keys tried]
               ;; The shared groups a lost copy was to serve, served by another
               ;; of their brokers: this one if it has a member, which takes
@@ -1116,8 +1278,9 @@
   (reset! handlers/session-source
           {:my-broker-id broker-id
            :resume       (fn [client-id] (resume conn client-id))
-           :enqueue!     (fn [client-id msg key] (record! conn (->enqueue client-id msg key)))
-           :dequeue!     (fn [client-id keys] (record! conn (->dequeue client-id keys)))
+           :enqueue!     (fn [client-id msg key] (enqueue! conn client-id msg key))
+           :dequeue!     (fn [client-id keys] (dequeue! conn client-id keys))
+           :queued       (fn [client-id] (queued conn client-id))
            :settled!     (fn [peer-id msg-keys]
                            (when-let [peer (get @(:brokers conn) peer-id)]
                              (bridge/settled! broker-id peer-id peer msg-keys)))

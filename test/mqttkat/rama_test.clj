@@ -570,6 +570,20 @@
                 (is (= [k] (map first (cluster/queued conn "away-1"))))
                 (record! conn (cluster/->dequeue "away-1" [k]))
                 (is (empty? (cluster/queued conn "away-1")))))
+            (testing "the queue writer: one client's writes land in the order they were made"
+              (let [ks   (vec (repeatedly 50 h/new-message-key))
+                    msg  (fn [p] {:topic "away/t" :payload (.getBytes ^String p) :qos 1})
+                    futs (-> (mapv #(cluster/enqueue! conn "lane-1" (msg "x") %) ks)
+                             (conj (cluster/dequeue! conn "lane-1" (take 10 ks)))
+                             ;; Taken off, then put back: in any other order
+                             ;; it would be gone.
+                             (conj (cluster/enqueue! conn "lane-1" (msg "again") (first ks))))]
+                (is (every? #(nil? (deref % 10000 ::timeout)) futs) "each one landed")
+                (let [q (cluster/queued conn "lane-1")]
+                  (is (= (set (cons (first ks) (drop 10 ks))) (set (map first q))))
+                  (is (= "again" (String. ^bytes (:payload (get (into {} q) (first ks)))))))
+                @(cluster/dequeue! conn "lane-1" (map first (cluster/queued conn "lane-1")))
+                (is (empty? (cluster/queued conn "lane-1")))))
             (is (= {:queue [{:client-id "away-1" :qos 1}] :leaving []}
                    (cluster/plan conn "away/t" {:away-only? true}))
                 "a copy from another broker: queued for a client last here, and nothing else planned")
@@ -1098,6 +1112,19 @@
                               (testing "with its subscription live again"
                                 (client/send-message (:client pub) (publish-msg "parked/t" "live" 0 nil :version 4))
                                 (is (= "live" (tu/payload-str (tu/expect-eventually! (:ch c2) :PUBLISH)))))
+                              (testing "and what lands on its queue after the CONNECT read it is sent too, once"
+                                ;; As a broker that still took it for away
+                                ;; queues it, its write landing late.
+                                (record! conn (cluster/->enqueue "parked-elsewhere"
+                                                                 {:topic "parked/t" :payload (.getBytes "late") :qos 1}))
+                                (let [got (tu/expect-eventually! (:ch c2) :PUBLISH
+                                                                 (+ 1000 (peek h/catch-up-reads-millis)))]
+                                  (is (= "late" (tu/payload-str got)))
+                                  (client/send-message (:client c2) {:packet-type :PUBACK
+                                                                     :packet-identifier (:packet-identifier got)}))
+                                (is (tu/wait-until #(empty? (cluster/queued conn "parked-elsewhere"))))
+                                (is (empty? (:PUBLISH (tu/take-n! (:ch c2) 1 (peek h/catch-up-reads-millis))))
+                                    "and not again on the reads after"))
                               (finally
                                 (tu/close! c2)))))
                         (finally
@@ -1132,10 +1159,13 @@
                         (finally
                           (tu/close! pub)))))
 
-                  (testing "a live copy a kept session has no room for is put on the cluster's queue first"
-                    ;; Held here behind a full window, it died with the broker,
-                    ;; and the session resumed elsewhere without it. What is
-                    ;; sent at once is not: it is in the socket's hands.
+                  (testing "a live copy a kept session has no room for waits here, and is not written to the cluster"
+                    ;; It was, for a while, so that a broker killed with it
+                    ;; waiting did not lose it. Under load that was a Rama
+                    ;; append and a take-off for every message to every slow
+                    ;; persistent subscriber: Rama refused them by the
+                    ;; hundred thousand, connects timed out, and a load run
+                    ;; with no chaos at all lost messages.
                     (let [sub (tu/connect-v5! "held-back" :id "held-back" :clean-session? false
                                               :properties {:session-expiry-interval 3600
                                                            :receive-maximum 1})
@@ -1149,19 +1179,13 @@
                           (is (= "sent" (tu/payload-str first-got)))
                           (client/send-message (:client pub) (publish-msg "held/t" "held" 1 52 :version 4))
                           (tu/expect-eventually! (:ch pub) :PUBACK)
-                          (is (= ["held"] (map #(String. ^bytes (:payload (second %)))
-                                               (cluster/queued conn "held-back")))
-                              "the one held back, not the one sent")
+                          (Thread/sleep 200)
+                          (is (empty? (cluster/queued conn "held-back")))
                           (tu/send-v5! sub {:packet-type :PUBACK :packet-identifier (:packet-identifier first-got)})
                           (let [got (tu/expect-eventually! (:ch sub) :PUBLISH)]
-                            (is (= "held" (tu/payload-str got)))
-                            (Thread/sleep 200)
-                            (is (= 1 (count (cluster/queued conn "held-back")))
-                                "sent, not acknowledged: still on the cluster's queue")
+                            (is (= "held" (tu/payload-str got)) "and sent once the window has room")
                             (tu/send-v5! sub {:packet-type :PUBACK :packet-identifier (:packet-identifier got)}))
-                          (is (tu/wait-until #(empty? (cluster/queued conn "held-back")))
-                              "acknowledged: off it")
-                          (is (nil? (tu/take! (:ch sub) 300)) "and delivered once"))
+                          (is (nil? (tu/take! (:ch sub) 300)) "once"))
                         (finally
                           (tu/close! sub pub)))))
 
