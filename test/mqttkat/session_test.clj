@@ -291,7 +291,10 @@
         ;; Gone before the PUBCOMP.
         (tu/close! sub)
         (tu/wait-for-parked-session! id)
-        (let [back (tu/connect! nil :id id :clean-session? false)
+        ;; Ordered: the CONNACK and the PUBREL arrive back to back, and an
+        ;; unordered client can put them on its channel the other way round,
+        ;; which read as a PUBREL before the CONNACK (§3.2.0-1) in CI.
+        (let [back (tu/connect! nil :id id :clean-session? false :ordered? true)
               got  (tu/take-n! (:ch back) 2 1000)]
           (is (empty? (:PUBLISH got)) "the message is not sent again")
           (is (= [pid] (mapv :packet-identifier (:PUBREL got))) "its PUBREL is")

@@ -259,3 +259,61 @@
           (Thread/sleep 50)
           (is (= (* 4 (quot sends 4)) @lost) "and none twice")
           (finally (bridge/drop! peer-id)))))))
+
+(defn- send-held! [p peer-id i undelivered]
+  (bridge/send-to! "me" peer-id {:host "127.0.0.1" :port (:port p)} [] (str "t/" i)
+                   {:qos 1 :payload (.getBytes (str i)) :properties {}
+                    :msg-key (str "k" i)
+                    :on-lost #(throw (AssertionError. "taken by the peer, so never lost"))
+                    :on-undelivered #(swap! undelivered conj i)}))
+
+(defn- ack-all! [p]
+  (doseq [m (publishes p)]
+    (answer! p (MqttPubAck/encode {:packet-type :PUBACK :protocol-version 5
+                                   :packet-identifier (:packet-identifier m)
+                                   :reason-code 0}))))
+
+(deftest what-the-peer-took-and-did-not-deliver-is-queued-when-it-dies
+  (testing "a peer that dies after its PUBACK, before saying its subscribers have it"
+    ;; Its PUBACK used to end it here: the message was the peer's, and it died
+    ;; in the peer's memory, on its way to a persistent subscriber that came
+    ;; back on another broker to find nothing.
+    (let [p           (peer connack-2)
+          undelivered (atom #{})]
+      (try
+        (send-held! p "peer-13" 0 undelivered)
+        (send-held! p "peer-13" 1 undelivered)
+        (is (tu/wait-until #(= 2 (count (publishes p)))))
+        (ack-all! p)
+        (Thread/sleep 200)
+        (bridge/settled-by! "peer-13" ["k0"])
+        (is (empty? @undelivered) "nothing given up on while the peer lives")
+        (.stop ^MqttServer (:server p) 100)
+        (is (tu/wait-until #(= #{1} @undelivered) 5000)
+            "the one it said it delivered stays delivered; the other is queued")
+        (finally (bridge/drop! "peer-13") (.stop ^MqttServer (:server p) 100)))))
+
+  (testing "the registry dropping the peer gives up on it at once"
+    (let [p           (peer connack-2)
+          undelivered (atom #{})]
+      (try
+        (send-held! p "peer-14" 0 undelivered)
+        (is (tu/wait-until #(= 1 (count (publishes p)))))
+        (ack-all! p)
+        (Thread/sleep 200)
+        (bridge/drop! "peer-14")
+        (is (= #{0} @undelivered))
+        (finally (bridge/drop! "peer-14") (.stop ^MqttServer (:server p) 100)))))
+
+  (testing "this broker leaving the cluster queues nothing: its peers are alive"
+    (let [p           (peer connack-2)
+          undelivered (atom #{})]
+      (try
+        (send-held! p "peer-15" 0 undelivered)
+        (is (tu/wait-until #(= 1 (count (publishes p)))))
+        (ack-all! p)
+        (Thread/sleep 200)
+        (bridge/close-all!)
+        (Thread/sleep (+ 500 bridge/awaiting-grace-ms))
+        (is (empty? @undelivered))
+        (finally (bridge/drop! "peer-15") (.stop ^MqttServer (:server p) 100))))))

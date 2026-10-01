@@ -822,9 +822,16 @@
               on-lost (when (and (pos? qos) (or (seq holders) (seq group-keys)))
                         (fn []
                           (queue-for holders true)
-                          (reroute! group-keys #{peer-id})))]
+                          (reroute! group-keys #{peer-id})))
+              ;; And if it gets there but that broker dies before its
+              ;; subscribers have it: queued for them as well, under the
+              ;; message's key, which is the one that broker would have
+              ;; queued it under had it handed their sessions over.
+              on-undelivered (when (and (pos? qos) msg-key (seq holders))
+                               #(queue-for holders true))]
           (if-let [peer (get @brokers peer-id)]
-            (bridge/send-to! broker-id peer-id peer group-keys topic (assoc msg :on-lost on-lost))
+            (bridge/send-to! broker-id peer-id peer group-keys topic
+                             (assoc msg :on-lost on-lost :on-undelivered on-undelivered))
             (do (log/debug "no address for broker" peer-id "- queuing" topic "for its sessions")
                 (when on-lost (on-lost)))))))
     (when (pos? qos)
@@ -1111,6 +1118,9 @@
            :resume       (fn [client-id] (resume conn client-id))
            :enqueue!     (fn [client-id msg key] (record! conn (->enqueue client-id msg key)))
            :dequeue!     (fn [client-id keys] (record! conn (->dequeue client-id keys)))
+           :settled!     (fn [peer-id msg-keys]
+                           (when-let [peer (get @(:brokers conn) peer-id)]
+                             (bridge/settled! broker-id peer-id peer msg-keys)))
            :takeover!    (fn [peer-id client-id connect-id]
                            (if-let [peer (get @(:brokers conn) peer-id)]
                              (bridge/takeover! broker-id peer-id peer client-id connect-id)
