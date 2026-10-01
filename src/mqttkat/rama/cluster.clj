@@ -49,6 +49,7 @@
             [mqttkat.trie :as trie])
   (:import [com.rpl.rama ProxyState ProxyState$Status]
            [java.net InetAddress]
+           [java.util.concurrent Semaphore TimeUnit]
            [java.util.function BiConsumer]))
 
 (def broker-id
@@ -114,6 +115,23 @@
 
 (declare connect-to)
 
+(def appends-in-flight
+  "How many of record!'s appends may be on their way to Rama at once, for
+   this broker as a whole. Past it, the next one waits for one of them to
+   land: the thread asking is a connection's, and a connection that waits
+   stops reading, which is the pressure going back to the client rather
+   than into memory. Rama's own foreign client refuses an append once ten
+   thousand are pending; this keeps record! well under that.
+   -Dmqttkat.rama.appendsInFlight to change it."
+  (parse-long (or (System/getProperty "mqttkat.rama.appendsInFlight") "1000")))
+
+(def append-permit-wait-millis
+  "How long record! waits for a permit before sending its append anyway. A
+   cluster that has stopped answering altogether is one whose appends fail
+   on their own timeout and give their permits back; this is for the case
+   where they do not, so that a broker is never wedged by its own bound."
+  30000)
+
 (defn connect
   "Open the module in `mode` (default: what -Dmqttkat.rama says) and return
    its handles:
@@ -136,6 +154,8 @@
      :history-state  PState client, broker-id -> millis -> chart point:
                      `$$broker-history`
      :stats-state    PState client, the module's counts: `$$rama-stats`
+     :append-permits Semaphore, how many more of record!'s appends may be
+                     on their way: see appends-in-flight
      :stats          atom, the in-memory copy of them:
                      task -> {\"sessions\" n … \"at\" millis}
      :proxies        atom, the proxies feeding the atoms
@@ -167,6 +187,7 @@
      :stats-state   (r/foreign-pstate cluster module-name "$$rama-stats")
      :detail-state  (r/foreign-pstate cluster module-name "$$broker-detail")
      :history-state (r/foreign-pstate cluster module-name "$$broker-history")
+     :append-permits (Semaphore. (int appends-in-flight))
      :trie          (atom (trie/make-trie))
      :brokers       (atom {})
      :settings      (atom {})
@@ -370,9 +391,31 @@
     {:event :retain :topic topic :message (payload->text message) :at (System/currentTimeMillis)}
     {:event :unretain :topic topic :at (System/currentTimeMillis)}))
 
+(def ^:private ^:dynamic *on-rama-thread*
+  "True inside a proxy callback: on one of Rama's own threads, which must
+   not wait for a permit, since it may be what gives one back."
+  false)
+
+(defn- take-permit!
+  "A permit for one append, or false for none: on Rama's own thread when
+   none is free, or once append-permit-wait-millis is up."
+  [^Semaphore permits]
+  (cond
+    (nil? permits)    false
+    *on-rama-thread*  (.tryAcquire permits)
+    :else             (or (.tryAcquire permits)
+                          (.tryAcquire permits (long append-permit-wait-millis) TimeUnit/MILLISECONDS)
+                          (do (log/warn "no Rama append landed in" append-permit-wait-millis
+                                        "ms - sending this one past the bound")
+                              false))))
+
 (defn record!
   "Append `event` — a map as one of the `->` functions builds — and return
    a future that completes once the session record reflects it.
+
+   At most appends-in-flight at once: past that, this waits on the calling
+   thread for one to land before it sends its own. Not on one of Rama's
+   threads, which goes ahead without waiting.
 
    Asynchronous, because this is called on the connection's own thread, and
    a network round trip to Rama is not something a CONNACK or a close should
@@ -380,13 +423,20 @@
    Rama's copy catching up a few milliseconds later changes nothing the
    client can see. A failure is logged rather than thrown for the same reason
    — the session exists whether or not the record of it made it."
-  [{:keys [events]} {:keys [event client-id broker-id] :as record}]
-  (doto (r/foreign-append-async! events record :ack)
-    (.whenComplete (reify BiConsumer
-                     (accept [_ _ e]
-                       (when e
-                         (log/warn e "could not record the" (name event) "of"
-                                   (or client-id broker-id (:topic record)))))))))
+  [{:keys [events ^Semaphore append-permits]} {:keys [event client-id broker-id] :as record}]
+  (let [permit? (take-permit! append-permits)
+        fut     (try
+                  (r/foreign-append-async! events record :ack)
+                  (catch Throwable t
+                    (when permit? (.release append-permits))
+                    (throw t)))]
+    (doto fut
+      (.whenComplete (reify BiConsumer
+                       (accept [_ _ e]
+                         (when permit? (.release append-permits))
+                         (when e
+                           (log/warn e "could not record the" (name event) "of"
+                                     (or client-id broker-id (:topic record))))))))))
 
 (defn session
   "The record for `client-id`, or nil if it has never connected."
@@ -523,13 +573,16 @@
   (let [clients (filter :connect-id
                         (remove #(bridge/bridge? (:client-id %)) (handlers/live-sessions)))]
     (log/info "listed in the cluster again - restating" (count clients) "connections")
-    (let [appends (mapv #(record! conn (->still-connected %)) clients)]
-      (future
-        (try
+    ;; The appends on a thread of their own, not the proxy callback's this
+    ;; is called on: a broker with more connections than record! has
+    ;; permits would otherwise be waiting on Rama's thread for Rama.
+    (future
+      (try
+        (let [appends (mapv #(record! conn (->still-connected %)) clients)]
           (run! awaited appends)
-          (drain-restated! conn clients)
-          (catch Throwable t
-            (log/warn t "could not deliver what was queued for the restated connections")))))))
+          (drain-restated! conn clients))
+        (catch Throwable t
+          (log/warn t "could not deliver what was queued for the restated connections"))))))
 
 (defonce ^:private listing
   ;; Whether this run has seen itself in the registry, and whether it has
@@ -580,7 +633,8 @@
   [what f]
   (fn [new diff old]
     (try
-      (f new diff old)
+      (binding [*on-rama-thread* true]
+        (f new diff old))
       (catch Throwable t
         (log/error t "applying a change to" what "failed")))))
 
