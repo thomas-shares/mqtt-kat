@@ -84,6 +84,8 @@
      {:event :unsubscribe  :connect-id :client-id :filter :at}
      {:event :enqueue      :client-id :key :message :at
                            [:if-kept?]}                 ; only for a session that is kept
+     {:event :enqueue      :client-id :messages :at     ; [[key message] ...], in order
+                           [:if-kept?]}
      {:event :dequeue      :client-id :keys :at}
      {:event :retain       :topic :message :at}
      {:event :unretain     :topic :at}
@@ -298,6 +300,12 @@
                            (:clean-session? session)
                            (:session-expiry-interval session))))))
 
+(defn enqueued
+  "The [key message] pairs an :enqueue carries: `:messages`, as a broker
+   sends them, gathered per client; or the one `:key` and `:message`."
+  [record]
+  (or (:messages record) [[(:key record) (:message record)]]))
+
 (def lost-per-sweep
   "How many of a dead run's clients one sweep lets go — and one run per
    sweep. Each is a depot append acknowledged in turn, and Rama gives an
@@ -313,10 +321,16 @@
 
 (def queue-limit
   "How many messages are kept for one session that is away before more are
-   refused. The broker's own pending-limit, for the same reason: something
-   has to happen to a message for a client that is not coming back soon,
-   and holding them for ever is not it."
-  4096)
+   refused, and counted as \"queue-refused\": something has to happen to a
+   message for a client that is not coming back soon, and holding them for
+   ever is not it. It was the broker's own pending-limit, 4096, and a
+   session that drops while it is behind brings more than that: its pending
+   queue, full, what is in flight, and what the bridges hold for it, which
+   holding publishers keeps to some thousands per link. A chaos run at
+   3,000 publishes a second lost some twenty thousand messages for each
+   subscriber to every topic that reconnected at its end, each one past the
+   limit. The bridge's own backstop, then, mqttkat.bridge/queue-limit."
+  65536)
 
 (def session-schema
   "What `$$sessions` holds per client id: the last CONNECT, minus the id that
@@ -650,13 +664,18 @@
 
         ;; ── what is queued for a session that is away ──────────────────
         (case> :enqueue)
-        (local-select> [(keypath *client-id) (view count)] $$queued :> *n)
         (local-select> [(keypath *client-id)] $$sessions :> *session)
-        (<<if (and> (< *n queue-limit) (enqueue-allowed? *record *session))
-          (local-select> [(keypath *client-id (get *record :key))] $$queued :> *had)
-          (local-transform> [(keypath *client-id (get *record :key)) (termval (get *record :message))]
-                            $$queued)
-          (count> (presence-delta "queued" *had true)))
+        (<<if (enqueue-allowed? *record *session)
+          ;; One at a time, in order, each counted against the limit as the
+          ;; one before it left the queue.
+          (ops/explode (enqueued *record) :> [*key *message])
+          (local-select> [(keypath *client-id) (view count)] $$queued :> *n)
+          (local-select> [(keypath *client-id *key)] $$queued :> *had)
+          (<<if (or> *had (< *n queue-limit))
+            (local-transform> [(keypath *client-id *key) (termval *message)] $$queued)
+            (count> (presence-delta "queued" *had true))
+            (else>)
+            (count> {"queue-refused" 1})))
 
         (case> :dequeue)
         (ops/explode (get *record :keys) :> *key)

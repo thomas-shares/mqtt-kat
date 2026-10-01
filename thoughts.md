@@ -2,6 +2,67 @@
 
 In this file will go my thoughts and ramblings about this project and what I have done and what I might do next.
 
+## 20261001
+
+### Load with no chaos at all
+
+`chaos/load.edn` failed at scale with nothing killed: Thomas's run at 10,000
+publishes a second, 400 publishers and 1,600 subscribers, lost three million
+messages and delivered seven million QoS 2 messages twice. On this machine a
+three-broker run at 3,000 a second (120 publishers, 480 subscribers, 60 s)
+lost 84,000. The load itself was fine. What broke it was its end: the runner
+reconnects every persistent subscriber, while the brokers are still behind,
+and each piece of what that set off had its own hole.
+
+- **Rama writes that failed counted as done.** Each message for a session
+  that was away was its own depot append. Two hundred subscribers dropping
+  at once asked for tens of thousands, the appends timed out, and a failed
+  enqueue was a message lost after its publisher had its PUBACK, a failed
+  take-off a message sent again on the next resume. Queue writes now go
+  through `cluster/queue-writer`: one lane per client, one batch in flight
+  per lane, everything asked for meanwhile gathered into the next batch
+  (neighbouring enqueues one append, take-offs another), and a batch that
+  fails sent again, in order, until it lands. The module takes an
+  `:enqueue` with `:messages`. Its callbacks run on a pool of their own: on
+  Rama's client thread, one run stopped delivering altogether.
+- **The queue limit was smaller than what a session brings.** Rama refused
+  a session's messages past 4,096, the broker's own pending-limit, and a
+  subscriber to every topic that drops while it is behind brings its full
+  pending queue, its window, and what the bridges hold for it. Now 65,536,
+  the bridge's own backstop, and refusals are counted as `queue-refused`.
+- **A queue was read once.** A resume read what had landed by then, and a
+  write that landed a second later waited for the next resume. A resumed
+  session's queue is now read again at 2, 5, 10, 20, 40 and 60 s, and after
+  that for as long as a read leaves some behind; the CONNECT reads only the
+  first pending-limit, and the later reads take half that at most each, so
+  live deliveries still find room. Keys the client has had, from the queue
+  or live, are left out, and live deliveries are taken off the queue for as
+  long as the reads go on.
+- **A copy for a client that had moved on went nowhere.** The sender planned
+  from a view a step behind and sent it to the broker the client had just
+  left; that broker's view already had it connected elsewhere, so it neither
+  delivered nor queued it. It now queues it, kept sessions only, and the
+  window for "just left" (`view-lag-millis`) is a minute rather than two
+  seconds: a link that is behind holds copies for longer than that.
+- **A hand-over dropped the PUBREL.** A QoS 2 message the client had answered
+  with a PUBREC was let go on a hand-over as an exchange the client could do
+  without. It could not: it holds the identifier until the PUBREL, and took
+  the next message a new broker sent under that identifier for the one it
+  had. The PUBREL now goes on the queue under a key of its own, a resume
+  sends it (§4.4), and the PUBCOMP takes it off.
+- **A bridge gave up on a busy peer.** At the start of a run the peers were
+  too busy with connecting clients to send a bridge its CONNACK within five
+  seconds, and the link handed back what it held, delivered nowhere for a
+  clean session. A link now asks again for up to 30 s while the peer takes
+  the connection.
+
+Also gone: the Rama write `hold-back!` made for every live copy a kept session
+had no room for, from "Acknowledged, then killed" below. At 3,000 a second
+those writes and their take-offs were most of what Rama was asked to do.
+
+The same run now loses 161 QoS 2 messages, all for one subscriber within a
+second, and delivers 155 twice. Those are still open.
+
 ## 20260930
 
 ### A broker that dies no longer takes its subscribers' messages with it

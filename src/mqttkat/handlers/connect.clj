@@ -234,20 +234,23 @@
   (let [connack (MqttConnAck/encode (connack-for msg))
         agreed  (if (version-5? (:protocol-version msg))
                   (effective-keep-alive keep-alive)
-                  keep-alive)]
+                  keep-alive)
+        connect-id (connection-id)]
     ;; The session first, the CONNACK second. The CONNACK used to go out
     ;; before add-client!, so for a moment the client was told it had its
     ;; session while its resumed subscriptions were not yet in the live trie
     ;; — a publish from anyone else in that moment missed it. The moment
     ;; was short; asking the cluster on the way in made it long enough to
     ;; be seen.
-    (add-client! (assoc msg :keep-alive agreed :connect-id (connection-id)))
+    (add-client! (assoc msg :keep-alive agreed :connect-id connect-id))
     (send-buffer [client-key] connack)
     ;; Only now may anything else go to it (§3.2.0-1). add-client! put it in
     ;; the live trie before the CONNACK, so a publish in between would have
     ;; reached the socket first; it was held instead, and the flush after
     ;; this handler sends it.
     (handlers/connack-sent! client-key)
+    ;; And what other brokers queued after the cluster was asked, later.
+    (handlers/catch-up! client-id connect-id)
     ;; After add-client!, never before: it replaces this key's whole entry,
     ;; which would throw away the :timer and :last-active that add-timer!
     ;; writes.

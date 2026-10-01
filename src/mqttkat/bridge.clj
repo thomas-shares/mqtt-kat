@@ -376,7 +376,31 @@
                     (catch InterruptedException _ nil))]
       {:client c :window w}
       (do (try (client/close c) (catch Exception _ nil))
-          (throw (IOException. (str "no CONNACK from " peer-id " within " connack-wait-ms " ms")))))))
+          (throw (java.net.SocketTimeoutException.
+                  (str "no CONNACK from " peer-id " within " connack-wait-ms " ms")))))))
+
+(def connack-patience-ms
+  "How long a link keeps asking a peer that takes its connection but does
+   not answer it, before handing back what it holds. A peer busy with
+   thousands of clients connecting at once answered late, and the link
+   that gave up on it after one wait handed back what was queued for it —
+   delivered nowhere, for a clean session, though the peer was there."
+  30000)
+
+(defn- open-patiently!
+  "open!, again while the peer takes the connection but sends no CONNACK
+   in time, for connack-patience-ms and while the link runs. A peer that
+   refuses the connection outright is not waited for."
+  [my-id peer-id peer inflight ^AtomicBoolean running]
+  (let [deadline (+ (System/currentTimeMillis) (long connack-patience-ms))]
+    (loop []
+      (let [o (try (open! my-id peer-id peer inflight)
+                   (catch java.net.SocketTimeoutException e
+                     (if (and (.get running) (< (System/currentTimeMillis) deadline))
+                       (do (log/info "bridge to" peer-id "-" (.getMessage e) "; asking again")
+                           ::again)
+                       (throw e))))]
+        (if (= ::again o) (recur) o)))))
 
 ;; ── holding publishers ───────────────────────────────────────────────────
 
@@ -459,7 +483,7 @@
   (let [opened  (atom nil)
         lost-at (atom nil)]
     (try
-      (let [{c :client window :window :as o} (open! my-id peer-id peer inflight)]
+      (let [{c :client window :window :as o} (open-patiently! my-id peer-id peer inflight running)]
         (reset! opened o)
         (deliver client c)
         (loop [swept (System/currentTimeMillis)]

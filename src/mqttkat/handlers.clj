@@ -753,8 +753,13 @@
 (def view-lag-millis
   "How long another broker's copy of the cluster may still have a client
    connected here after it has gone: a copy of a publish that broker sends
-   here for it in that time is queued here instead. See route."
-  2000)
+   here for it in that time is queued here instead. See route. Not only
+   the lag of that copy, but of the bridge too: a copy planned before the
+   client left can wait behind thousands of others on a link that is
+   behind, and two seconds lost that many for clients that reconnected
+   under load. The longest a bridge keeps a copy waiting for word of its
+   delivery, mqttkat.bridge/awaiting-limit-ms."
+  60000)
 
 (declare session-source)
 
@@ -989,6 +994,8 @@
   ;; {:resume    (fn [client-id] -> {:session :subscriptions :queued} or nil)
   ;;  :enqueue!  (fn [client-id msg key]) — key nil for a new one
   ;;  :dequeue!  (fn [client-id keys])
+  ;;  :queued    (fn [client-id limit] -> [[key msg] ...]), the first `limit`
+  ;;             queued now, oldest first
   ;;  :settled!  (fn [broker-id msg-keys])
   ;;  :takeover! (fn [broker-id client-id connect-id])} or nil.
   ;; Installed by mqttkat.rama.cluster when the broker is attached to a
@@ -1167,6 +1174,14 @@
     (.add ^java.util.List *hand-offs* fut))
   fut)
 
+(defn- once-done!
+  "Run `f` once `fut` completes, however it does — at once when it is not a
+   future."
+  [fut f]
+  (if (instance? CompletableFuture fut)
+    (.whenComplete ^CompletableFuture fut (reify BiConsumer (accept [_ _ _] (f))))
+    (f)))
+
 (defn- once-handed-off!
   "Call `ack!` once every write in `held` has landed, or failed: a failure is
    logged where the write was made, and holding the acknowledgement for ever
@@ -1211,13 +1226,25 @@
   [client-id]
   (when-let [{:keys [enqueue! dequeue!]} @session-source]
     (when-let [a (existing-outbound client-id)]
-      (let [[{:keys [pending inflight]} _]
+      (let [handed (volatile! #{})
+            [{:keys [pending inflight]} _]
             (swap-vals! a assoc :pending clojure.lang.PersistentQueue/EMPTY :inflight {})]
+        ;; Nor, as a message, what the client has answered with a PUBREC: it
+        ;; has it (§4.3.3), and sending it again would be a second delivery.
+        ;; What is left of that exchange is the PUBREL, which goes on the
+        ;; queue as one, under a key of its own, for a resume to send (§4.4).
+        ;; It was let go as a PUBREL the client could do without. The client
+        ;; could not: it holds the identifier until the PUBREL comes, and took
+        ;; the next message sent under it, by a broker that had never heard
+        ;; of it, for the one it had, and dropped it. A chaos run lost some
+        ;; thousands of QoS 2 messages that way.
+        (doseq [[identifier msg] (sort-by first inflight)
+                :when (::released? msg)]
+          (enqueue! client-id
+                    {:topic (:topic msg) :qos 2 :packet-identifier identifier :released? true}
+                    (or (::release-key msg)
+                        (str (or (::msg-key msg) (::cluster-key msg) (new-message-key)) "-rel"))))
         (doseq [[identifier msg] (concat (sort-by first inflight) (map vector (repeat nil) pending))
-                ;; Nor what the client has answered with a PUBREC: it has the
-                ;; message (§4.3.3), and sending it again would be a second
-                ;; delivery. What is left of that exchange is a PUBREL the
-                ;; client can do without.
                 :when (not (::released? msg))
                 ;; And what came from the cluster's queue and is still waiting
                 ;; here stays where it is there, unsent.
@@ -1231,11 +1258,17 @@
           ;; that took the client for away may have queued it already, and
           ;; this is then the same entry, not a second.
           (let [k (or (::msg-key msg) (::cluster-key msg))]
-            (enqueue! client-id
-                      (cond-> (select-keys msg [:topic :payload :qos :properties])
-                        (::queued-at msg) (assoc :queued-at (::queued-at msg))
-                        identifier        (assoc :packet-identifier identifier))
-                      k)
+            (vswap! handed conj msg)
+            ;; The broker that forwarded it lets its copy go only once the
+            ;; cluster has this one: the write can take seconds when Rama is
+            ;; behind, and a broker that died meanwhile took it with it.
+            (once-done! (enqueue! client-id
+                                  (cond-> (select-keys msg [:topic :payload :qos :properties])
+                                    (::queued-at msg) (assoc :queued-at (::queued-at msg))
+                                    identifier        (assoc :packet-identifier identifier))
+                                  k)
+                        #(when-let [origin (::origin msg)]
+                           (release-origin-hold! origin (::msg-key msg) client-id)))
             ;; One from the cluster's queue was on it without an identifier,
             ;; which is how it went out again under a new one: the chaos run
             ;; saw QoS 2 delivered twice to a client that moved to another
@@ -1245,12 +1278,14 @@
             (when-let [old (::cluster-key msg)]
               (when-not (= old k)
                 (dequeue! client-id [old])))))
-        ;; On the cluster's queue now, under the message's key, or had by
-        ;; the client already: either way no longer this broker's alone.
+        ;; Had by the client already, or on the cluster's queue from
+        ;; before: either way no longer this broker's alone.
         (doseq [msg (concat (vals inflight) pending)
                 :let [origin (::origin msg)]
-                :when origin]
+                :when (and origin (not (contains? @handed msg)))]
           (release-origin-hold! origin (::msg-key msg) client-id))))))
+
+(declare restore-release! restore-message!)
 
 (defn- restore-queued!
   "Put a message from the cluster's queue on `client-id`'s outbound state: in
@@ -1258,6 +1293,11 @@
    recorded one and it is free here, so the resume's redelivery sends it again
    as the same message (§4.4); otherwise on the queue, for a new identifier."
   [client-id msg]
+  (if (:released? msg)
+    (restore-release! client-id msg)
+    (restore-message! client-id msg)))
+
+(defn- restore-message! [client-id msg]
   (let [identifier (:packet-identifier msg)
         msg        (dissoc msg :packet-identifier)
         placed?    (when identifier
@@ -1270,6 +1310,61 @@
                        (not (identical? before after))))]
     (when-not placed?
       (queue-pending! client-id msg))))
+
+(defn- restore-release!
+  "A PUBREL a hand-over left on the cluster's queue: in flight here under its
+   identifier, released, so that the resume sends the PUBREL (see
+   redeliver-inflight!) and the PUBCOMP takes it off the queue. Taken off at
+   once when the identifier is in use here already: that exchange is over."
+  [client-id {:keys [packet-identifier] :as msg}]
+  (let [k (::cluster-key msg)
+        [before after]
+        (swap-vals! (outbound-atom client-id)
+                    (fn [state]
+                      (if (contains? (:inflight state) packet-identifier)
+                        state
+                        (assoc-in state [:inflight packet-identifier]
+                                  {:topic (:topic msg) :qos 2 ::released? true ::release-key k}))))]
+    (when (identical? before after)
+      (when-let [{:keys [dequeue!]} @session-source]
+        (when k (dequeue! client-id [k]))))
+    true))
+
+(def catch-up-reads-millis
+  "When, after a persistent session resumes here, its queue on the cluster
+   is read again. The read on CONNECT has what had landed by then; a broker
+   that took the client for away a moment longer queues after it, and with
+   Rama behind its write can land seconds later. Read once, that message
+   waited on the queue for the client's next resume, and a chaos run that
+   reconnected every persistent subscriber at the end of its load counted
+   it lost. Read up to a minute on, since that run had some land after ten
+   seconds; and for as long, the client's live deliveries are taken off the
+   queue too, as in its first reconcile-window-millis (see keyed)."
+  [2000 5000 10000 20000 40000 60000])
+
+(defonce ^:private catching-up
+  ;; {client-id {:connect-id c :had #{key ...}}}: a session resumed here
+  ;; whose queue on the cluster is being read again, and every key it has
+  ;; had since its CONNECT — from the queue, or delivered live under a
+  ;; message key — which a read leaves out: taken off the queue, but the
+  ;; take-off not in yet, it would be sent again.
+  (atom {}))
+
+(defn- note-had! [client-id k]
+  (when (contains? @catching-up client-id)
+    (swap! catching-up (fn [m] (if (contains? m client-id)
+                                 (update-in m [client-id :had] conj k)
+                                 m)))))
+
+(defn- note-delivered!
+  "A live delivery reconciled with the cluster's queue is on its way to
+   the client: a read of the queue leaves its copy there alone. Only once
+   it is: noted before, one refused by a full queue here was taken for
+   had, and its copy on the cluster's queue was never sent."
+  [client-id msg]
+  (when (::reconcile? msg)
+    (when-let [k (::msg-key msg)]
+      (note-had! client-id k))))
 
 (defn adopt-session!
   "Take over `client-id`'s session from the cluster, on its CONNECT.
@@ -1314,11 +1409,75 @@
                                             :subscribed-topics entries})
           (log/info "session" client-id "taken over from the cluster:"
                     (count entries) "subscriptions," (count queued) "queued"))
+        (swap! catching-up assoc client-id {:had (set (map first queued))})
         (doseq [[k msg] queued]
           (restore-queued! client-id (assoc msg
                                             ::queued-at (:queued-at msg)
                                             ::cluster-key k))))
       true)))
+
+(declare deliver-queued!)
+
+(def catch-up-again-millis
+  "After the last of catch-up-reads-millis, how often the queue is read
+   again while a read finds more on it than the broker could take: a
+   session that comes back to more than pending-limit messages gets the
+   rest as its client works through the first."
+  2000)
+
+(defn- read-again!
+  "Deliver what is on `client-id`'s queue on the cluster and not yet had,
+   while `connect-id` is still the connection it is for. Whether it left
+   any of it there — a full queue here refused it — so that it is worth
+   reading again."
+  [client-id connect-id]
+  (try
+    (let [{:keys [queued]} @session-source
+          {c :connect-id had :had} (get @catching-up client-id)]
+      (if-not (and queued (= connect-id c))
+        false
+        ;; The head of it: what was had and is still there, and as much
+        ;; again as the broker's own queue holds.
+        (let [entries (queued client-id (+ (count had) pending-limit))
+              fresh   (remove #(contains? had (first %)) entries)
+              took    (deliver-queued! client-id connect-id fresh had)]
+          (swap! catching-up (fn [m] (if (= connect-id (get-in m [client-id :connect-id]))
+                                       (update-in m [client-id :had] into took)
+                                       m)))
+          (< (count took) (count fresh)))))
+    (catch Throwable t
+      (log/warn t "could not read the queue of" client-id "again")
+      false)))
+
+(defn- catch-up-after!
+  "Read `client-id`'s queue again after each of `gaps`, and then for as
+   long as a read leaves some of it behind."
+  [client-id connect-id gaps]
+  (at/after (first gaps)
+            #(future
+               (let [left? (read-again! client-id connect-id)]
+                 (cond
+                   (next gaps) (catch-up-after! client-id connect-id (next gaps))
+                   left?       (catch-up-after! client-id connect-id [catch-up-again-millis])
+                   :else       (swap! catching-up
+                                      (fn [m] (if (= connect-id (get-in m [client-id :connect-id]))
+                                                (dissoc m client-id)
+                                                m))))))
+            my-pool))
+
+(defn catch-up!
+  "`client-id` resumed a persistent session from the cluster as
+   `connect-id`: read its queue there again, at catch-up-reads-millis, and
+   after them while there is more on it than this broker could take."
+  [client-id connect-id]
+  (when (:queued @session-source)
+    (let [[before _] (swap-vals! catching-up
+                                 (fn [m] (if (contains? m client-id)
+                                           (assoc-in m [client-id :connect-id] connect-id)
+                                           m)))]
+      (when (contains? before client-id)
+        (catch-up-after! client-id connect-id
+                         (map - catch-up-reads-millis (cons 0 catch-up-reads-millis)))))))
 
 (defn deliver-queued!
   "Send a connected client what the cluster queued for it while it was taken
@@ -1340,16 +1499,22 @@
             ;; And one delivered here live under the same message key: the
             ;; broker that queued it had the client away, and it was not.
             here  (into (set taken)
-                        (mapcat (juxt ::cluster-key ::msg-key))
+                        (mapcat (juxt ::cluster-key ::msg-key ::release-key))
                         (concat pending (vals inflight)))
             ;; A full queue here refuses the rest, which stay on the
             ;; cluster's for the next read or the next resume.
             took  (into #{}
                         (keep (fn [[k msg]]
                                 (when (and (not (contains? here k))
-                                           (queue-pending! client-id (assoc msg
-                                                                            ::queued-at (:queued-at msg)
-                                                                            ::cluster-key k)))
+                                           ;; Half the queue here at most, so
+                                           ;; live deliveries still find room;
+                                           ;; the rest stays for the next read.
+                                           (< (long (pending-count client-id)) (quot (long pending-limit) 2))
+                                           (if (:released? msg)
+                                             (restore-release! client-id (assoc msg ::cluster-key k))
+                                             (queue-pending! client-id (assoc msg
+                                                                              ::queued-at (:queued-at msg)
+                                                                              ::cluster-key k))))
                                   k)))
                         queued)]
         (when (seq took)
@@ -1918,26 +2083,6 @@
       (when (<= (pending-count client-id) resume-threshold)
         (.ackDrained subscriber)))))
 
-(defn- hold-back!
-  "queue-pending!, for a live delivery the client has no room for yet. A copy
-   for a session that outlives its connection is put on the cluster's queue
-   too, under its message key, before the publisher is told the broker has
-   it: waiting in this broker's memory for a window slot, it died with the
-   broker, and the session resumed elsewhere without it. From then on it is
-   one of the queue's own, and comes off it when the client acknowledges it
-   (settled!). What is sent at once is in the socket's hands, which outlive
-   the process."
-  [key client-id msg]
-  (let [k     (::msg-key msg)
-        keep? (and k (nil? (::cluster-key msg)) @session-source
-                   (keep-session? (get @*clients* key)))
-        msg   (cond-> msg keep? (assoc ::cluster-key k))]
-    (when (queue-pending! client-id msg)
-      (when keep?
-        (hand-off! ((:enqueue! @session-source)
-                    client-id (select-keys msg [:topic :payload :qos :properties]) k)))
-      true)))
-
 (declare deliver-now-or-queue!)
 
 (defn- deliver-or-queue!
@@ -1955,7 +2100,8 @@
     ;; CONNACK. Unless that flush has been and gone while this was queued,
     ;; which the second look catches.
     (awaiting-connack? key)
-    (do (hold-back! key client-id msg)
+    (do (when (queue-pending! client-id msg)
+          (note-delivered! client-id msg))
         (when-not (awaiting-connack? key)
           (flush-pending! key client-id)))
 
@@ -1969,10 +2115,12 @@
     ;; A refused send has to give the identifier back, or the window fills with
     ;; messages that were discarded rather than sent and the subscriber
     ;; eventually stops being delivered to entirely.
-    (when-not (send-publish! key msg packet-identifier)
+    (if (send-publish! key msg packet-identifier)
+      (note-delivered! client-id msg)
       (release-packet-identifier! client-id packet-identifier))
     (do
-      (when-not (hold-back! key client-id msg)
+      (if (queue-pending! client-id msg)
+        (note-delivered! client-id msg)
         (.increment ^LongAdder MqttStat/droppedMessages))
       (when (>= (pending-count client-id) pause-threshold)
         (throttle-publisher! key publisher-key client-id)))))
@@ -2237,9 +2385,13 @@
   (if-let [k (::msg-key msg)]
     (let [client  (get @*clients* key)
           kept?   (keep-session? client)
+          ;; Resumed from the cluster and its queue there still read again:
+          ;; what it has had from there is known by key.
+          catching (when kept? (get @catching-up client-id))
           recent? (and kept?
-                       (< (- (System/currentTimeMillis) (long (or (:connected-at client) 0)))
-                          (long reconcile-window-millis)))
+                       (or catching
+                           (< (- (System/currentTimeMillis) (long (or (:connected-at client) 0)))
+                              (long reconcile-window-millis))))
           ;; Forwarded by another broker, to a client whose session outlives
           ;; this broker: held for it until the client has it, see
           ;; delivering-for-origin.
@@ -2250,7 +2402,9 @@
                      %)]
       (cond
         (not recent?)                (held (assoc delivery ::msg-key k))
-        (holds-message? client-id k) nil
+        (if catching
+          (contains? (:had catching) k)
+          (holds-message? client-id k)) nil
         :else                        (held (assoc delivery ::msg-key k ::reconcile? true))))
     delivery))
 
@@ -2478,7 +2632,18 @@
     ;; the writes to Rama, and filled its buffer.
     {:plan         (when (and (::msg-key msg) (not (::groups-only? msg)))
                      (when-let [p (bridge/plan topic {:away-only? true})]
-                       (let [p (update p :queue #(filterv (comp recently-gone? :client-id) %))]
+                       ;; A client that left here and is connected elsewhere
+                       ;; by now was here when the sender planned: it went
+                       ;; nowhere else. Queued if its session is kept, as one
+                       ;; leaving is, for the broker it is on to find there
+                       ;; (catch-up!). A chaos run lost a second or two of
+                       ;; traffic for each subscriber to every topic that
+                       ;; reconnected while the bridges were behind.
+                       (let [gone? (comp recently-gone? :client-id)
+                             p     (-> p
+                                       (update :queue #(filterv gone? %))
+                                       (update :leaving into (filter gone?) (:moved p))
+                                       (dissoc :moved))]
                          (when (or (seq (:queue p)) (seq (:leaving p)))
                            p))))
      :serve-group? (or (::shares msg) #{})
@@ -2553,12 +2718,14 @@
       ;; once, by the delivery. A subscriber back since, whose queue was
       ;; flushed without this, is flushed again by queue-for-offline-sessions!.
       ;; On a cluster the PUBACK waits for the writes to Rama this publish
-      ;; made: one for each session that is away, and one for each held back
-      ;; here behind a full window (hold-back!). Sent first, as it was, a
+      ;; made, one for each session that is away. Sent first, as it was, a
       ;; broker killed a moment later had told the publisher it had a
       ;; message that was only ever in its memory, and the sessions it was
       ;; for resumed elsewhere without it. It is still the receiver's
-      ;; answer, not a report on delivery: nothing waits for a subscriber.
+      ;; answer, not a report on delivery: nothing waits for a subscriber,
+      ;; and a copy held here behind a full window is not written to Rama.
+      ;; It was, for a while, and at 3,000 publishes a second those writes
+      ;; and their take-offs were most of what Rama was asked to do.
       ;; A copy from another broker is also held for its broker of origin
       ;; until the sessions here have it (delivering-for-origin).
       1 (if-not @session-source
@@ -2892,7 +3059,12 @@
 
 (defn pubcomp [{:keys [packet-identifier client-key] :as msg}]
   #_(log/debug "received PUBCOMP:" (dissoc msg :client-key))
-  (let [client-id (:client-id (get @*clients* client-key))]
+  (let [client-id (:client-id (get @*clients* client-key))
+        released  (some-> (existing-outbound client-id) deref (get-in [:inflight packet-identifier]))]
+    ;; A PUBREL a hand-over left on the cluster's queue is done there now.
+    (when-let [k (::release-key released)]
+      (when-let [{:keys [dequeue!]} @session-source]
+        (dequeue! client-id [k])))
     (if (release-packet-identifier! client-id packet-identifier)
       (drain-pending! client-key client-id)
       (log/debug "PUBCOMP from" client-id "for identifier" packet-identifier
