@@ -584,7 +584,7 @@
                   (is (= "again" (String. ^bytes (:payload (get (into {} q) (first ks)))))))
                 @(cluster/dequeue! conn "lane-1" (map first (cluster/queued conn "lane-1")))
                 (is (empty? (cluster/queued conn "lane-1")))))
-            (is (= {:queue [{:client-id "away-1" :qos 1}] :leaving []}
+            (is (= {:queue [{:client-id "away-1" :qos 1}] :leaving [] :moved []}
                    (cluster/plan conn "away/t" {:away-only? true}))
                 "a copy from another broker: queued for a client last here, and nothing else planned")
             (is (nil? (cluster/resume conn "never-seen")))
@@ -1118,12 +1118,12 @@
                                 (record! conn (cluster/->enqueue "parked-elsewhere"
                                                                  {:topic "parked/t" :payload (.getBytes "late") :qos 1}))
                                 (let [got (tu/expect-eventually! (:ch c2) :PUBLISH
-                                                                 (+ 1000 (peek h/catch-up-reads-millis)))]
+                                                                 (+ 1000 (nth h/catch-up-reads-millis 1)))]
                                   (is (= "late" (tu/payload-str got)))
                                   (client/send-message (:client c2) {:packet-type :PUBACK
                                                                      :packet-identifier (:packet-identifier got)}))
                                 (is (tu/wait-until #(empty? (cluster/queued conn "parked-elsewhere"))))
-                                (is (empty? (:PUBLISH (tu/take-n! (:ch c2) 1 (peek h/catch-up-reads-millis))))
+                                (is (empty? (:PUBLISH (tu/take-n! (:ch c2) 1 (+ 1000 (nth h/catch-up-reads-millis 2)))))
                                     "and not again on the reads after"))
                               (finally
                                 (tu/close! c2)))))
@@ -1276,6 +1276,43 @@
                                 (is (tu/wait-until #(empty? (cluster/queued conn id))))
                                 (finally
                                   (tu/close! c4))))))
+                        (finally
+                          (tu/close! pub)))))
+
+                  (testing "a QoS 2 message the client had answered with a PUBREC when it left: its PUBREL is kept for it"
+                    ;; Not let go as one the client could do without: the
+                    ;; client holds the identifier until the PUBREL, and took
+                    ;; the next message sent under it for the one it had.
+                    (let [id  (tu/client-id "rel-leaver")
+                          pub (tu/connect! "rel-leaver-pub")
+                          c1  (tu/connect! "rel-leaver" :id id :clean-session? false :ordered? true)]
+                      (try
+                        (client/send-message (:client c1) (subscribe-msg "rel/#" 2 1))
+                        (tu/expect! (:ch c1) :SUBACK)
+                        (is (tu/wait-until #(present-in-trie? conn "rel/t" id)))
+                        (client/send-message (:client pub) (publish-msg "rel/t" "two" 2 51 :version 4))
+                        (tu/expect-eventually! (:ch pub) :PUBREC)
+                        (client/send-message (:client pub) {:packet-type :PUBREL :packet-identifier 51})
+                        (let [got (tu/expect-eventually! (:ch c1) :PUBLISH)
+                              pid (:packet-identifier got)]
+                          (is (= "two" (tu/payload-str got)))
+                          (client/send-message (:client c1) {:packet-type :PUBREC :packet-identifier pid})
+                          (tu/expect-eventually! (:ch c1) :PUBREL)
+                          ;; Gone before its PUBCOMP.
+                          (tu/close! c1)
+                          (is (tu/wait-until #(= [{:packet-identifier pid :released? true}]
+                                                 (map (comp (fn [m] (select-keys m [:packet-identifier :released?])) second)
+                                                      (cluster/queued conn id))))
+                              "handed over as the PUBREL, not as the message")
+                          (let [c2 (tu/connect! "rel-leaver" :id id :clean-session? false :ordered? true)]
+                            (try
+                              (is (= pid (:packet-identifier (tu/expect-eventually! (:ch c2) :PUBREL)))
+                                  "sent on resume, under the identifier the client holds")
+                              (is (empty? (:PUBLISH (tu/take-n! (:ch c2) 1 300))) "and not the message again")
+                              (client/send-message (:client c2) {:packet-type :PUBCOMP :packet-identifier pid})
+                              (is (tu/wait-until #(empty? (cluster/queued conn id))) "off the queue on the PUBCOMP")
+                              (finally
+                                (tu/close! c2)))))
                         (finally
                           (tu/close! pub)))))
 

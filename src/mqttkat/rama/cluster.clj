@@ -39,7 +39,7 @@
    with one more proxy, is where each announces where it listens."
   (:require [clojure.tools.logging :as log]
             [com.rpl.rama :as r]
-            [com.rpl.rama.path :refer [keypath ALL sorted-map-range]]
+            [com.rpl.rama.path :refer [keypath ALL sorted-map-range sorted-map-range-from-start]]
             [com.rpl.rama.test :as rtest]
             [mqttkat.bridge :as bridge]
             [mqttkat.events :as events]
@@ -407,6 +407,16 @@
    first wait, and the longest it grows to as it keeps failing."
   [200 5000])
 
+(defonce ^:private queue-executor
+  ;; Where a batch's answer is acted on: its futures completed — which
+  ;; sends PUBACKs and lets go of bridge copies — and the client's next
+  ;; batch appended. Never on the Rama client's own thread, which those
+  ;; would hold up, and which an append made from it can wait on.
+  (delay (java.util.concurrent.Executors/newFixedThreadPool
+          4 (reify java.util.concurrent.ThreadFactory
+              (newThread [_ r]
+                (doto (Thread. ^Runnable r "rama-queue") (.setDaemon true)))))))
+
 (defonce ^:private retry-timer
   (delay (java.util.concurrent.Executors/newSingleThreadScheduledExecutor
           (reify java.util.concurrent.ThreadFactory
@@ -492,16 +502,17 @@
 
                      :else
                      (do (note-queue-failure! w client-id e)
-                         (.schedule ^java.util.concurrent.ScheduledExecutorService @retry-timer
-                                    ^Runnable #(send-batch! w conn client-id lane records futs
-                                                            (min (* 2 (long delay-ms))
-                                                                 (long (second queue-retry-millis))))
-                                    (long delay-ms) java.util.concurrent.TimeUnit/MILLISECONDS))))]
+                         (let [again (min (* 2 (long delay-ms)) (long (second queue-retry-millis)))
+                               retry ^Runnable #(send-batch! w conn client-id lane records futs again)]
+                           (.schedule ^java.util.concurrent.ScheduledExecutorService @retry-timer
+                                      ^Runnable #(.execute ^java.util.concurrent.Executor @queue-executor retry)
+                                      (long delay-ms) java.util.concurrent.TimeUnit/MILLISECONDS)))))]
         (try
-          (.whenComplete (java.util.concurrent.CompletableFuture/allOf
-                          (into-array java.util.concurrent.CompletableFuture
-                                      (mapv #(r/foreign-append-async! (:events conn) % :ack) records)))
-                         (reify BiConsumer (accept [_ v e] (done v e))))
+          (.whenCompleteAsync (java.util.concurrent.CompletableFuture/allOf
+                               (into-array java.util.concurrent.CompletableFuture
+                                           (mapv #(r/foreign-append-async! (:events conn) % :ack) records)))
+                              (reify BiConsumer (accept [_ v e] (done v e)))
+                              ^java.util.concurrent.Executor @queue-executor)
           (catch Throwable e (done nil e)))))))
 
 (defn- start-lane!
@@ -572,9 +583,12 @@
   (or (r/foreign-select-one (keypath client-id :subscriptions) sessions) {}))
 
 (defn queued
-  "What is waiting for `client-id`, oldest first: a seq of [key message]."
-  [{:keys [queued-state]} client-id]
-  (r/foreign-select [(keypath client-id) ALL] queued-state))
+  "What is waiting for `client-id`, oldest first: a seq of [key message].
+   The first `limit` of it, when given."
+  ([{:keys [queued-state]} client-id]
+   (r/foreign-select [(keypath client-id) ALL] queued-state))
+  ([{:keys [queued-state]} client-id limit]
+   (r/foreign-select [(keypath client-id) (sorted-map-range-from-start limit) ALL] queued-state)))
 
 (defn resume
   "What a broker needs on `client-id`'s CONNECT: {:session the record,
@@ -587,7 +601,9 @@
     (if (false? (:clean-session? s))
       {:session       s
        :subscriptions (or (:subscriptions s) {})
-       :queued        (vec (queued conn client-id))}
+       ;; As much as the broker's own queue holds: the rest is read once
+       ;; the client has worked through that (handlers/catch-up!).
+       :queued        (vec (queued conn client-id handlers/pending-limit))}
       {:session s :subscriptions {} :queued []})))
 
 ;; ── the copy of the cluster's subscriptions ──────────────────────────────
@@ -859,9 +875,12 @@
        ;; away from another broker, the sender had away too, and queued.
        (let [here?   #(= broker-id (:broker-id %))
              queue   (per-client (filter #(and (false? (:connected? %)) (here? %)) matches))
-             leaving (per-client (filter #(and (true? (:connected? %)) (here? %)) matches))]
-         (when (or (seq queue) (seq leaving))
-           {:queue queue :leaving leaving}))
+             leaving (per-client (filter #(and (true? (:connected? %)) (here? %)) matches))
+             ;; And those it has connected elsewhere already, which the
+             ;; sender, a step behind, took for here: see handlers/route.
+             moved   (per-client (filter #(and (true? (:connected? %)) (not (here? %))) matches))]
+         (when (or (seq queue) (seq leaving) (seq moved))
+           {:queue queue :leaving leaving :moved moved}))
        (plan-matches matches)))))
 
 (defn- plan-matches
@@ -1280,7 +1299,7 @@
            :resume       (fn [client-id] (resume conn client-id))
            :enqueue!     (fn [client-id msg key] (enqueue! conn client-id msg key))
            :dequeue!     (fn [client-id keys] (dequeue! conn client-id keys))
-           :queued       (fn [client-id] (queued conn client-id))
+           :queued       (fn [client-id limit] (queued conn client-id limit))
            :settled!     (fn [peer-id msg-keys]
                            (when-let [peer (get @(:brokers conn) peer-id)]
                              (bridge/settled! broker-id peer-id peer msg-keys)))

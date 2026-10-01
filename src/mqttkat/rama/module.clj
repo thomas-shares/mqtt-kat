@@ -321,10 +321,16 @@
 
 (def queue-limit
   "How many messages are kept for one session that is away before more are
-   refused. The broker's own pending-limit, for the same reason: something
-   has to happen to a message for a client that is not coming back soon,
-   and holding them for ever is not it."
-  4096)
+   refused, and counted as \"queue-refused\": something has to happen to a
+   message for a client that is not coming back soon, and holding them for
+   ever is not it. It was the broker's own pending-limit, 4096, and a
+   session that drops while it is behind brings more than that: its pending
+   queue, full, what is in flight, and what the bridges hold for it, which
+   holding publishers keeps to some thousands per link. A chaos run at
+   3,000 publishes a second lost some twenty thousand messages for each
+   subscriber to every topic that reconnected at its end, each one past the
+   limit. The bridge's own backstop, then, mqttkat.bridge/queue-limit."
+  65536)
 
 (def session-schema
   "What `$$sessions` holds per client id: the last CONNECT, minus the id that
@@ -667,7 +673,9 @@
           (local-select> [(keypath *client-id *key)] $$queued :> *had)
           (<<if (or> *had (< *n queue-limit))
             (local-transform> [(keypath *client-id *key) (termval *message)] $$queued)
-            (count> (presence-delta "queued" *had true))))
+            (count> (presence-delta "queued" *had true))
+            (else>)
+            (count> {"queue-refused" 1})))
 
         (case> :dequeue)
         (ops/explode (get *record :keys) :> *key)
