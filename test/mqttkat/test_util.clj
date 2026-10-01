@@ -86,11 +86,21 @@
 
 (def ^:private counter (atom 0))
 
+(def ^:private run-tag
+  "Empty against the suite's own broker, which starts with every run. Against
+   an external one, a tag for this run: the counter starts at 1 every time, so
+   without it a second run against a broker left running reuses the first
+   run's client ids and topics, and meets its sessions (a 300s expiry outlives
+   the run) and retained messages instead of a clean broker."
+  (if external?
+    (str "-" (Long/toString (System/currentTimeMillis) 36))
+    ""))
+
 (defn client-id
-  "A client id unique within this JVM run. Tests that reuse an id inherit each
+  "A client id unique within this run. Tests that reuse an id inherit each
    other's session state on the broker, which makes them order-dependent."
   [prefix]
-  (str prefix "-" (swap! counter inc)))
+  (str prefix run-tag "-" (swap! counter inc)))
 
 (defn client!
   "A client attached to the test broker at the socket level — no CONNECT sent.
@@ -163,10 +173,10 @@
              (group-by :packet-type acc))))))))
 
 (defn topic
-  "A topic unique to this JVM run. Retained messages and subscriptions outlive
+  "A topic unique to this run. Retained messages and subscriptions outlive
    the test that made them, so tests that share a topic depend on their order."
   [prefix]
-  (str prefix "-" (swap! counter inc) "/test"))
+  (str prefix run-tag "-" (swap! counter inc) "/test"))
 
 (defn wait-for-parked-session!
   "Block until the broker has parked `id`'s session under its client id.
