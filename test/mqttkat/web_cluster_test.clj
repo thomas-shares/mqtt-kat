@@ -80,6 +80,22 @@
     (testing "and a second nobody has a point for is left out, not drawn as zero"
       (is (= [10000] (mapv :t (cluster/combine-series [["a" [(p 10000 1)]]] 9 10)))))))
 
+(deftest the-cluster-chart-waits-for-a-late-broker
+  ;; Thomas's console, on a broker of a cluster under load: each broker's
+  ;; band dropping to nothing and back, every client connected throughout.
+  ;; A second drawn before a busy broker's points were in was drawn without
+  ;; it, and the page keeps a point once it has it.
+  (let [p   (fn [t] {:t t :clients 1})
+        now 100000]
+    (testing "with every broker's points in, the chart ends lag-ms ago"
+      (is (= (quot (- now cluster/lag-ms) 1000)
+             (cluster/chart-end [["a" [(p 99000)]] ["b" [(p 80000) (p 98500)]]] now))))
+    (testing "a broker whose points are late holds it at its last"
+      (is (= 85 (cluster/chart-end [["a" [(p 99000)]] ["b" [(p 80000) (p 85400)]]] now))))
+    (testing "but not for longer than wait-ms: one that late is drawn without, as a stopped one is"
+      (is (= (quot (- now cluster/lag-ms) 1000)
+             (cluster/chart-end [["a" [(p 99000)]] ["b" [(p (- now cluster/wait-ms 1))]] ["c" []]] now))))))
+
 (deftest every-broker-keeps-its-colour
   (let [ids ["broker-a" "broker-b" "broker-c"]
         p   (cluster/palette ids)]

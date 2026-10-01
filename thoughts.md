@@ -4,6 +4,30 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261001
 
+### Brokers coming and going on the console under load
+
+The same load run, with every client connected throughout, had each broker's
+band on the cluster charts drop to nothing and come back. Three things, each
+enough on its own:
+
+- The console's tick did its Rama work on the sampling thread. Its report
+  waited up to 30 s for an append permit when a busy broker had none free,
+  and its read of the other brokers' reports was a round trip to a busy
+  Rama. While it waited, the broker took no samples of its own. A gap of
+  more than three seconds (`carry-seconds`) is drawn as zero.
+- A cluster chart ended 7 s ago, but a busy broker's points could take
+  longer than that to come back from Rama. The second was drawn without
+  that broker, and a page keeps a point once it has it.
+- A report marked its points as sent when it went out. One that never
+  landed left a hole in that broker's chart, on every other console, for
+  good.
+
+Now the report does not wait for a permit, and it sends its points again
+until Rama says it has them. The read runs on a thread of its own, and the
+sampling keeps one a second however long a tick takes. A cluster chart
+stops at the last point of a broker that is late, for up to 20 s. A stale
+broker's points still count: they are what it had at that second.
+
 ### Load with no chaos at all
 
 `chaos/load.edn` failed at scale with nothing killed: Thomas's run at 10,000

@@ -266,3 +266,34 @@
         (is (zero? (ws/connected)) "the closed socket should have been dropped"))
       (finally
         (web/stop!)))))
+
+(deftest chart-points-go-again-until-the-cluster-has-them
+  ;; A report used to mark its points sent as it went out: one that never
+  ;; landed — Rama too busy, or the append refused — left a hole in this
+  ;; broker's chart on every other console for good.
+  (let [me      (Thread/currentThread)
+        emitted (atom nil)
+        history @#'ws/history
+        upto    @#'ws/reported-up-to
+        kept    [@history @upto]
+        planted [{:t 1000 :clients 1} {:t 2000 :clients 2} {:t 3000 :clients 3}]
+        report! (fn []
+                  (reset! emitted nil)
+                  ;; Only this thread's: the broker's own tick reports too.
+                  (with-redefs [events/emit! (fn [e] (when (identical? me (Thread/currentThread))
+                                                       (reset! emitted e)))]
+                    (#'ws/report! {} {}))
+                  @emitted)
+        planted? (fn [e] (= planted (filterv #(<= (long (:t %)) 3000) (:samples e))))]
+    (try
+      (reset! upto 0)
+      (swap! history #(into planted (remove (fn [p] (<= (long (:t p)) 3000))) %))
+      (let [first-report (report!)]
+        (is (planted? first-report) "the points it has")
+        (is (planted? (report!)) "and again, nothing having said the first landed")
+        ((:recorded first-report))
+        (is (empty? (filter #(<= (long (:t %)) 3000) (:samples (report!))))
+            "not once one has"))
+      (finally
+        (reset! history (first kept))
+        (reset! upto (second kept))))))
