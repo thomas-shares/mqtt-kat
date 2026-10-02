@@ -2114,6 +2114,41 @@
       (when (<= (pending-count client-id) resume-threshold)
         (.ackDrained subscriber)))))
 
+(def refused-log-ms
+  "How often the broker says how many QoS 1 and 2 messages it refused."
+  5000)
+
+(defonce ^:private refused
+  ;; The refusals not yet logged: {:since millis, :bridge n, :client n,
+  ;; :sample #{client-id ...}}.
+  (atom {:since 0}))
+
+(defn- note-refused!
+  "A QoS 1 or 2 message refused for `client-id`, whose pending queue was
+   full: its publisher has been told the broker has it, and nobody will be
+   sent it. The one loss under load nothing else reports — droppedMessages
+   counts QoS 0 dropped from a full write queue alongside it, which is
+   allowed. Said once at the first, then counted, by where the messages came
+   from — a bridge's are not held back by a publisher's small window — in
+   one line each refused-log-ms."
+  [client-id publisher-key]
+  (let [now  (System/currentTimeMillis)
+        from (if (bridge/bridge? (:client-id (get @*clients* publisher-key))) :bridge :client)
+        [before after]
+        (swap-vals! refused
+                    (fn [{:keys [since] :as m}]
+                      (if (>= (- now (long since)) (long refused-log-ms))
+                        {:since now from 1 :sample #{client-id}}
+                        (cond-> (update m from (fnil inc 0))
+                          (< (count (:sample m)) 5) (update :sample (fnil conj #{}) client-id)))))]
+    (when-not (= (:since before) (:since after))
+      (let [counts (dissoc before :since :sample)]
+        (when (seq counts)
+          (log/warn "refused" counts "QoS 1/2 messages in the" (- now (long (:since before)))
+                    "ms before, their subscribers' pending queues full - for" (vec (:sample before)))))
+      (log/warn "refusing a QoS 1/2 message from a" (name from) "for" client-id
+                "- its pending queue is full at" pending-limit "- counting the rest for" refused-log-ms "ms"))))
+
 (declare deliver-now-or-queue!)
 
 (defn- deliver-or-queue!
@@ -2131,8 +2166,10 @@
     ;; CONNACK. Unless that flush has been and gone while this was queued,
     ;; which the second look catches.
     (awaiting-connack? key)
-    (do (when (queue-pending! client-id msg)
-          (note-delivered! client-id msg))
+    (do (if (queue-pending! client-id msg)
+          (note-delivered! client-id msg)
+          (do (.increment ^LongAdder MqttStat/droppedMessages)
+              (note-refused! client-id publisher-key)))
         (when-not (awaiting-connack? key)
           (flush-pending! key client-id)))
 
@@ -2152,7 +2189,8 @@
     (do
       (if (queue-pending! client-id msg)
         (note-delivered! client-id msg)
-        (.increment ^LongAdder MqttStat/droppedMessages))
+        (do (.increment ^LongAdder MqttStat/droppedMessages)
+            (note-refused! client-id publisher-key)))
       (when (>= (pending-count client-id) pause-threshold)
         (throttle-publisher! key publisher-key client-id)))))
 

@@ -41,5 +41,10 @@
 
  :chaos {}
 
+ ;; A load that outruns the brokers leaves them minutes behind when the
+ ;; publishers stop, mostly on the bridges between them, and a drain that
+ ;; gives up then counts all of that as lost. Long enough to see it out;
+ ;; the drain ends as soon as nothing arrives for :drain-ms anyway.
  :check {:subscribe-settle-ms 2000
-         :drain-ms            10000}}
+         :drain-ms            10000
+         :max-drain-ms        900000}}

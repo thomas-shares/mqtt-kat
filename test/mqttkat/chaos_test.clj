@@ -10,14 +10,14 @@
 (defn- run
   "The verdict on one subscription of client \"s\" to `filter` and the
    publishes and deliveries given. Times are in microseconds."
-  [{:keys [sub publishes deliveries persistent? sessions-lost]
+  [{:keys [sub publishes deliveries persistent? sessions-lost events]
     :or   {persistent? true}}]
   (check/check {:publishes     publishes
                 :subscriptions {"s" (if (map? sub) [sub] sub)}
                 :clients       {"s" {:persistent? persistent?}}
                 :deliveries    {"s" deliveries}
                 :sessions-lost (or sessions-lost [])
-                :events        []}
+                :events        (vec events)}
                {:subscribe-settle 100 :clean-grace 1000}))
 
 (def ^:private sub {:filter "t/1" :qos 2 :sub-sent 0 :from 10})
@@ -55,6 +55,7 @@
                               [0 3] (assoc (msg 1 520 620) :pub-broker 1)}
                   :deliveries {}})]
       (is (= {[1 1] 1 [2 1] 2} (:lost-route r)))
+      (is (= {:kept 3} (:lost-by-session r)))
       (is (every? #(= 1 (:sub-broker %)) (:violations r)))))
 
   (testing "the lower QoS decides: a QoS 2 publish to a QoS 0 subscription is owed nothing"
@@ -107,13 +108,24 @@
   (testing "QoS 2 is exactly once"
     (let [r (run {:sub sub :publishes {[0 1] (msg 2 500 600)}
                   :deliveries {[0 1] [{:at 650 :qos 2} {:at 900 :qos 2}]}})]
-      (is (= {:duplicate 1} (kinds r)))))
+      (is (= {:duplicate 1} (kinds r)))
+      (is (= {2 1} (:duplicate-by r)))))
+
+  (testing "and a second copy comes with where the client went in between"
+    (let [r (run {:sub sub :publishes {[0 1] (msg 2 500 600)}
+                  :deliveries {[0 1] [{:at 650 :qos 2} {:at 9000000 :qos 2}]}
+                  :events [{:at 700 :type :dropped :client "s" :broker 1}
+                           {:at 8000000 :type :connected :client "s" :broker 2}
+                           {:at 8500000 :type :connected :client "other" :broker 2}]})]
+      (is (= [:dropped :connected]
+             (map :type (:context (first (:violations r))))))))
 
   (testing "QoS 0 is at most once"
     (let [r (run {:sub sub :publishes {[0 1] (msg 0 500 nil) [0 2] (msg 1 500 600)}
                   :deliveries {[0 1] [{:at 650 :qos 0} {:at 900 :qos 0}]
                                [0 2] [{:at 650 :qos 1}]}})]
-      (is (= {:duplicate 1} (kinds r))))))
+      (is (= {:duplicate 1} (kinds r)))
+      (is (= {0 1} (:duplicate-by r))))))
 
 (deftest what-should-not-arrive
   (testing "published after the UNSUBACK"
