@@ -1828,7 +1828,11 @@
           (fresh!)
           (let [cv (web-cluster/cluster-view)]
             (is (:multi? cv))
-            (is (= (+ 4 (:clients (state/reading))) (get-in cv [:reading :clients])))
+            ;; This broker's part is its last tick's reading, up to a second
+            ;; old, against one taken now: a client of an earlier test still
+            ;; leaving made them differ by one. Equal once a tick has run.
+            (is (tu/wait-until #(= (+ 4 (:clients (state/reading)))
+                                   (get-in (web-cluster/cluster-view) [:reading :clients]))))
             (is (<= (get-in cv [:reading :clients]) (get-in cv [:reading :max-clients]))
                 "and never has more clients than its most at once")
             (is (some #(= "far/topic" (:topic %)) (:topics cv)))
