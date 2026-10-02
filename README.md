@@ -179,11 +179,18 @@ the module to come back up after a start:
 ```
 bb scripts/rama.bb start | stop | kill | restart | status   # --rama-dir, or $RAMA_HOME, default ~/projects/rama
 bb scripts/rama.bb update                                   # lein jar, then deploy: update if deployed, launch if not
+bb scripts/rama.bb reset                                    # stop, delete the cluster's data, start, launch
 ```
 
 `update` does the build and the deploy below in one go, keeps the uberjar that
 `lein jar` would remove, and waits until the module is `RUNNING` again.
 `--no-build` deploys the thin jar already in `target/`.
+
+`reset` starts the cluster over: it deletes `local-rama-data` and `local-zk` in
+the Rama directory, every module and everything in them, and launches the module
+on the empty cluster. Delete those two by hand only together and only while Rama
+is stopped; one without the other can leave ZooKeeper naming a Supervisor the
+data no longer has.
 
 The module goes to the cluster as the thin jar — `lein jar`, not `lein uberjar`:
 the workers have Rama and Clojure already, and the module's namespace depends on

@@ -4,6 +4,18 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261002
 
+### NOT_ALIVE, or never there
+
+With the cluster emptied for a clean load run, `bb scripts/rama.bb update`
+tried to update the module and Rama said "Module not alive". It was not
+dead, it was not there: `moduleStatus` answers NOT_ALIVE for a module the
+cluster has never heard of, and the script took that for one deployed,
+which gets an update. What tells them apart is the depot the module
+appends to: `"appendTargetId":null` until its first launch, set from
+then on. Read that way, an empty cluster gets a launch. There is a
+`reset` too now, for a clean slate before a load run: stop, delete
+local-rama-data and local-zk together, start, launch.
+
 ### Listed, not reporting
 
 The next no-chaos run on the branch: at 15:10:20 every bridge in the
