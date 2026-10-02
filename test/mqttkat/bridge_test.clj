@@ -217,6 +217,46 @@
         (is (zero? @lost))
         (finally (bridge/drop! "peer-11"))))))
 
+(deftest a-peer-still-reporting-is-waited-for
+  ;; A load run with nothing killed lost five million deliveries: a broker
+  ;; stops reading a bridge while one of its subscribers catches up, the
+  ;; other end saw nothing acknowledged for five seconds and dropped the
+  ;; link, and what it handed back was queued for clients still connected
+  ;; there, who never read it.
+  (with-redefs [bridge/window-wait-ms 200]
+    (testing "a full window on a peer the cluster still hears from: waited on, nothing handed back"
+      (let [p    (peer connack-2)
+            lost (atom 0)]
+        (try
+          (reset! bridge/peer-alive? (fn [id] (= "peer-20" id)))
+          (dotimes [i 3]
+            (bridge/send-to! "me" "peer-20" {:host "127.0.0.1" :port (:port p)} [] (str "t/" i)
+                             {:qos 1 :payload (.getBytes "x") :properties {} :on-lost #(swap! lost inc)}))
+          (is (tu/wait-until #(= 2 (count (publishes p)))))
+          (Thread/sleep 1000)
+          (is (zero? @lost) "five times the wait, and nothing handed back")
+          (puback! p (:packet-identifier (first (publishes p))))
+          (is (tu/wait-until #(= 3 (count (publishes p)))) "and the third goes on the same link once a slot frees")
+          (is (zero? @lost))
+          (finally
+            (reset! bridge/peer-alive? nil)
+            (bridge/drop! "peer-20")
+            (.stop ^MqttServer (:server p) 100)))))
+
+    (testing "one it does not hear from is dropped, as before"
+      (let [p    (peer connack-2)
+            lost (atom 0)]
+        (try
+          (reset! bridge/peer-alive? (constantly false))
+          (dotimes [i 3]
+            (bridge/send-to! "me" "peer-21" {:host "127.0.0.1" :port (:port p)} [] (str "t/" i)
+                             {:qos 1 :payload (.getBytes "x") :properties {} :on-lost #(swap! lost inc)}))
+          (is (tu/wait-until #(= 3 @lost) 5000) "the two in flight and the one waiting for a slot")
+          (finally
+            (reset! bridge/peer-alive? nil)
+            (bridge/drop! "peer-21")
+            (.stop ^MqttServer (:server p) 100)))))))
+
 (deftest a-peer-that-refuses-is-left-alone-for-a-while
   (testing "one failed connect marks it down; what follows is handed back without trying again"
     ;; The mark was never set: the link's thread compared itself with the

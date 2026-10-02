@@ -2,6 +2,28 @@
 
 In this file will go my thoughts and ramblings about this project and what I have done and what I might do next.
 
+## 20261002
+
+### A slow broker is not a dead one
+
+Thomas's bridge logs from the 10,000-a-second run: eight links dropped with
+"nothing acknowledged for 5000 ms", and nineteen links handing back what they
+had in flight. A broker stops reading a bridge, as it stops reading any
+publisher, while a subscriber that publisher feeds has more than
+`pause-threshold` waiting. A wildcard subscriber at that rate is behind most
+of the time. The other end waited five seconds for a slot, took the peer for
+dead, and handed back up to 16,384 messages. Each was queued in Rama for the
+clients it was for on the peer, which were still connected there and so
+never read their queue. For a clean session the queue refused it outright.
+Every wildcard subscriber on that peer lost the same messages, which is why
+the top ten lost 56,080 each, give or take. A persistent one got them at the
+final reconnect, after the peer had delivered them already: those are the
+QoS 2 duplicates.
+
+Now a link whose peer is still reporting to the cluster (within 30 s) waits
+for its window, as a publisher the peer holds waits. Only a link to a peer
+that has gone quiet, or whose socket has closed, hands its messages back.
+
 ## 20261001
 
 ### Brokers coming and going on the console under load

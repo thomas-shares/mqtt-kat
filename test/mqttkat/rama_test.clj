@@ -1880,3 +1880,13 @@
           (reset! cluster/*connection* nil)
           (web-cluster/forget!)
           (cluster/close! conn))))))
+
+(deftest a-broker-is-reporting-while-its-reports-are-recent
+  (let [now  (System/currentTimeMillis)
+        conn {:brokers (atom {"fresh"   {:at (- now 600000) :stats-at (- now 4000)}
+                              "started" {:at (- now 1000)}
+                              "quiet"   {:at (- now 600000) :stats-at (- now cluster/reporting-within-millis 1000)}})}]
+    (is (cluster/reporting? conn "fresh"))
+    (is (cluster/reporting? conn "started") "announced a moment ago, and not reported yet")
+    (is (not (cluster/reporting? conn "quiet")))
+    (is (not (cluster/reporting? conn "unknown")))))

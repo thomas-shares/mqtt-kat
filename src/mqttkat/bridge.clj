@@ -206,8 +206,21 @@
 
 (def window-wait-ms
   "How long a publish waits for a slot in the peer's Receive Maximum before
-   the peer is taken to have stopped acknowledging, and dropped."
+   the peer is taken to have stopped acknowledging, and dropped — unless
+   it is still reporting to the cluster (see `peer-alive?`)."
   5000)
+
+(defonce peer-alive?
+  ;; (fn [peer-id] -> whether the cluster has heard from it lately), or nil.
+  ;; Installed by mqttkat.rama.cluster. A peer that stops acknowledging may
+  ;; be gone, or may only have stopped reading this link while one of its
+  ;; subscribers catches up, as it stops reading any publisher feeding a
+  ;; subscriber that has fallen behind (handlers/throttle-publisher!). One
+  ;; that is still reporting is the second: its link is waited on, as a
+  ;; publisher it holds waits, rather than dropped with everything in
+  ;; flight handed back. Dropped, that was every message on a busy link,
+  ;; and the clients it was for, still connected there, never had it.
+  (atom nil))
 
 (declare lost!)
 
@@ -439,13 +452,21 @@
     ;; wait ends the link, this one is handed back here, since neither the
     ;; queue nor the in-flight map has it to hand back later.
     (when id
-      (let [slot? (try (.tryAcquire window (long window-wait-ms) TimeUnit/MILLISECONDS)
-                       (catch InterruptedException e
-                         (lost! (:peer-id link) on-lost)
-                         (throw e)))]
-        (when-not slot?
-          (lost! (:peer-id link) on-lost)
-          (throw (IOException. (str "nothing acknowledged for " window-wait-ms " ms"))))))
+      (loop [waited 0]
+        (let [slot? (try (.tryAcquire window (long window-wait-ms) TimeUnit/MILLISECONDS)
+                         (catch InterruptedException e
+                           (lost! (:peer-id link) on-lost)
+                           (throw e)))
+              waited (+ waited (long window-wait-ms))]
+          (when-not slot?
+            (if (and (client/connected? client)
+                     (when-let [alive? @peer-alive?] (alive? (:peer-id link))))
+              (do (when (zero? (mod waited (* 6 (long window-wait-ms))))
+                    (log/info "bridge to" (:peer-id link) ": nothing acknowledged for" waited
+                              "ms; it is still reporting, so waiting for it"))
+                  (recur waited))
+              (do (lost! (:peer-id link) on-lost)
+                  (throw (IOException. (str "nothing acknowledged for " waited " ms")))))))))
     ;; Recorded before the write, so an acknowledgement quicker than the
     ;; line after it still finds it.
     (when (and id (or on-lost hold))

@@ -1354,6 +1354,20 @@
                                f))
       nil)))
 
+(def reporting-within-millis
+  "How recently a broker must have reported for another to take it as up
+   while its bridge is not acknowledging: a report every five seconds, and
+   under load each can be late."
+  30000)
+
+(defn reporting?
+  "Whether broker `peer-id` is in the registry and has reported within
+   reporting-within-millis."
+  [{:keys [brokers]} peer-id]
+  (when-let [{:keys [at stats-at]} (get @brokers peer-id)]
+    (< (- (System/currentTimeMillis) (long (max (long (or at 0)) (long (or stats-at 0)))))
+       (long reporting-within-millis))))
+
 (defn attach!
   "Make `conn` the broker's connection: record its session events, watch
    the cluster's subscriptions and brokers, and forward publishes to the
@@ -1365,6 +1379,7 @@
   (events/listen! ::rama on-broker-event)
   (reset! bridge/planner (fn ([topic] (plan conn topic)) ([topic opts] (plan conn topic opts))))
   (reset! bridge/forwarder (fn [plan topic msg] (forward-publish! conn plan topic msg)))
+  (reset! bridge/peer-alive? (fn [peer-id] (reporting? conn peer-id)))
   (reset! retained/sink (fn [topic message] (record! conn (->retain topic message))))
   (reset! handlers/redirector (fn [client-id] (redirect-target client-id)))
   (reset! handlers/session-source
@@ -1389,6 +1404,7 @@
   []
   (reset! bridge/planner nil)
   (reset! bridge/forwarder nil)
+  (reset! bridge/peer-alive? nil)
   (reset! retained/sink nil)
   (reset! handlers/redirector nil)
   (reset! handlers/session-source nil)
