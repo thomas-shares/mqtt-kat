@@ -4,6 +4,30 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261002
 
+### Listed, not reporting
+
+The next no-chaos run on the branch: at 15:10:20 every bridge in the
+cluster gave up on its peer within seven seconds of the others, "nothing
+acknowledged" after 5 to 20 s, and handed back about 22,000 messages each,
+some ninety thousand in all, then gave up on another 28,000 the peers had
+taken and not yet confirmed. A handed-back message is queued only for
+sessions that outlive their connection, so for every clean subscriber on
+the other end it was gone, and one bridged message is a delivery for each
+subscriber there.
+
+The wait from the morning's change asked whether the peer had reported to
+the cluster in the last 30 s. Under that load the reports reach the others
+late, and late for all of them at the same moment, so the safeguard turned
+off exactly when it was needed. A connected peer is now waited on for as
+long as the registry lists it. A broker that has really gone either closes
+its socket, which ends the link at once, or is dropped from the registry,
+whose drop! ends it; a broker that is only slow keeps its link and holds
+the publishers feeding it, which is the back-pressure QoS 1 asks for.
+
+The cost is a broker that hangs with its sockets open: the others hold
+their publishers for it until the registry forgets it, which is
+broker-forgotten-after-millis, ten minutes. Slower, but nothing is lost.
+
 ### One message with no QoS, and a whole queue behind it
 
 The broker logs from the no-chaos load run had 334 CONNECTs fail at

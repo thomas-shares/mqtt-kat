@@ -1363,19 +1363,17 @@
                                f))
       nil)))
 
-(def reporting-within-millis
-  "How recently a broker must have reported for another to take it as up
-   while its bridge is not acknowledging: a report every five seconds, and
-   under load each can be late."
-  30000)
-
-(defn reporting?
-  "Whether broker `peer-id` is in the registry and has reported within
-   reporting-within-millis."
+(defn listed?
+  "Whether broker `peer-id` is in the registry: what a bridge that is
+   connected to it and waiting on its acknowledgements asks before giving
+   up on it. Not whether it reported lately: under load the reports reach
+   the others late, all of them at once, and every link in a load run gave
+   up on a connected peer in the same second, handing back some ninety
+   thousand messages that clean sessions could not be queued. A broker that
+   has really stopped is closed by its socket, or dropped from the registry
+   (see drop!), and either ends the link."
   [{:keys [brokers]} peer-id]
-  (when-let [{:keys [at stats-at]} (get @brokers peer-id)]
-    (< (- (System/currentTimeMillis) (long (max (long (or at 0)) (long (or stats-at 0)))))
-       (long reporting-within-millis))))
+  (contains? @brokers peer-id))
 
 (defn attach!
   "Make `conn` the broker's connection: record its session events, watch
@@ -1388,7 +1386,7 @@
   (events/listen! ::rama on-broker-event)
   (reset! bridge/planner (fn ([topic] (plan conn topic)) ([topic opts] (plan conn topic opts))))
   (reset! bridge/forwarder (fn [plan topic msg] (forward-publish! conn plan topic msg)))
-  (reset! bridge/peer-alive? (fn [peer-id] (reporting? conn peer-id)))
+  (reset! bridge/peer-alive? (fn [peer-id] (listed? conn peer-id)))
   (reset! retained/sink (fn [topic message] (record! conn (->retain topic message))))
   (reset! handlers/redirector (fn [client-id] (redirect-target client-id)))
   (reset! handlers/session-source

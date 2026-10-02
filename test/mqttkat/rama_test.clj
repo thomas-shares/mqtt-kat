@@ -1890,12 +1890,11 @@
           (web-cluster/forget!)
           (cluster/close! conn))))))
 
-(deftest a-broker-is-reporting-while-its-reports-are-recent
+(deftest a-bridge-waits-on-a-broker-while-it-is-listed
   (let [now  (System/currentTimeMillis)
-        conn {:brokers (atom {"fresh"   {:at (- now 600000) :stats-at (- now 4000)}
-                              "started" {:at (- now 1000)}
-                              "quiet"   {:at (- now 600000) :stats-at (- now cluster/reporting-within-millis 1000)}})}]
-    (is (cluster/reporting? conn "fresh"))
-    (is (cluster/reporting? conn "started") "announced a moment ago, and not reported yet")
-    (is (not (cluster/reporting? conn "quiet")))
-    (is (not (cluster/reporting? conn "unknown")))))
+        conn {:brokers (atom {"fresh" {:at (- now 600000) :stats-at (- now 4000)}
+                              "quiet" {:at (- now 600000) :stats-at (- now 60000)}})}]
+    (is (cluster/listed? conn "fresh"))
+    (is (cluster/listed? conn "quiet")
+        "reports late under load: still listed, still waited on")
+    (is (not (cluster/listed? conn "unknown")) "dropped from the registry: given up on")))
