@@ -301,7 +301,7 @@
       (log/warn "bridge to" peer-id "gone with" (count held)
                 "messages taken and not yet delivered; queuing them")
       (doseq [{:keys [on-undelivered]} held]
-        (lost! peer-id on-undelivered)))))
+        (lost! peer-id on-undelivered :gone-undelivered)))))
 
 (defn- expire-awaiting!
   "Take `peer-id`'s messages held since before `before` as delivered."
@@ -311,16 +311,51 @@
       (log/info "bridge to" peer-id ":" n "messages waited" awaiting-limit-ms
                 "ms for word they were delivered; taken as delivered"))))
 
+(def handed-back-log-ms
+  "How often a link says how many messages it has handed back, and why."
+  5000)
+
+(defonce ^:private handed-back
+  ;; peer-id -> {:since millis, reason -> count}: the hand-backs not yet
+  ;; logged. One line each handed-back-log-ms, not one per message: a full
+  ;; queue hands back thousands a second, and those used to go unlogged.
+  (atom {}))
+
+(defn- note-handed-back! [peer-id reason]
+  (let [now (System/currentTimeMillis)
+        [before after]
+        (swap-vals! handed-back
+                    (fn [m]
+                      (let [{:keys [since] :as e} (get m peer-id)]
+                        (if (and since (>= (- now (long since)) (long handed-back-log-ms)))
+                          (assoc m peer-id {:since now})
+                          (if e
+                            (update-in m [peer-id reason] (fnil inc 0))
+                            (assoc m peer-id {:since now}))))))
+        e     (get before peer-id)
+        fresh (not= (:since e) (:since (get after peer-id)))]
+    (when (and e fresh (seq (dissoc e :since)))
+      (log/warn "bridge to" peer-id ": handed back" (dissoc e :since)
+                "in the" (- now (long (:since e))) "ms before"))
+    ;; The first of each window at once: the count above comes only with
+    ;; the next hand-back, which after a burst may be a long time coming.
+    (when fresh
+      (log/warn "bridge to" peer-id ": handing back a message:" (name reason)
+                "- counting the rest for" handed-back-log-ms "ms"))))
+
 (defn- lost!
   "Tell a message's sender it did not reach the peer: the cluster queues it
    for the sessions it was for (see mqttkat.rama.cluster/forward-publish!).
-   Never throws — this runs on the link's thread and the peer's reader."
-  [peer-id on-lost]
-  (when on-lost
-    (try
-      (on-lost)
-      (catch Throwable t
-        (log/warn t "bridge to" peer-id "could not hand back a message it lost")))))
+   Never throws — this runs on the link's thread and the peer's reader.
+   `reason`, a keyword, is for the log."
+  ([peer-id on-lost] (lost! peer-id on-lost :link-lost))
+  ([peer-id on-lost reason]
+   (when on-lost
+     (note-handed-back! peer-id reason)
+     (try
+       (on-lost)
+       (catch Throwable t
+         (log/warn t "bridge to" peer-id "could not hand back a message it lost"))))))
 
 (defn- on-packet
   "What the peer sends back. A bridge subscribes to nothing, so this is its
@@ -354,7 +389,7 @@
       :PUBREC  (if (>= code 0x80)
                  (let [entry (settle!)]
                    (release!)
-                   (lost! peer-id (:on-lost entry)))
+                   (lost! peer-id (:on-lost entry) :refused))
                  (when-let [c @holder]
                    (await! peer-id (:hold (settle!)))
                    (try
@@ -455,7 +490,7 @@
       (loop [waited 0]
         (let [slot? (try (.tryAcquire window (long window-wait-ms) TimeUnit/MILLISECONDS)
                          (catch InterruptedException e
-                           (lost! (:peer-id link) on-lost)
+                           (lost! (:peer-id link) on-lost :link-dropped)
                            (throw e)))
               waited (+ waited (long window-wait-ms))]
           (when-not slot?
@@ -465,7 +500,7 @@
                     (log/info "bridge to" (:peer-id link) ": nothing acknowledged for" waited
                               "ms; it is still reporting, so waiting for it"))
                   (recur waited))
-              (do (lost! (:peer-id link) on-lost)
+              (do (lost! (:peer-id link) on-lost :not-acknowledged)
                   (throw (IOException. (str "nothing acknowledged for " waited " ms")))))))))
     ;; Recorded before the write, so an acknowledgement quicker than the
     ;; line after it still finds it.
@@ -478,7 +513,7 @@
           (.release window)
           (.remove inflight (int id))
           ;; Not written, so not the peer's.
-          (lost! (:peer-id link) on-lost))
+          (lost! (:peer-id link) on-lost :write-failed))
         (throw e)))))
 
 (defn- forget-link!
@@ -544,8 +579,8 @@
             (log/warn "bridge to" peer-id "gone with" (.size queued) "messages queued and"
                       (count unacked) "unacknowledged; handing them back")
             (.add ^LongAdder MqttStat/droppedMessages (+ (.size queued) (count unacked))))
-          (doseq [{:keys [on-lost]} queued] (lost! peer-id on-lost))
-          (doseq [{:keys [on-lost]} unacked] (lost! peer-id on-lost)))
+          (doseq [{:keys [on-lost]} queued] (lost! peer-id on-lost :link-gone-queued))
+          (doseq [{:keys [on-lost]} unacked] (lost! peer-id on-lost :link-gone-unacknowledged)))
         (release-holds! link)
         (when-let [o @opened]
           (try (client/close (:client o)) (catch Exception _ nil)))
@@ -604,8 +639,7 @@
    (if-let [{:keys [^LinkedBlockingQueue queue] :as link} (link! my-id peer-id peer)]
      (if (>= (.size queue) (long queue-limit))
        (do (.increment ^LongAdder MqttStat/droppedMessages)
-           (log/debug "bridge to" peer-id "is" queue-limit "behind; handing back a publish on" (:topic packet))
-           (lost! peer-id on-lost))
+           (lost! peer-id on-lost :queue-full))
        (let [item {:qos qos :packet packet :on-lost on-lost :hold hold}]
          (.put queue item)
          ;; The link may have ended between being looked up and this put —
@@ -614,10 +648,10 @@
          ;; Taken back out if it is still there, so it is handed back once:
          ;; here, or by that thread if it got to it first.
          (if (and (not (.get ^AtomicBoolean (:running link))) (.remove queue item))
-           (lost! peer-id on-lost)
+           (lost! peer-id on-lost :link-ended)
            (when (and publisher (> (.size queue) (long queue-pause-at)))
              (hold! link publisher)))))
-     (lost! peer-id on-lost))))
+     (lost! peer-id on-lost :peer-down))))
 
 (defn drop!
   "Close and forget the connection to `peer-id`, if any: the registry says

@@ -1074,7 +1074,7 @@
           (if-let [peer (get @brokers peer-id)]
             (bridge/send-to! broker-id peer-id peer group-keys topic
                              (assoc msg :on-lost on-lost :on-undelivered on-undelivered))
-            (do (log/debug "no address for broker" peer-id "- queuing" topic "for its sessions")
+            (do (log/warn "no address for broker" peer-id "- queuing" topic "for its sessions")
                 (when on-lost (on-lost)))))))
     (when (pos? qos)
       ;; Not for whoever this broker delivered to live, as the plan says
