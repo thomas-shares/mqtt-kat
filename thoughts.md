@@ -4,6 +4,46 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261002
 
+### A session that moves, and what it was in the middle of
+
+The no-chaos load run moves every persistent subscriber to another broker
+at the end, gracefully, and the duplicates it found were nearly all on
+those sessions after that move. The old broker hands what the client had
+not acknowledged over to the cluster's queue, each with the identifier it
+was in flight under, and records the disconnect. Both were writes to Rama
+that nobody waited on, so under load the disconnect could land first; the
+new broker read the queue without the hand-over, gave the client fresh
+identifiers starting at 1, and a catch-up read found the handed-over
+entries seconds later. They then went on the ordinary queue under new
+identifiers: a QoS 2 message the client had already taken arrived as a
+new one, and a PUBREL went in flight and was never sent, so the client
+kept holding that identifier and dropped the next message sent under it
+as a repeat.
+
+Now the disconnect is recorded once the hand-over's writes have landed,
+and a CONNECT that finds the session still connected on a live peer waits
+for that record, ten seconds at most, before it reads the queue. Read
+then, the hand-over is restored under its identifiers before anything
+else is sent, so live deliveries take others. One a catch-up read still
+finds late goes out at once under its own identifier, as a DUP PUBLISH or
+a PUBREL, and stays on the queue while that identifier is in use here.
+That last case is not fixed, only narrowed: after a takeover the word to
+the old broker waits behind the bridge, so the wait can run out, and an
+identifier the new broker has used meanwhile cannot be given back. The
+old broker would have to record which identifiers it held.
+
+Three smaller things from the same reading. A resume restores half of
+pending-limit, not all of it, so a session coming back to a long queue
+still has room for live messages; a delivery refused by a full queue no
+longer counts as live, so the cluster queues it for a kept session
+instead of nobody having it; and a catch-up read checks what the client
+has had after the read, not before it, since the read can take seconds.
+
+The larger loss, copies that reach the old broker more than a minute
+after the session left, is the design question still open: the receiving
+broker guesses from its own view whom a copy was for, and only the sender
+knew.
+
 ### NOT_ALIVE, or never there
 
 With the cluster emptied for a clean load run, `bb scripts/rama.bb update`

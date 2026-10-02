@@ -667,9 +667,11 @@
     (if (false? (:clean-session? s))
       {:session       s
        :subscriptions (or (:subscriptions s) {})
-       ;; As much as the broker's own queue holds: the rest is read once
-       ;; the client has worked through that (handlers/catch-up!).
-       :queued        (vec (queued conn client-id handlers/pending-limit))}
+       ;; Half what the broker's own queue holds: the rest is read once
+       ;; the client has worked through that (handlers/catch-up!). Not all
+       ;; of it: a session that came back to a full queue had its live
+       ;; deliveries refused until the client worked through it.
+       :queued        (vec (queued conn client-id (quot handlers/pending-limit 2)))}
       {:session s :subscriptions {} :queued []})))
 
 ;; ── the copy of the cluster's subscriptions ──────────────────────────────
@@ -1325,7 +1327,15 @@
       ;; another broker's copy be consulted about it — until the cluster has
       ;; it connected.
       :client-connected    (awaited (record! c (->connect connect)))
-      :client-disconnected (record! c (->disconnect broker-event))
+      ;; Once what the broker handed over for the session is on its queue:
+      ;; a broker resuming it waits for the record to say it has gone from
+      ;; here, then reads the queue (handlers/adopt-session!). Recorded at
+      ;; once, the hand-over's writes could land after that read, and their
+      ;; messages went out again under new identifiers, QoS 2 twice.
+      :client-disconnected (let [record #(record! c (->disconnect broker-event) {:wait? false})]
+                             (if-let [^CompletableFuture handed (handlers/handed-over (:client-id broker-event))]
+                               (.whenComplete handed (reify BiConsumer (accept [_ _ _] (record))))
+                               (record! c (->disconnect broker-event))))
       ;; Waited for, these two: the handler emits them before it sends the
       ;; SUBACK or UNSUBACK, so waiting here is what makes the acknowledgement
       ;; mean the cluster has the change — with :ack, the topology has
