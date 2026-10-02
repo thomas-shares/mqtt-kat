@@ -569,6 +569,11 @@
                    (cluster/plan conn "away/t"))
                 "away: queued here, forwarded nowhere")
 
+            (testing "a session that never had anything queued resumes with nothing queued"
+              ;; Not [nil]: that was taken for a message, queued with no
+              ;; topic and no QoS, and threw in the flush after the CONNACK.
+              (is (= [] (cluster/queued conn "away-1")))
+              (is (= [] (:queued (cluster/resume conn "away-1")))))
             (record! conn (cluster/->enqueue "away-1" {:topic "away/t" :payload (.getBytes "first") :qos 1}))
             (Thread/sleep 2)
             (record! conn (cluster/->enqueue "away-1" {:topic "away/t" :payload (.getBytes "second") :qos 1}))

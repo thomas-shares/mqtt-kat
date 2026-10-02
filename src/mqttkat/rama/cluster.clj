@@ -639,13 +639,22 @@
   [{:keys [sessions]} client-id]
   (or (r/foreign-select-one (keypath client-id :subscriptions) sessions) {}))
 
+(defn- entries
+  "Only [key message] pairs. The load run's brokers resumed sessions with
+   an entry that was neither — nil, by the message the broker built from it:
+   no key, no topic, no QoS — which went on the client's queue and threw in
+   the flush after the CONNACK. Not reproduced against the in-process
+   cluster, so it is left out here rather than explained."
+  [selected]
+  (filterv (fn [e] (when e (let [[k m] e] (and (some? k) (map? m))))) selected))
+
 (defn queued
   "What is waiting for `client-id`, oldest first: a seq of [key message].
    The first `limit` of it, when given."
   ([{:keys [queued-state]} client-id]
-   (r/foreign-select [(keypath client-id) ALL] queued-state))
+   (entries (r/foreign-select [(keypath client-id) ALL] queued-state)))
   ([{:keys [queued-state]} client-id limit]
-   (r/foreign-select [(keypath client-id) (sorted-map-range-from-start limit) ALL] queued-state)))
+   (entries (r/foreign-select [(keypath client-id) (sorted-map-range-from-start limit) ALL] queued-state))))
 
 (defn resume
   "What a broker needs on `client-id`'s CONNECT: {:session the record,
