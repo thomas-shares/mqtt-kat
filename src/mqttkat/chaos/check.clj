@@ -212,7 +212,8 @@
                 (let [q (effective-qos m sub)
                       v (.get acc id)]
                   (.put acc id {:required (max q (long (or (:required v) 0)))
-                                :ended-by (:ended-by sub)}))))
+                                :ended-by (:ended-by sub)
+                                :broker   (:broker sub)}))))
             (recur (inc i))))))
     acc))
 
@@ -266,6 +267,7 @@
         counts     (java.util.HashMap.)
         violations (java.util.ArrayList.)
         lost-by    (volatile! {})
+        lost-route (volatile! {})
         lost       (volatile! 0)
         add!       (fn [v]
                      (let [n (inc (long (.getOrDefault counts (:kind v) 0)))]
@@ -276,7 +278,7 @@
     ;; What it was owed.
     (doseq [^java.util.Map$Entry e owed
             :let [id (.getKey e)
-                  {:keys [required ended-by]} (.getValue e)]]
+                  {:keys [required ended-by broker]} (.getValue e)]]
       (bump! 0 1)
       (if (delivery ds id)
         (bump! 1 1)
@@ -287,11 +289,15 @@
           ;; a killed broker is a known gap (see thoughts.md); one elsewhere
           ;; is news.
           (vswap! lost-by update-in [required (if near? :near-broker-chaos :elsewhere)] (fnil inc 0))
+          ;; Published on one broker, owed by a subscription on another: which
+          ;; link a loss is on, when the subscription's broker is known.
+          (vswap! lost-route update [(:pub-broker m) broker] (fnil inc 0))
           (vswap! lost inc)
           (add! {:kind :lost :client client :msg id :qos required
                  :session (select-keys (get clients client) [:persistent? :mqtt5? :filter :sub-qos])
                  :topic (:topic m) :sent (:sent m) :acked (:acked m)
                  :pub-broker (:pub-broker m)
+                 :sub-broker broker
                  ;; How the subscription that owed it ended: nil while it
                  ;; lasts.
                  :sub-ended-by ended-by
@@ -339,6 +345,7 @@
      :counts     (into {} counts)
      :violations (vec violations)
      :lost-by    @lost-by
+     :lost-route @lost-route
      :lost       @lost}))
 
 (defn check
@@ -374,11 +381,12 @@
                                (update :stats #(merge-with + % (:stats r)))
                                (update :counts #(merge-with + % (:counts r)))
                                (update :lost-by #(merge-with (partial merge-with +) % (:lost-by r)))
+                               (update :lost-route #(merge-with + % (:lost-route r)))
                                (cond-> (pos? (long (:lost r)))
                                  (assoc-in [:lost-clients client] (:lost r)))))
                          {:stats {:required 0 :delivered-required 0 :deliveries 0
                                   :qos1-repeats 0 :optional-delivered 0}
-                          :counts {} :lost-by (sorted-map) :lost-clients {}}
+                          :counts {} :lost-by (sorted-map) :lost-route {} :lost-clients {}}
                          (map vector clients per))
         counts   (atom (:counts merged))
         add!     (fn [v]
@@ -401,6 +409,8 @@
                         :subscribers (count subscriptions))
      :counts     @counts
      :lost-by    (:lost-by merged)
+     ;; [publisher's broker, subscriber's broker] -> how many were lost.
+     :lost-route (into (sorted-map-by #(compare (str %1) (str %2))) (:lost-route merged))
      ;; The ten clients that lost the most: the report keeps only the first
      ;; :max-violations of each kind, all of which may be one client's.
      :lost-by-client (into {} (take 10 (sort-by (comp - val) (:lost-clients merged))))

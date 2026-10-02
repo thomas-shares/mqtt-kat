@@ -48,6 +48,15 @@
       (is (= {:lost 1} (kinds r)))
       (is (= {1 {:elsewhere 1}} (:lost-by r)))))
 
+  (testing "and by route: the publisher's broker and the subscription's"
+    (let [r (run {:sub (assoc sub :broker 1)
+                  :publishes {[0 1] (assoc (msg 1 500 600) :pub-broker 2)
+                              [0 2] (assoc (msg 1 510 610) :pub-broker 2)
+                              [0 3] (assoc (msg 1 520 620) :pub-broker 1)}
+                  :deliveries {}})]
+      (is (= {[1 1] 1 [2 1] 2} (:lost-route r)))
+      (is (every? #(= 1 (:sub-broker %)) (:violations r)))))
+
   (testing "the lower QoS decides: a QoS 2 publish to a QoS 0 subscription is owed nothing"
     (let [r (run {:sub (assoc sub :qos 0) :publishes {[0 1] (msg 2 500 600)}
                   :deliveries {}})]

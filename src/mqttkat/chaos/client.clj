@@ -241,7 +241,7 @@
       (when (and (= :subscribing state) (= pid (:packet-identifier msg)))
         (let [granted (long (first (:response msg)))]
           (if (< granted 0x80)
-            (do (ledger/subscribed! (:ledger c) (:id c) (:filter c) granted first-sent)
+            (do (ledger/subscribed! (:ledger c) (:id c) (:filter c) granted first-sent (broker-of c))
                 (reset! (:sub c) {:state :subscribed})
                 (sync-subscription! c))
             (do (bump! c :refused)

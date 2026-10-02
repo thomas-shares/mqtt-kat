@@ -501,7 +501,7 @@
     (println "usage: clojure -m mqttkat.chaos.runner config.edn [more.edn ...]")
     (System/exit 2))
   (let [result (run-scenario! (config paths))]
-    (pp/pprint (select-keys result [:ok? :stats :counts :lost-by :lost-by-client :clients :report]))
+    (pp/pprint (select-keys result [:ok? :stats :counts :lost-by :lost-route :lost-by-client :clients :report]))
     (doseq [v (take 10 (:violations result))]
       (println " " (pr-str (dissoc v :context))))
     (shutdown-agents)
