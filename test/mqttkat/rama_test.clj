@@ -1713,6 +1713,37 @@
                     @(cluster/record! conn (cluster/->broker-down))
                     (tu/close! c)))))
 
+            (testing "what is queued for a client connected here is sent to it at once: the cluster says so"
+              ;; Not resumed, so no catch-up read is coming: only the nudge
+              ;; can say it is there. Written late by a broker that took it
+              ;; for away, it waited for the client's next resume.
+              (let [id     (tu/client-id "nudged")
+                    nudge  #(r/foreign-select-one [(keypath (module/nudge-key cluster/broker-id id)) (keypath id)]
+                                                  (:nudges-state conn))
+                    c      (tu/connect! "nudged" :id id :clean-session? false :ordered? true)]
+                (try
+                  (is (tu/wait-until #(true? (cluster/connected? conn id))))
+                  (record! conn (cluster/->enqueue id {:topic "nudge/t" :payload (.getBytes "nudged") :qos 1}))
+                  (is (some? (nudge)) "the cluster notes it for this broker")
+                  (let [got (tu/expect-eventually! (:ch c) :PUBLISH 3000)]
+                    (is (= "nudged" (tu/payload-str got)))
+                    (client/send-message (:client c) {:packet-type :PUBACK
+                                                      :packet-identifier (:packet-identifier got)}))
+                  (is (tu/wait-until #(empty? (cluster/queued conn id))) "acknowledged: off the queue")
+                  (testing "and another, once, though the cluster says so twice"
+                    (let [k (h/new-message-key)]
+                      (record! conn (cluster/->enqueue id {:topic "nudge/t" :payload (.getBytes "again") :qos 1} k))
+                      (let [got (tu/expect-eventually! (:ch c) :PUBLISH 3000)]
+                        (is (= "again" (tu/payload-str got)))
+                        (record! conn (cluster/->enqueue id {:topic "nudge/t" :payload (.getBytes "again") :qos 1} k))
+                        (is (empty? (:PUBLISH (tu/take-n! (:ch c) 1 1000))) "in flight already")
+                        (client/send-message (:client c) {:packet-type :PUBACK
+                                                          :packet-identifier (:packet-identifier got)}))
+                      (is (tu/wait-until #(empty? (cluster/queued conn id))))))
+                  (finally
+                    (tu/close! c)))
+                (is (tu/wait-until #(nil? (nudge))) "and the note goes with the connection")))
+
             (testing "an anonymous client is recorded under the id it was given"
               (let [c   (tu/connect-v5! "anon" :id "")
                     id  (get-in c [:connack :properties :assigned-client-identifier])]

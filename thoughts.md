@@ -4,6 +4,36 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261002
 
+### The queue tells the broker
+
+What another broker puts on a session's queue after the client has
+resumed somewhere was read only if a catch-up read came after it, and
+those stop a minute after the CONNECT. Under load the writes come later
+than that: the copy that makes a broker queue for a client it has just
+lost can sit a minute or more behind the bridge, and Rama behind it adds
+seconds more. Those messages waited on the queue for the client's next
+resume, and in a load run that is never.
+
+So the module says so. An enqueue for a client the cluster has connected
+writes the last key to `$$nudges`, under the broker it is connected on and
+a shard of the client, and each broker watches its own sixty-four shards
+with proxies. A change is a read of that client's queue. The CONNECT
+record nudges too when the queue is not empty, since the broker read it a
+moment before saying it had the client, and the end of the connection
+takes the entry away. Every way a message reaches the queue is covered,
+because the nudge is made where they all land.
+
+Reading for the whole connection rather than its first minute meant the
+"had" set had to stop growing. A key now stays in it until its take-off
+from the queue has landed, and goes when the next read begins: reads are
+one at a time per client, and a read that begins after the take-off
+landed cannot find it. One that was under way could, which is why a key
+cannot simply go when it lands. The suite found the other half of that:
+a restatement read the queue on its own while a nudge read it too, and
+each sent what the other had just put on the client's queue. Now a
+restatement reads through the same one-at-a-time reader, and
+deliver-queued! takes one caller at a time per client besides.
+
 ### A session that moves, and what it was in the middle of
 
 The no-chaos load run moves every persistent subscriber to another broker

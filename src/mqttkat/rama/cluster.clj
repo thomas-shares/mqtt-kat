@@ -144,6 +144,8 @@
      :brokers-state  PState client, the registry
      :retained-state PState client, shard -> topic -> retained message
      :queued-state   PState client, client-id -> key -> queued message
+     :nudges-state   PState client, `$$nudges`: which clients connected
+                     here have had something queued since
      :trie           atom, the in-memory copy of every subscription in the
                      cluster; empty until watch!
      :brokers        atom, the in-memory copy of the registry:
@@ -186,6 +188,7 @@
      :settings-state (r/foreign-pstate cluster module-name "$$settings")
      :retained-state (r/foreign-pstate cluster module-name "$$retained")
      :queued-state  (r/foreign-pstate cluster module-name "$$queued")
+     :nudges-state  (r/foreign-pstate cluster module-name "$$nudges")
      :stats-state   (r/foreign-pstate cluster module-name "$$rama-stats")
      :detail-state  (r/foreign-pstate cluster module-name "$$broker-detail")
      :history-state (r/foreign-pstate cluster module-name "$$broker-history")
@@ -745,6 +748,11 @@
    gone — leaves its queue alone, for whichever resume comes next."
   [conn clients]
   (let [back  (filterv #(taken-back? conn %) clients)
+        ;; A persistent session is read as a nudge reads it, one read at a
+        ;; time: two readers at once each sent what the other had.
+        back  (filterv (fn [{:keys [client-id connect-id]}]
+                         (not (handlers/read-queue! client-id connect-id 0 restated-settle-millis)))
+                       back)
         drain (fn [taken]
                 (into {}
                       (for [{:keys [client-id connect-id]} back]
@@ -835,13 +843,22 @@
       (catch Throwable t
         (log/error t "applying a change to" what "failed")))))
 
+(defn- nudged!
+  "The clients whose entries in this broker's `$$nudges` changed from `old`
+   to `new`: each has something new on its queue. A first callback, or a
+   resync, has an `old` of nil, and then every client in it is read."
+  [old new]
+  (doseq [[client-id k] new
+          :when (not= k (get old client-id))]
+    (handlers/nudged! client-id)))
+
 (defn watch!
   "Open a proxy on every shard of `$$subscriptions` and keep `:trie` fed
    from them, and one on the registry for `:brokers`. The first callback of
    each carries the value as it stands, so this is also how both are built
    on start: no scan, no separate load, the same code path as any later
    change. Idempotent."
-  [{:keys [subscriptions brokers-state retained-state settings-state stats-state
+  [{:keys [subscriptions brokers-state retained-state settings-state stats-state nudges-state
            trie brokers settings stats proxies] :as conn}]
   (when (empty? @proxies)
     (reset! proxies
@@ -869,6 +886,14 @@
                                  {:callback-fn (guarded (str "subscriptions shard " shard)
                                                         (fn [new _diff old]
                                                           (apply-shard-change! trie old new)))}))
+              ;; This broker's nudges: a client connected here had
+              ;; something queued after it read its queue.
+              (for [shard (range module/shard-count)]
+                (r/foreign-proxy (keypath (module/nudge-shard-key broker-id shard)) nudges-state
+                                 {:callback-fn (guarded (str "nudges shard " shard)
+                                                        (fn [new _diff old]
+                                                          (when (identical? conn @*connection*)
+                                                            (nudged! old new))))}))
               (for [shard (range module/shard-count)]
                 (r/foreign-proxy (keypath shard) retained-state
                                  {:callback-fn (guarded (str "retained shard " shard)
