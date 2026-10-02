@@ -129,6 +129,29 @@
               "both queued messages should be delivered on reconnect"))
         (tu/close! back)))))
 
+(deftest a-malformed-queued-message-does-not-stop-the-rest
+  ;; Not portable: it puts a message on the broker's own queue by hand. A
+  ;; queued message with no QoS threw out of the CONNECT's flush, which left
+  ;; everything behind it unsent; the no-chaos load run lost whole queues of
+  ;; its persistent subscribers that way on their final reconnect.
+  (testing "one with no QoS goes out at 1, one with no topic is dropped, and the rest follow"
+    (let [id    (tu/client-id "malformed")
+          topic (tu/topic "malformed")
+          sub   (tu/connect! nil :id id :clean-session? false)]
+      (client/send-message (:client sub) (subscribe-msg topic 1 1))
+      (tu/expect! (:ch sub) :SUBACK)
+      (client/send-message (:client sub) {:packet-type :DISCONNECT})
+      (tu/close! sub)
+      (tu/wait-for-parked-session! id)
+      (h/queue-pending! id {:topic topic :payload (.getBytes "no-qos")})
+      (h/queue-pending! id {:payload (.getBytes "no-topic") :qos 1})
+      (h/queue-pending! id {:topic topic :payload (.getBytes "fine") :qos 1})
+      (let [back (tu/connect! nil :id id :clean-session? false :ordered? true :buffer 64)
+            got  (tu/take-n! (:ch back) 2 4000)]
+        (is (= ["no-qos" "fine"] (mapv tu/payload-str (:PUBLISH got))))
+        (is (every? #(= 1 (:qos %)) (:PUBLISH got)))
+        (tu/close! back)))))
+
 (deftest qos-0-is-not-kept-for-an-offline-session
   (testing "at-most-once means nothing is stored for a client that is not there"
     ;; §4.1 requires this of QoS 1 and 2 only, and the interoperability suite

@@ -2023,21 +2023,52 @@
                     my-pool
                     :initial-delay retained-sweep-interval-ms)))
 
+(defonce ^:private malformed-noted (atom 0))
+
+(defn- note-malformed!
+  "A queued or in-flight message this broker cannot build a PUBLISH from.
+   Logged at most every five seconds, by its keys and not its payload, so
+   that where it came from can be found."
+  [client-id msg what]
+  (let [now  (System/currentTimeMillis)
+        last @malformed-noted]
+    (when (and (> (- now (long last)) 5000) (compare-and-set! malformed-noted last now))
+      (log/warn "a message for" client-id what "- its keys:" (vec (keys msg))
+                "cluster key:" (::cluster-key msg) "message key:" (::msg-key msg)))))
+
 (defn- send-publish!
   [key {:keys [topic payload qos subscription-identifiers retain? duplicate?]
-        properties :properties queued-at ::queued-at} packet-identifier]
+        properties :properties queued-at ::queued-at :as msg} packet-identifier]
   ;; The alias is decided here rather than where the message was queued. A QoS
   ;; 1 or 2 message can wait in an offline session and go out on a later
   ;; connection, and an alias belongs to the connection it is sent on — one
   ;; stamped at queueing time would be a number the new connection never
   ;; agreed to.
-  (let [properties (expiring-properties properties queued-at)]
-    (if (= ::expired properties)
+  ;; A message with no QoS threw out of MqttPublish/encode. On a resume that
+  ;; was the connect handler's flush, so the rest of the session's queue
+  ;; was never sent, and on a forwarded publish it was the fan-out, so the
+  ;; subscribers after this one never had it and the forwarding broker
+  ;; never had its PUBACK. Only QoS 1 and 2 are ever held, so it goes out
+  ;; at 1, at least once; one with no topic cannot go out at all.
+  (let [properties (expiring-properties properties queued-at)
+        client-id  #(:client-id (get @*clients* key))
+        qos        (or qos (when topic
+                             (note-malformed! (client-id) msg "had no QoS - sent at QoS 1")
+                             1))]
+    (cond
+      (nil? topic)
+      (do (note-malformed! (client-id) msg "had no topic - discarded")
+          (.increment ^LongAdder MqttStat/droppedMessages)
+          false)
+
+      (= ::expired properties)
       ;; §3.3.2.3.3: no longer worth delivering. Treated exactly as a packet over
       ;; the maximum size below — discarded, and the identifier given back.
       (do (log/debug "discarding an expired publish for" key)
           (.increment ^LongAdder MqttStat/droppedMessages)
           false)
+
+      :else
       (let [buf (MqttPublish/encode
                  (with-topic-alias
                    (publish-for (protocol-version-of key)

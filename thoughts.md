@@ -4,6 +4,25 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261002
 
+### One message with no QoS, and a whole queue behind it
+
+The broker logs from the no-chaos load run had 334 CONNECTs fail at
+11:19, all persistent subscribers on their final reconnect, every one with
+a NullPointerException out of MqttPublish.encode: a message on the
+session's queue had no :qos. The flush after the CONNACK threw on it, so
+nothing behind it on that queue was ever sent, and since the message stayed
+at the head of the window, the next flush or resume threw again. The same
+throw inside a forwarded publish's fan-out left the subscribers after it
+without the message and the forwarding broker without its PUBACK.
+
+send-publish! no longer throws on such a message. One with no QoS goes out
+at QoS 1: only QoS 1 and 2 are ever held, so at least once is the floor
+the subscriber was owed. One with no topic cannot be sent and is dropped,
+which also takes it off the cluster's queue. Either is logged with its
+keys, once every five seconds, because where it comes from is not found
+yet: every path I can read that queues a message gives it a QoS. The next
+run's log line should say which.
+
 ### A slow broker is not a dead one
 
 Thomas's bridge logs from the 10,000-a-second run: eight links dropped with
