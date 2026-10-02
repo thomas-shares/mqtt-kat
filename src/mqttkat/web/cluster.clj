@@ -30,6 +30,14 @@
    stops where every report should be in."
   7000)
 
+(def wait-ms
+  "How far behind now a cluster chart may end while a broker's points are
+   late — reported late, or slow to come back from a busy Rama — rather
+   than draw that broker as gone for the seconds it has not reported yet:
+   a page keeps the points it has, so a dip drawn once stays. A broker
+   later than this is drawn without, as one that has stopped would be."
+  20000)
+
 (def carry-seconds
   "How long a broker's last chart point stands in for it when a second has
    none of its own. A broker samples once a second on its own clock, so now
@@ -142,6 +150,19 @@
                                               [id (refresh-one (get brokers id) id now)]))}))
         (catch Throwable t
           (log/warn t "could not read the other brokers' reports from Rama"))))))
+
+(defonce ^:private refreshing (atom false))
+
+(defn refresh-soon!
+  "refresh!, on a thread of its own unless one is still running: for the
+   console's tick, which must not wait on Rama to take this broker's own
+   sample."
+  []
+  (when (compare-and-set! refreshing false true)
+    (.start (Thread/ofVirtual)
+            ^Runnable (fn []
+                        (try (refresh!)
+                             (finally (reset! refreshing false)))))))
 
 (defn- remote-of [id]
   (get-in @remote [:brokers id]))
@@ -291,16 +312,34 @@
                    (assoc (zipmap plotted (repeat 0)) :t (* 1000 (long s)) :by {})
                    ps)))))
 
+(defn chart-end
+  "The last second a cluster chart drawn at `now` covers: `lag-ms` ago, or
+   the last point of a broker that is behind that — unless it is more than
+   `wait-ms` behind. `histories` is [broker-id points] pairs, each oldest
+   first."
+  [histories now]
+  (let [now   (long now)
+        floor (- now wait-ms)
+        lasts (keep (fn [[_ h]]
+                      (when-let [t (:t (peek (vec h)))]
+                        (when (>= (long t) floor) (long t))))
+                    histories)]
+    (quot (long (reduce min (- now lag-ms) lasts)) 1000)))
+
 (defn cluster-history
   "The cluster's chart: this broker's `own` points and every other
-   counted broker's, added up a second at a time, up to `lag-ms` ago.
-   `since` in millis, or everything kept."
+   broker's that has reported, added up a second at a time, up to
+   chart-end. `since` in millis, or everything kept.
+
+   Every broker with points, stale or not: a point is what the broker had
+   at that second however late it arrived, and one that has stopped has
+   no points to add after its last."
   ([own] (cluster-history own nil))
   ([own since]
-   (let [vs     (counted (views))
+   (let [vs     (filter :detail (views))
          others (keep #(when-not (:self %) [(:id %) (:history (remote-of (:id %)))]) vs)
          now    (System/currentTimeMillis)
-         to-s   (quot (- now lag-ms) 1000)
+         to-s   (chart-end (cons [rama/broker-id own] others) now)
          from-s (quot (long (or since (- now history-ms))) 1000)
          clip   (fn [[id h]] [id (filter #(>= (long (:t %)) (* 1000 (- from-s carry-seconds))) h)])]
      (combine-series (map clip (cons [rama/broker-id own] others)) from-s to-s))))

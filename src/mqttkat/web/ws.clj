@@ -216,28 +216,39 @@
 (defonce ^:private ticks (atom 0))
 
 (defonce ^:private reported-up-to
-  ;; The time of the last chart point sent to the cluster.
+  ;; The time of the last chart point the cluster is known to have.
   (atom 0))
 
+(def ^:private report-limit
+  "The most chart points one report carries: a minute's. Points not yet
+   known to have landed go again in the next report, so a broker whose
+   reports failed for a while catches up with its recent past rather than
+   sending all of it at once."
+  60)
+
 (def ^:private tail-ms
-  "How far back a tick's points reach on a page drawn from Rama. The page
-   keeps the ones newer than it has, so this only has to be longer than a
-   report is late."
+  "How far back a tick's points reach on a page drawn from Rama, past the
+   longest a cluster chart waits for a late broker. The page keeps the ones
+   newer than it has, so this only has to be longer than a report is late."
   15000)
 
 (defn- report!
   "Tell the cluster how this broker is doing: the registry's few figures,
-   what its console shows, and the chart points since the last report.
+   what its console shows, and the chart points it does not have yet.
    Onto the event bus, for whoever keeps the cluster's registry — the
-   console does not know whether there is one, and need not."
+   console does not know whether there is one, and need not. Whoever does
+   calls :recorded once the report has landed; until then its points are
+   sent again with the next one, which writes them again harmlessly."
   [reading detail]
   (let [since   @reported-up-to
-        samples (filterv #(> (long (:t %)) (long since)) @history)]
-    (when (seq samples) (reset! reported-up-to (:t (peek samples))))
-    (events/emit! {:event   :broker-sample
-                   :stats   (state/broker-stats reading)
-                   :detail  detail
-                   :samples samples})))
+        fresh   (filterv #(> (long (:t %)) (long since)) @history)
+        samples (subvec fresh (max 0 (- (count fresh) report-limit)))
+        upto    (:t (peek samples))]
+    (events/emit! (cond-> {:event   :broker-sample
+                           :stats   (state/broker-stats reading)
+                           :detail  detail
+                           :samples samples}
+                    upto (assoc :recorded #(swap! reported-up-to max (long upto)))))))
 
 (defn- tick! []
   (let [reading (state/sample!)
@@ -248,7 +259,9 @@
     (when (zero? (mod (swap! ticks inc) report-every))
       (report! reading detail))
     (when (seq @sockets)
-      (cluster/refresh!)
+      ;; What Rama had last time, while it is read again: a read that takes
+      ;; seconds under load would hold up this broker's own points as long.
+      (cluster/refresh-soon!)
       (let [cv  (delay (cluster/cluster-view))
             now (System/currentTimeMillis)]
         (broadcast!
@@ -262,7 +275,7 @@
                 ;; A page drawn from Rama gets the last few points and keeps
                 ;; the ones it has not got: they arrive five at a time, late.
                 remote                    (assoc :samples (page-history page (:multi? pv)
-                                                                        (- now tail-ms cluster/lag-ms)))
+                                                                        (- now tail-ms cluster/wait-ms)))
                 (not remote)              (assoc :sample point)
                 (:multi? pv)              (assoc :events (:events pv))
                 (:palette pv)             (assoc :palette (:palette pv))
@@ -346,12 +359,17 @@
       (.start (Thread/ofVirtual)
               ^Runnable (fn []
                           (while @running
-                            (try
-                              (tick!)
-                              (catch Throwable t
-                                ;; Reporting on the broker must never stop it.
-                                (log/error t "websocket sample failed")))
-                            (Thread/sleep (long sample-interval-ms)))))))
+                            (let [started (System/currentTimeMillis)]
+                              (try
+                                (tick!)
+                                (catch Throwable t
+                                  ;; Reporting on the broker must never stop it.
+                                  (log/error t "websocket sample failed")))
+                              ;; A sample a second, however long the tick
+                              ;; took: one that slept a whole interval after
+                              ;; a slow tick left seconds without a point.
+                              (Thread/sleep (max 1 (- (long sample-interval-ms)
+                                                      (- (System/currentTimeMillis) started))))))))))
   true)
 
 (defn stop! []

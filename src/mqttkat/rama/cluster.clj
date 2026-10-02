@@ -49,7 +49,7 @@
             [mqttkat.trie :as trie])
   (:import [com.rpl.rama ProxyState ProxyState$Status]
            [java.net InetAddress]
-           [java.util.concurrent Semaphore TimeUnit]
+           [java.util.concurrent CompletableFuture Semaphore TimeUnit]
            [java.util.function BiConsumer]))
 
 (def broker-id
@@ -401,12 +401,13 @@
   false)
 
 (defn- take-permit!
-  "A permit for one append, or false for none: on Rama's own thread when
-   none is free, or once append-permit-wait-millis is up."
-  [^Semaphore permits]
+  "A permit for one append, or false for none: on Rama's own thread, or for
+   an append that is not to wait, when none is free, or once
+   append-permit-wait-millis is up."
+  [^Semaphore permits wait?]
   (cond
     (nil? permits)    false
-    *on-rama-thread*  (.tryAcquire permits)
+    (or *on-rama-thread* (not wait?)) (.tryAcquire permits)
     :else             (or (.tryAcquire permits)
                           (.tryAcquire permits (long append-permit-wait-millis) TimeUnit/MILLISECONDS)
                           (do (log/warn "no Rama append landed in" append-permit-wait-millis
@@ -419,7 +420,8 @@
 
    At most appends-in-flight at once: past that, this waits on the calling
    thread for one to land before it sends its own. Not on one of Rama's
-   threads, which goes ahead without waiting.
+   threads, which goes ahead without waiting, nor with `:wait? false` in
+   `opts`.
 
    Asynchronous, because this is called on the connection's own thread, and
    a network round trip to Rama is not something a CONNACK or a close should
@@ -427,20 +429,23 @@
    Rama's copy catching up a few milliseconds later changes nothing the
    client can see. A failure is logged rather than thrown for the same reason
    — the session exists whether or not the record of it made it."
-  [{:keys [events ^Semaphore append-permits]} {:keys [event client-id broker-id] :as record}]
-  (let [permit? (take-permit! append-permits)
-        fut     (try
-                  (r/foreign-append-async! events record :ack)
-                  (catch Throwable t
-                    (when permit? (.release append-permits))
-                    (throw t)))]
-    (doto fut
-      (.whenComplete (reify BiConsumer
-                       (accept [_ _ e]
-                         (when permit? (.release append-permits))
-                         (when e
-                           (log/warn e "could not record the" (name event) "of"
-                                     (or client-id broker-id (:topic record))))))))))
+  ([conn record] (record! conn record nil))
+  ([{:keys [events ^Semaphore append-permits]} {:keys [event client-id broker-id] :as record}
+    {:keys [wait?] :or {wait? true}}]
+   (let [permit? (take-permit! append-permits wait?)
+         ^CompletableFuture fut
+         (try
+           (r/foreign-append-async! events record :ack)
+           (catch Throwable t
+             (when permit? (.release append-permits))
+             (throw t)))]
+     (doto fut
+       (.whenComplete (reify BiConsumer
+                        (accept [_ _ e]
+                          (when permit? (.release append-permits))
+                          (when e
+                            (log/warn e "could not record the" (name event) "of"
+                                      (or client-id broker-id (:topic record)))))))))))
 
 ;; ── the queues, written in order and until they land ─────────────────────
 
@@ -546,11 +551,11 @@
                    (run-waiting! w)
                    (cond
                      (nil? e)
-                     (do (run! #(.complete ^java.util.concurrent.CompletableFuture % nil) futs)
+                     (do (run! #(.complete ^CompletableFuture % nil) futs)
                          (start-lane! w conn client-id lane))
 
                      (.get ^java.util.concurrent.atomic.AtomicBoolean (:stopped? w))
-                     (run! #(.completeExceptionally ^java.util.concurrent.CompletableFuture % e) futs)
+                     (run! #(.completeExceptionally ^CompletableFuture % e) futs)
 
                      :else
                      (do (note-queue-failure! w client-id e)
@@ -560,7 +565,7 @@
                                       ^Runnable #(.execute ^java.util.concurrent.Executor @queue-executor retry)
                                       (long delay-ms) java.util.concurrent.TimeUnit/MILLISECONDS)))))]
         (try
-          (.whenCompleteAsync (java.util.concurrent.CompletableFuture/allOf
+          (.whenCompleteAsync (CompletableFuture/allOf
                                (into-array java.util.concurrent.CompletableFuture
                                            (mapv #(r/foreign-append-async! (:events conn) % :ack) records)))
                               (reify BiConsumer (accept [_ v e] (done v e)))
@@ -1069,7 +1074,7 @@
           (if-let [peer (get @brokers peer-id)]
             (bridge/send-to! broker-id peer-id peer group-keys topic
                              (assoc msg :on-lost on-lost :on-undelivered on-undelivered))
-            (do (log/debug "no address for broker" peer-id "- queuing" topic "for its sessions")
+            (do (log/warn "no address for broker" peer-id "- queuing" topic "for its sessions")
                 (when on-lost (on-lost)))))))
     (when (pos? qos)
       ;; Not for whoever this broker delivered to live, as the plan says
@@ -1329,13 +1334,39 @@
                              ;; again. Harmless when it merely has not been
                              ;; pushed back yet — the same announcement twice
                              ;; is one entry.
+                             ;;
+                             ;; Neither waits for an append permit: this is
+                             ;; the console's tick, and a broker busy enough
+                             ;; to have none free is the one whose console
+                             ;; should keep sampling. The points are the
+                             ;; console's to send again until :recorded says
+                             ;; they landed.
                              (when-let [port @announced-port]
                                (when-not (get @(:brokers c) broker-id)
-                                 (record! c (->broker-up advertised-host port))))
-                             (record! c (->broker-stats (:stats broker-event)
-                                                        (:detail broker-event)
-                                                        (:samples broker-event))))
+                                 (record! c (->broker-up advertised-host port) {:wait? false})))
+                             (let [^CompletableFuture f
+                                   (record! c (->broker-stats (:stats broker-event)
+                                                              (:detail broker-event)
+                                                              (:samples broker-event))
+                                            {:wait? false})]
+                               (when-let [recorded (:recorded broker-event)]
+                                 (.thenRun f ^Runnable recorded))
+                               f))
       nil)))
+
+(def reporting-within-millis
+  "How recently a broker must have reported for another to take it as up
+   while its bridge is not acknowledging: a report every five seconds, and
+   under load each can be late."
+  30000)
+
+(defn reporting?
+  "Whether broker `peer-id` is in the registry and has reported within
+   reporting-within-millis."
+  [{:keys [brokers]} peer-id]
+  (when-let [{:keys [at stats-at]} (get @brokers peer-id)]
+    (< (- (System/currentTimeMillis) (long (max (long (or at 0)) (long (or stats-at 0)))))
+       (long reporting-within-millis))))
 
 (defn attach!
   "Make `conn` the broker's connection: record its session events, watch
@@ -1348,6 +1379,7 @@
   (events/listen! ::rama on-broker-event)
   (reset! bridge/planner (fn ([topic] (plan conn topic)) ([topic opts] (plan conn topic opts))))
   (reset! bridge/forwarder (fn [plan topic msg] (forward-publish! conn plan topic msg)))
+  (reset! bridge/peer-alive? (fn [peer-id] (reporting? conn peer-id)))
   (reset! retained/sink (fn [topic message] (record! conn (->retain topic message))))
   (reset! handlers/redirector (fn [client-id] (redirect-target client-id)))
   (reset! handlers/session-source
@@ -1372,6 +1404,7 @@
   []
   (reset! bridge/planner nil)
   (reset! bridge/forwarder nil)
+  (reset! bridge/peer-alive? nil)
   (reset! retained/sink nil)
   (reset! handlers/redirector nil)
   (reset! handlers/session-source nil)

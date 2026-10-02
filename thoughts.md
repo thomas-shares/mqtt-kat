@@ -2,7 +2,53 @@
 
 In this file will go my thoughts and ramblings about this project and what I have done and what I might do next.
 
+## 20261002
+
+### A slow broker is not a dead one
+
+Thomas's bridge logs from the 10,000-a-second run: eight links dropped with
+"nothing acknowledged for 5000 ms", and nineteen links handing back what they
+had in flight. A broker stops reading a bridge, as it stops reading any
+publisher, while a subscriber that publisher feeds has more than
+`pause-threshold` waiting. A wildcard subscriber at that rate is behind most
+of the time. The other end waited five seconds for a slot, took the peer for
+dead, and handed back up to 16,384 messages. Each was queued in Rama for the
+clients it was for on the peer, which were still connected there and so
+never read their queue. For a clean session the queue refused it outright.
+Every wildcard subscriber on that peer lost the same messages, which is why
+the top ten lost 56,080 each, give or take. A persistent one got them at the
+final reconnect, after the peer had delivered them already: those are the
+QoS 2 duplicates.
+
+Now a link whose peer is still reporting to the cluster (within 30 s) waits
+for its window, as a publisher the peer holds waits. Only a link to a peer
+that has gone quiet, or whose socket has closed, hands its messages back.
+
 ## 20261001
+
+### Brokers coming and going on the console under load
+
+The same load run, with every client connected throughout, had each broker's
+band on the cluster charts drop to nothing and come back. Three things, each
+enough on its own:
+
+- The console's tick did its Rama work on the sampling thread. Its report
+  waited up to 30 s for an append permit when a busy broker had none free,
+  and its read of the other brokers' reports was a round trip to a busy
+  Rama. While it waited, the broker took no samples of its own. A gap of
+  more than three seconds (`carry-seconds`) is drawn as zero.
+- A cluster chart ended 7 s ago, but a busy broker's points could take
+  longer than that to come back from Rama. The second was drawn without
+  that broker, and a page keeps a point once it has it.
+- A report marked its points as sent when it went out. One that never
+  landed left a hole in that broker's chart, on every other console, for
+  good.
+
+Now the report does not wait for a permit, and it sends its points again
+until Rama says it has them. The read runs on a thread of its own, and the
+sampling keeps one a second however long a tick takes. A cluster chart
+stops at the last point of a broker that is late, for up to 20 s. A stale
+broker's points still count: they are what it had at that second.
 
 ### Load with no chaos at all
 

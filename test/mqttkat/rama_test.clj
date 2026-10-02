@@ -1828,7 +1828,11 @@
           (fresh!)
           (let [cv (web-cluster/cluster-view)]
             (is (:multi? cv))
-            (is (= (+ 4 (:clients (state/reading))) (get-in cv [:reading :clients])))
+            ;; This broker's part is its last tick's reading, up to a second
+            ;; old, against one taken now: a client of an earlier test still
+            ;; leaving made them differ by one. Equal once a tick has run.
+            (is (tu/wait-until #(= (+ 4 (:clients (state/reading)))
+                                   (get-in (web-cluster/cluster-view) [:reading :clients]))))
             (is (<= (get-in cv [:reading :clients]) (get-in cv [:reading :max-clients]))
                 "and never has more clients than its most at once")
             (is (some #(= "far/topic" (:topic %)) (:topics cv)))
@@ -1880,3 +1884,13 @@
           (reset! cluster/*connection* nil)
           (web-cluster/forget!)
           (cluster/close! conn))))))
+
+(deftest a-broker-is-reporting-while-its-reports-are-recent
+  (let [now  (System/currentTimeMillis)
+        conn {:brokers (atom {"fresh"   {:at (- now 600000) :stats-at (- now 4000)}
+                              "started" {:at (- now 1000)}
+                              "quiet"   {:at (- now 600000) :stats-at (- now cluster/reporting-within-millis 1000)}})}]
+    (is (cluster/reporting? conn "fresh"))
+    (is (cluster/reporting? conn "started") "announced a moment ago, and not reported yet")
+    (is (not (cluster/reporting? conn "quiet")))
+    (is (not (cluster/reporting? conn "unknown")))))
