@@ -21,8 +21,9 @@ client by client, before the new version is planned from, and a new link
 starts with a snapshot of the whole. One TCP connection, read in order, so
 the receiver always has the sender's view as of the copy in front of it,
 and keeps the last few states of each client to judge copies that waited
-behind others. It then delivers to a kept session only if the sender had
-all its matching subscriptions here, or none at all, and queues under the
+behind others. It then leaves a kept session out only where the sender
+had a matching subscription of it elsewhere, or away, that keeps this
+message (so not at QoS 0, which nobody queues), and queues under the
 message's key for every client the sender had here and that did not get
 it live. Each broker asks the same question of the same version, so one
 of them delivers or queues and the others leave it. A client the sender
