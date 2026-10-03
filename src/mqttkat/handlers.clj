@@ -1,11 +1,13 @@
 (ns mqttkat.handlers
-  (:require [clojure.string :as str]
+  (:require [clojure.edn :as edn]
+            [clojure.string :as str]
             [clojure.tools.logging :as log]
             [mqttkat.s :refer [*server*]]
             [overtone.at-at :as at]
             [clojurewerkz.triennium.mqtt :as tr]
             [mqttkat.events :as events]
             [mqttkat.bridge :as bridge]
+            [mqttkat.intent :as intent]
             [mqttkat.retained :as retained]
             [mqttkat.trie :refer [trie-insert trie-delete trie-matching-vals sieve-dollar]])
   (:import [java.util.concurrent CompletableFuture]
@@ -172,6 +174,7 @@
 
 (declare route)
 (declare forward-to-brokers!)
+(declare session-source new-message-key)
 
 (defn publish-will [{:keys [topic qos retain payload properties]}]
   (log/trace "Sending will message on topic:" payload)
@@ -181,7 +184,10 @@
   ;; broker about when to send this, and means nothing to a subscriber.
   ;; Routed like any publish: the client whose will this is was here, so
   ;; this is never a bridged copy, and the other brokers get theirs.
-  (let [msg {:qos qos :payload payload :properties (forwardable-properties properties)}
+  ;; Named, as any QoS 1 or 2 publish entering the cluster is, so that the
+  ;; brokers it is forwarded to queue it as they would any other.
+  (let [msg (cond-> {:qos qos :payload payload :properties (forwardable-properties properties)}
+              (and (pos? (long (or qos 0))) @session-source) (assoc ::msg-key (new-message-key)))
         {:keys [plan serve-group?]} (route topic msg)
         live (when-let [keys (coalesce-subscriptions (select-shared (matching-subscribers topic) serve-group?))]
                (log/trace "Will keys:" keys)
@@ -783,7 +789,10 @@
 
 (declare forget-catching-up!)
 
+(declare origin-views)
+
 (defn remove-client! [key]
+  (swap! origin-views dissoc key)
   (let [client (get @*clients* key)]
     (when (and @session-source (:client-id client) (keep-session? client))
       (gone! (:client-id client)))
@@ -2683,7 +2692,9 @@
                          ;; the broker is the publisher there and there is
                          ;; nothing to slow down.
                          publisher-key
-                         clients)))))
+                         clients))
+      ;; Who it went to, for the other brokers: see forward-to-brokers!.
+      (into #{} (keep #(get-in clients [(:client-key %) :client-id])) keys))))
 
 (defn- holds-message?
   "Whether `client-id`'s outbound state here has the message named `k`,
@@ -2913,12 +2924,21 @@
   ([topic publisher-key] (subscribers-for topic publisher-key (constantly true)))
   ([topic publisher-key serve-group?] (subscribers-for topic publisher-key serve-group? false))
   ([topic publisher-key serve-group? groups-only?]
+   (subscribers-for topic publisher-key serve-group? groups-only? nil))
+  ([topic publisher-key serve-group? groups-only? withhold?]
+   (subscribers-for topic publisher-key serve-group? groups-only? withhold? nil))
+  ;; `matches`, matching-subscribers for `topic` when the caller has them
+  ;; already: see judged.
+  ([topic publisher-key serve-group? groups-only? withhold? matches]
    (coalesce-subscriptions
     (select-shared
-     (cond->> (deliverable-subscribers (matching-subscribers topic) publisher-key)
+     (cond->> (deliverable-subscribers (or matches (matching-subscribers topic)) publisher-key)
        ;; A copy sent only for shared groups: the ordinary subscribers here
        ;; had theirs already (see mqttkat.bridge/groups-only-property).
-       groups-only? (filter :share-group))
+       groups-only? (filter :share-group)
+       ;; A copy whose sender meant some of the ordinary subscribers here
+       ;; to have it elsewhere: see route.
+       withhold?    (remove #(and (nil? (:share-group %)) (withhold? %))))
      serve-group?))))
 
 (defn- anyone-to-deliver-to?
@@ -2936,11 +2956,109 @@
             (serve-group? [(:share-group %) (:topic-filter %)]))
          (deliverable-subscribers (matching-subscribers topic) publisher-key))))
 
+(defonce ^:private origin-views
+  ;; The key of a bridge connection -> what this broker has of its sender's
+  ;; view, as mqttkat.intent keeps it: what came down that connection, and
+  ;; so in order with the copies it judges. Forgotten with the connection;
+  ;; the next one starts from a snapshot.
+  (atom {}))
+
+(defn- view-changed!
+  "A change to the view of the broker at the other end of bridge `key`, or
+   a snapshot of it."
+  [key ^bytes payload]
+  (when-let [me (:my-broker-id @session-source)]
+    (let [change (edn/read-string (String. payload "UTF-8"))]
+      ;; Not for a connection already gone: nothing would forget it.
+      (swap! origin-views
+             (fn [views]
+               (let [view (intent/view-apply (get views key) me change)]
+                 (if (and view (get @*clients* key))
+                   (assoc views key view)
+                   (dissoc views key))))))))
+
+(defn- judged
+  "What judging bridged copy `msg` on `topic` by its sender's view takes,
+   or nil when it cannot be: no version on it, no view of its sender here
+   yet, or a view that starts after the copy was planned.
+
+   Judged once, here, for every subscriber it might go to: `:local`, this
+   broker's subscribers to it whose sessions are kept, client-id -> the
+   highest QoS of their subscriptions here, and `:withheld`, those of them
+   its sender served itself or meant to have the copy kept for elsewhere
+   (intent/withhold?). Only a kept session is withheld: a clean one here is
+   a new session, whatever the sender had for an older one. Asked once per
+   subscriber and again per plan, as it first was, judging a copy to 170
+   subscribers took 1.6 ms on the one thread that reads the bridge, and a
+   load run got a third of its publishes out."
+  [topic {:keys [client-key qos] v ::view-v :as msg}]
+  (when v
+    (let [view (get @origin-views client-key)
+          me   (:my-broker-id @session-source)]
+      (when (and me (intent/covers? view v))
+        (let [clients    @*clients*
+              qos        (long (or qos 0))
+              not-served (or (::not msg) #{})
+              t          (intent/topic topic)
+              matches    (matching-subscribers topic)
+              local      (reduce (fn [m {:keys [client-key qos share-group]}]
+                                   (let [c (get clients client-key)]
+                                     (if (or share-group (nil? (:client-id c)) (not (keep-session? c)))
+                                       m
+                                       (update m (:client-id c) (fnil max 0) (long (or qos 0))))))
+                                 {}
+                                 matches)]
+          {:view       view :me me :v v :qos qos :not-served not-served :topic t
+           :matches    matches
+           :local      local
+           :withheld   (into #{}
+                             (filter #(intent/withhold? view me % t v qos not-served))
+                             (keys local))})))))
+
+(defn- withhold-fn
+  "For a judged copy: whether to leave a subscriber out. A kept session
+   that its sender meant elsewhere is that broker's to queue for."
+  [{:keys [withheld]}]
+  (fn [{:keys [client-key]}]
+    (contains? withheld (:client-id (get @*clients* client-key)))))
+
+(defn- judged-plan
+  "For a judged copy on `topic`: whom this broker queues it for, as
+   {:leaving [{:client-id :qos}]}, unless it delivered to them live. Its
+   clients whose sessions are kept and whom it serves, should the delivery
+   be refused; and every client the sender had here, connected or not,
+   unless it is live here with no such subscription — it unsubscribed, and
+   the sender had not heard. And, as before there were views, those this
+   broker's own copy has here or just gone, if the view's history of them
+   does not reach back to the copy."
+  [topic {:keys [view me v not-served local withheld] t :topic}]
+  (let [served  (keep (fn [[c q]] (when-not (contains? withheld c) {:client-id c :qos q})) local)
+        owed    (remove (fn [{:keys [client-id]}]
+                          (and (live-connection client-id) (not (contains? local client-id))))
+                        (intent/owed view me t v not-served))
+        ;; A client whose history the view no longer reaches back to is
+        ;; judged as copies were before there was a view: see route. Only
+        ;; asked when there may be one.
+        unknown (when (intent/may-be-unknown? view v)
+                  (when-let [p (bridge/plan topic {:away-only? true})]
+                    (let [unknown? #(= ::intent/unknown (intent/state-at view (:client-id %) v))
+                          gone?    (comp recently-gone? :client-id)]
+                      (concat (filter #(and (unknown? %) (gone? %)) (:queue p))
+                              (filter unknown? (:leaving p))
+                              (filter #(and (unknown? %) (gone? %)) (:moved p))))))
+        leaving (reduce (fn [m {:keys [client-id qos]}] (update m client-id (fnil max 0) (long qos)))
+                        {}
+                        (concat served owed unknown))]
+    (when (seq leaving)
+      {:leaving (mapv (fn [[c q]] {:client-id c :qos q}) leaving)})))
+
 (defn- route
   "Where a publish on `topic` goes, when there are other brokers.
 
-   Returns {:plan :serve-group? :groups-only?}. A publish that arrived over a bridge came
-   from another broker for this one's subscribers and goes no further —
+   Returns {:plan :serve-group? :groups-only? :withhold? :matches}, the
+   last being matching-subscribers when judging asked for it already. A
+   publish that arrived over a bridge came from another broker for this
+   one's subscribers and goes no further —
    every subscription is held by exactly one broker, so one hop is the whole
    route — and it serves only the shared groups its sender named (see
    mqttkat.bridge/share-property). Any other publish is planned: the plan
@@ -2948,10 +3066,24 @@
    broker leaves those groups to them. With no other brokers the plan is
    nil and every group is served here, which is how the broker always
    behaved on its own."
-  [topic {:keys [client-key] :as msg}]
+  [topic {:keys [client-key qos] :as msg}]
   (if (bridge/bridge? (:client-id (get @*clients* client-key)))
-    ;; Its sender planned from its own copy of the cluster, which may have a
-    ;; client here that has just left, or away that is here. So this broker
+    (if-let [j (when-not (::groups-only? msg) (judged topic msg))]
+      ;; Its sender said whom it meant, by the version of its view the copy
+      ;; was planned at: see mqttkat.intent. This broker delivers to whom
+      ;; that view had here, or had nowhere, and queues — under the message's
+      ;; key — for whom it had here and did not get it live. Any other
+      ;; broker the view had a client on does the same for it there.
+      {:plan         (when (and (::msg-key msg) (pos? (long (or qos 0))))
+                       (judged-plan topic j))
+       :withhold?    (withhold-fn j)
+       :matches      (:matches j)
+       :serve-group? (or (::shares msg) #{})
+       :groups-only? false}
+    ;; Not judged — a copy for groups only, or from a sender this broker
+    ;; has no view of to judge it by. Its sender planned from its own copy
+    ;; of the cluster, which may have a client here that has just left, or
+    ;; away that is here. So this broker
     ;; queues, under the message's key, for the clients its own copy has
     ;; leaving or just away, and it did not deliver to: the sender queued for
     ;; those it had away, and the same key makes the two one entry. Not a
@@ -2976,7 +3108,7 @@
                          (when (or (seq (:queue p)) (seq (:leaving p)))
                            p))))
      :serve-group? (or (::shares msg) #{})
-     :groups-only? (boolean (::groups-only? msg))}
+     :groups-only? (boolean (::groups-only? msg))})
     (let [plan (bridge/plan topic)]
       {:plan         plan
        :serve-group? (if-let [skip (seq (:skip plan))]
@@ -3034,13 +3166,12 @@
   ;; on delivery (§4.3.2, §4.3.3), so they must not be conditional on there
   ;; being subscribers. A `matching-vals` that returned nil for no match would
   ;; otherwise have left a QoS 1 publisher retrying for ever.
-  (let [{:keys [plan serve-group? groups-only?]} (route topic msg)
+  (let [{:keys [plan serve-group? groups-only? withhold? matches]} (route topic msg)
         ;; Not chosen at all for QoS 2 — see anyone-to-deliver-to?.
         keys (when-not (= 2 (long qos))
-               (subscribers-for topic (:client-key msg) serve-group? groups-only?))]
+               (subscribers-for topic (:client-key msg) serve-group? groups-only? withhold? matches))]
     (case (long qos)
-      0 (do (qos-0 keys topic msg false)
-            (forward-to-brokers! plan topic msg))
+      0 (forward-to-brokers! plan topic msg (or (qos-0 keys topic msg false) #{}))
       ;; Queued for the sessions that are away after the live deliveries,
       ;; and without the ones those reached: a session on its way in or out
       ;; is in both tries for a moment, and whether it is live is decided
@@ -3189,6 +3320,10 @@
           k                    (bridge/msg-key properties)]
       (cond-> (assoc msg :properties properties' ::shares shares ::groups-only? only?)
         k (assoc ::msg-key k)
+        ;; Which version of its sender's view it was planned at, and whom
+        ;; the sender served itself: see route.
+        (bridge/view-v properties) (assoc ::view-v (bridge/view-v properties)
+                                          ::not (bridge/not-served properties))
         ;; Where it came from, for word back once it is delivered. Not for
         ;; a copy for groups only: its sender holds nothing for it.
         (and k (not only?)) (assoc ::origin (bridge/origin (:client-id (get @*clients* client-key))))))
@@ -3230,6 +3365,9 @@
       ;; delivered to everyone there it was for.
       "settled"  (bridge/settled-by! (bridge/origin (:client-id (get @*clients* client-key)))
                                      (str/split-lines (String. ^bytes payload "UTF-8")))
+      ;; What changed in the other broker's view, ahead of the copies
+      ;; planned from it.
+      "view"     (view-changed! client-key payload)
       (log/warn "unknown instruction from another broker:" topic))))
 
 (defn- control-message?
@@ -3363,10 +3501,11 @@
       ;; Collecting the writes to Rama it makes, as a QoS 1 publish does for
       ;; its PUBACK: see publish-keyed.
       (binding [*hand-offs* (when @session-source held)]
-        (let [{:keys [plan serve-group? groups-only?]} (route topic msg)]
+        (let [{:keys [plan serve-group? groups-only? withhold? matches]} (route topic msg)]
           (delivering-for-origin
            msg
-           #(let [live (qos-2-send (subscribers-for topic (:client-key msg) serve-group? groups-only?)
+           #(let [live (qos-2-send (subscribers-for topic (:client-key msg) serve-group? groups-only?
+                                                    withhold? matches)
                                    topic msg)]
               (queue-for-offline-sessions! topic msg live)
               (forward-to-brokers! plan topic msg live))))))

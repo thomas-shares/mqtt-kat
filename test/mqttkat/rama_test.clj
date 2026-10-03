@@ -12,7 +12,8 @@
    by the time the append's future is realised the session is in the PState
    and assertions can be immediate. Through the broker the append is
    asynchronous, so those assertions wait."
-  (:require [clojure.string :as str]
+  (:require [clojure.edn :as edn]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [com.rpl.rama :as r]
             [com.rpl.rama.path :refer [keypath]]
@@ -566,7 +567,7 @@
             (is (tu/wait-until #(and (contains? (matches conn "away/t") "away-1")
                                      (not (present-in-trie? conn "away/t" "away-1")))))
             (is (= {:brokers {} :skip #{} :queue [{:client-id "away-1" :qos 1}] :leaving [] :holders {} :groups {}}
-                   (cluster/plan conn "away/t"))
+                   (dissoc (cluster/plan conn "away/t") :v))
                 "away: queued here, forwarded nowhere")
 
             (testing "a session that never had anything queued resumes with nothing queued"
@@ -811,8 +812,12 @@
 
             (testing "forwarding to another broker"
               (let [{:keys [^MqttServer server port received]} (peer-broker)
-                    of-type   (fn [t] (filterv #(= t (:packet-type %)) @received))
+                    ;; Not the view the link carries alongside: see the
+                    ;; test of it below.
+                    view?     #(= bridge/view-topic (:topic %))
+                    of-type   (fn [t] (filterv #(and (= t (:packet-type %)) (not (view? %))) @received))
                     publishes #(of-type :PUBLISH)
+                    views     #(mapv (comp edn/read-string tu/payload-str) (filterv view? @received))
                     peer-addr {:host "127.0.0.1" :port port :at 0 :incarnation "peer-run"}]
                 (try
                   (testing "the peer announces itself and every broker sees it"
@@ -861,6 +866,28 @@
                         (is (= 1 (:qos (second (publishes)))))
                         (is (some? (:packet-identifier (second (publishes)))))
                         (is (= "one" (tu/payload-str (tu/expect-eventually! (:ch local) :PUBLISH)))))
+
+                      (testing "the link starts with this broker's view, and every copy says which version it was planned at"
+                        (let [first-publish (first (filterv #(= :PUBLISH (:packet-type %)) @received))
+                              snapshot      (first (views))
+                              v-of          (fn [p] (some (fn [[k v]] (when (= bridge/view-v-property k) (parse-long v)))
+                                                          (get-in p [:properties :user-properties])))]
+                          (is (view? first-publish) "before any copy")
+                          (is (true? (:snapshot? snapshot)))
+                          (is (= {"bridge/#" [2 "peer-x"]} (get-in snapshot [:clients "remote-sub"])))
+                          (is (= {"bridge/#" [1 cluster/broker-id]} (get-in snapshot [:clients (:client-id local)])))
+                          (is (every? #(<= (long (:v snapshot)) (long (v-of %))) (publishes)))
+                          (testing "and a subscription that changes goes down it as a change to the view"
+                            (let [before (count (views))]
+                              (client/send-message (:client local) (subscribe-msg "view/#" 0 2))
+                              (tu/expect! (:ch local) :SUBACK)
+                              (is (tu/wait-until #(some (fn [m] (get-in m [:clients (:client-id local) "view/#"]))
+                                                        (drop before (views)))))
+                              (let [m (last (views))]
+                                (is (nil? (:snapshot? m)))
+                                (is (= {"bridge/#" [1 cluster/broker-id] "view/#" [0 cluster/broker-id]}
+                                       (get-in m [:clients (:client-id local)])))
+                                (is (> (long (:v m)) (long (:v snapshot)))))))))
 
                       (testing "QoS 2: forwarded on the PUBREL, and the handshake is completed"
                         (client/send-message (:client pub) (publish-msg "bridge/t" "two" 2 12))
@@ -1069,7 +1096,8 @@
                           (Thread/sleep 300)
                           (is (= 2 (count (shared))) "two of four to the peer, for its member")
                           (is (every? #(= [[bridge/share-property "g/shared/#"]]
-                                          (mapv vec (get-in % [:properties :user-properties])))
+                                          (into [] (comp (map vec) (remove (comp #{bridge/view-v-property} first)))
+                                                (get-in % [:properties :user-properties])))
                                       (shared)))
                           (is (= 2 (count (:PUBLISH (tu/take-n! (:ch local) 4 700))))
                               "the other two to the member here")
@@ -1404,6 +1432,72 @@
                         (is (tu/wait-until #(false? (cluster/connected? conn "victim-here"))))
                         (finally
                           (tu/close! b victim)))))
+
+                  (testing "a copy from another broker is judged by the view it was planned from"
+                    ;; The sender says which version of its view it planned
+                    ;; the copy at, and the view comes down the same link:
+                    ;; this broker delivers to whom that view had here, and
+                    ;; queues for whom it had here and is not.
+                    (let [b       (tu/connect-v5! "bridge" :id (str bridge/client-id-prefix "peer-j"))
+                          me      cluster/broker-id
+                          here-id (tu/client-id "judged-here")
+                          gone-id (tu/client-id "judged-gone")
+                          here    (tu/connect! "judged-here" :id here-id :clean-session? false)
+                          gone    (tu/connect! "judged-gone" :id gone-id :clean-session? false)
+                          k       #(str (System/currentTimeMillis) "-" %)
+                          ids     (atom 900)
+                          view!   (fn [m] (client/send-message (:client b) (publish-msg bridge/view-topic (pr-str m) 0 nil)))
+                          copy!   (fn [payload v key & {:keys [not-served]}]
+                                    (client/send-message
+                                     (:client b)
+                                     (publish-msg "judge/t" payload 1 (swap! ids inc)
+                                                  :properties {:user-properties
+                                                               (cond-> [[bridge/msg-key-property key]
+                                                                        [bridge/view-v-property (str v)]]
+                                                                 not-served (conj [bridge/not-property not-served]))}))
+                                    (tu/expect-eventually! (:ch b) :PUBACK))
+                          keys-of #(set (map first (cluster/queued conn %)))
+                          [k1 k2 k3 k4] (map k ["one" "two" "three" "four"])]
+                      (try
+                        (doseq [c [here gone]]
+                          (client/send-message (:client c) (subscribe-msg "judge/#" 1 1))
+                          (tu/expect! (:ch c) :SUBACK))
+                        (tu/close! gone)
+                        (is (tu/wait-until #(false? (cluster/connected? conn gone-id))))
+                        (view! {:v 1 :snapshot? true :clients {here-id {"judge/#" [1 "peer-elsewhere"]}
+                                                               gone-id {"judge/#" [1 me]}}})
+                        (testing "meant for a client elsewhere: not delivered here, nor queued"
+                          (copy! "elsewhere" 1 k1)
+                          (is (nil? (tu/take! (:ch here) 300)))
+                          (is (empty? (cluster/queued conn here-id))))
+                        (testing "meant for a client here that is not: queued for it, under the message's key"
+                          (is (tu/wait-until #(= #{k1} (keys-of gone-id)))))
+                        (view! {:v 2 :clients {here-id {"judge/#" [1 me]}}})
+                        (testing "meant for it here, by the next version: delivered"
+                          (copy! "here" 2 k2)
+                          (let [got (tu/expect-eventually! (:ch here) :PUBLISH)]
+                            (is (= "here" (tu/payload-str got)))
+                            (client/send-message (:client here) {:packet-type :PUBACK
+                                                                 :packet-identifier (:packet-identifier got)})))
+                        (testing "a copy planned before that still goes by the version it was planned at"
+                          (copy! "planned before" 1 k3)
+                          (is (nil? (tu/take! (:ch here) 300))))
+                        (testing "one its sender served the client itself: neither delivered nor queued"
+                          (copy! "served there" 2 k4 :not-served here-id)
+                          (is (nil? (tu/take! (:ch here) 300)))
+                          (is (empty? (cluster/queued conn here-id))))
+                        (testing "but at QoS 0, which nobody keeps for it elsewhere, delivered here all the same"
+                          (client/send-message (:client b) (publish-msg "judge/t" "zero" 0 nil
+                                                                        :properties {:user-properties
+                                                                                     [[bridge/view-v-property "1"]]}))
+                          (is (= "zero" (tu/payload-str (tu/expect-eventually! (:ch here) :PUBLISH)))))
+                        (is (tu/wait-until #(= #{k1 k2 k3 k4} (keys-of gone-id)))
+                            "and every one queued for the client the view had here and away")
+                        (testing "without a version, or from before the view: as before, delivered"
+                          (client/send-message (:client b) (publish-msg "judge/t" "unversioned" 0 nil))
+                          (is (= "unversioned" (tu/payload-str (tu/expect-eventually! (:ch here) :PUBLISH)))))
+                        (finally
+                          (tu/close! b here)))))
 
                   (testing "redirecting connections"
                     ;; This broker announces itself, and a second broker that is in

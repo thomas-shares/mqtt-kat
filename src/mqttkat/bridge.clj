@@ -100,10 +100,31 @@
    mqttkat.handlers/new-message-key."
   "mqttkat-msg")
 
+(def view-v-property
+  "The user property carrying the version of its sender's view a copy was
+   planned at — see mqttkat.intent."
+  "mqttkat-v")
+
+(def not-property
+  "A user property naming, once each, a client the sender's view had on the
+   receiving broker but the sender delivered the copy to itself: it was
+   there after all, and the receiver neither delivers it nor queues it."
+  "mqttkat-not")
+
 (defn msg-key
   "The message key a bridged publish's `properties` carry, or nil."
   [properties]
   (some (fn [[k v]] (when (= msg-key-property k) v)) (:user-properties properties)))
+
+(defn view-v
+  "The view version a bridged publish's `properties` carry, or nil."
+  [properties]
+  (some (fn [[k v]] (when (= view-v-property k) (parse-long v))) (:user-properties properties)))
+
+(defn not-served
+  "The clients a bridged publish's `properties` say its sender served."
+  [properties]
+  (into #{} (keep (fn [[k v]] (when (= not-property k) v))) (:user-properties properties)))
 
 (defn groups-only?
   "Whether a bridged publish's `properties` say it is for its groups only."
@@ -133,10 +154,67 @@
   [properties]
   (let [ups    (:user-properties properties)
         shares (into #{} (keep (fn [[k v]] (when (= share-property k) (string->group-key v)))) ups)
-        rest   (remove (fn [[k _]] (contains? #{share-property groups-only-property msg-key-property} k)) ups)]
+        rest   (remove (fn [[k _]] (contains? #{share-property groups-only-property msg-key-property
+                                                   view-v-property not-property} k)) ups)]
     [shares (if (seq rest)
               (assoc properties :user-properties (vec rest))
               (dissoc properties :user-properties))]))
+
+;; ── the sender's view, down every link ───────────────────────────────────
+;;
+;; See mqttkat.intent. Whoever keeps this broker's copy of the cluster's
+;; subscriptions sends what changed in it to every link with
+;; `broadcast-view!` before the change is used to plan anything, under
+;; `view-lock`; and every new link starts with a snapshot of the whole,
+;; taken under the same lock, from `view-source`. So on each link a copy
+;; planned at a version comes after everything up to that version, and a
+;; link that drops and comes back starts again from a snapshot.
+
+(def control-prefix
+  "Where an instruction to the other broker goes: a publish on a topic
+   under this, over the bridge, is for the broker, not its subscribers."
+  "$mqttkat/")
+
+(def view-topic
+  "Where the changes to a broker's view go, and its snapshots."
+  (str control-prefix "view"))
+
+(defonce view-lock
+  ;; Held while the view changes and while a link is started, so that a
+  ;; new link's snapshot and the changes sent to existing ones are one
+  ;; sequence. Never by a publish.
+  (Object.))
+
+(defonce view-source
+  ;; (fn [] -> the payload of a snapshot of the view as it stands), or nil.
+  ;; Installed by mqttkat.rama.cluster; called with view-lock held.
+  (atom nil))
+
+(defn- view-item
+  "A queue item carrying a change to the view, or a snapshot of it. QoS 0,
+   in order with the copies on one TCP connection: if the link goes, so does
+   every copy behind it, and the next link starts from a snapshot."
+  [^bytes payload]
+  {:qos    0
+   :view?  true
+   :packet {:packet-type      :PUBLISH
+            :protocol-version 5
+            :topic            view-topic
+            :qos              0
+            :payload          payload
+            :retain?          false
+            :duplicate?       false
+            :properties       {}}})
+
+(declare connections)
+
+(defn broadcast-view!
+  "Send `payload`, a change to the view, down every running link. The
+   caller holds view-lock."
+  [^bytes payload]
+  (doseq [[_ {:keys [running ^LinkedBlockingQueue queue]}] @connections
+          :when (some-> ^AtomicBoolean running .get)]
+    (.put queue (view-item payload))))
 
 ;; ── connections to peers ─────────────────────────────────────────────────
 ;;
@@ -155,7 +233,7 @@
 ;; whose messages have piled up in a link's queue stops being read until
 ;; the queue has drained.
 
-(defonce ^:private connections
+(defonce connections
   ;; peer broker-id -> a link (see `start-link!`), or {:down-until millis}
   ;; after a failure to connect, so a peer that is not there is tried again
   ;; in a while rather than on every publish.
@@ -614,19 +692,32 @@
   "The link to `peer-id`, started if there is none. nil if the peer was
    unreachable recently."
   [my-id peer-id peer]
-  (let [existing (get @connections peer-id)]
-    (if (some-> ^AtomicBoolean (:running existing) .get)
+  (let [{:keys [down-until] :as existing} (get @connections peer-id)]
+    (cond
+      (some-> ^AtomicBoolean (:running existing) .get)
       existing
-      (locking connections
-        (let [{:keys [down-until running] :as existing} (get @connections peer-id)]
-          (cond
-            (some-> ^AtomicBoolean running .get) existing
-            (and down-until (< (System/currentTimeMillis) (long down-until))) nil
-            :else
-            (let [link (start-link! my-id peer-id peer)]
-              (swap! connections assoc peer-id link)
-              (.start ^Thread (:thread link))
-              link)))))))
+
+      ;; Not even the locks, for a peer that is down: every publish for it
+      ;; comes here.
+      (and down-until (< (System/currentTimeMillis) (long down-until)))
+      nil
+
+      :else
+      ;; The view first: a new link starts with a snapshot of it, and no
+      ;; change may be sent to the others in between.
+      (locking view-lock
+        (locking connections
+          (let [{:keys [down-until running] :as existing} (get @connections peer-id)]
+            (cond
+              (some-> ^AtomicBoolean running .get) existing
+              (and down-until (< (System/currentTimeMillis) (long down-until))) nil
+              :else
+              (let [link (start-link! my-id peer-id peer)]
+                (when-let [snapshot @view-source]
+                  (.put ^LinkedBlockingQueue (:queue link) (view-item (snapshot))))
+                (swap! connections assoc peer-id link)
+                (.start ^Thread (:thread link))
+                link))))))))
 
 (defn- enqueue!
   "Queue `packet` for `peer-id`, holding `publisher` if the queue has grown
@@ -686,13 +777,17 @@
    the peer is unreachable, or goes before acknowledging it.
    `:on-undelivered`, with a `:msg-key`, is called if the peer takes the
    message but goes before saying its subscribers have it (see `awaiting`).
+   `:view-v` is the version of this broker's view the copy was planned at,
+   and `:not-served` the clients that view has on the peer that this broker
+   delivered to itself (see mqttkat.intent).
 
    Retain is off on the way out: what is retained is recorded once, by the
    publisher's broker, and the other end must not store a copy under its own
    name. Version 5 on the wire whatever the publisher spoke, so the
    properties travel; the receiving broker strips them for its 3.1.1
    subscribers as it does for any publish."
-  [my-id peer-id peer group-keys topic {:keys [qos payload properties publisher on-lost on-undelivered groups-only? msg-key]}]
+  [my-id peer-id peer group-keys topic {:keys [qos payload properties publisher on-lost on-undelivered groups-only? msg-key
+                                               view-v not-served]}]
   (let [qos (long (or qos 0))]
     (enqueue! my-id peer-id peer qos
               {:packet-type      :PUBLISH
@@ -706,18 +801,18 @@
                                    groups-only? (update :user-properties (fnil conj [])
                                                         [groups-only-property "1"])
                                    msg-key      (update :user-properties (fnil conj [])
-                                                        [msg-key-property msg-key]))}
+                                                        [msg-key-property msg-key])
+                                   view-v       (update :user-properties (fnil conj [])
+                                                        [view-v-property (str view-v)])
+                                   (seq not-served) (update :user-properties (fnil into [])
+                                                            (map #(vector not-property %))
+                                                            (sort not-served)))}
               publisher
               ;; Only a message the peer acknowledges can be lost: at QoS 0
               ;; there is nothing to hand back.
               (when (pos? qos) on-lost)
               (when (and (pos? qos) msg-key on-undelivered)
                 {:msg-key msg-key :on-undelivered on-undelivered}))))
-
-(def control-prefix
-  "Where an instruction to the other broker goes: a publish on a topic
-   under this, over the bridge, is for the broker, not its subscribers."
-  "$mqttkat/")
 
 (defn takeover!
   "Tell `peer-id` that `client-id` has connected here, so the connection it
