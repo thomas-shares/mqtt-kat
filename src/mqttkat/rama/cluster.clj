@@ -44,6 +44,7 @@
             [mqttkat.bridge :as bridge]
             [mqttkat.events :as events]
             [mqttkat.handlers :as handlers]
+            [mqttkat.intent :as intent]
             [mqttkat.rama.module :as module]
             [mqttkat.retained :as retained]
             [mqttkat.trie :as trie])
@@ -148,6 +149,9 @@
                      here have had something queued since
      :trie           atom, the in-memory copy of every subscription in the
                      cluster; empty until watch!
+     :view           atom, the same trie with its version and the index of
+                     it the other brokers are sent (see mqttkat.intent):
+                     {:trie :v :index}, which a publish is planned from
      :brokers        atom, the in-memory copy of the registry:
                      broker-id -> {:host :port :at}; empty until watch!
      :settings       atom, the cluster's settings: name -> value
@@ -195,6 +199,7 @@
      :append-permits (Semaphore. (int appends-in-flight))
      :queue-writer  (queue-writer)
      :trie          (atom (trie/make-trie))
+     :view          (atom {:trie (trie/make-trie) :v 0 :index {}})
      :brokers       (atom {})
      :settings      (atom {})
      :stats         (atom {})
@@ -679,8 +684,15 @@
 
 ;; ── the copy of the cluster's subscriptions ──────────────────────────────
 
+(defn- view-payload
+  "A change to the view, or a snapshot of it, as the bridge carries it."
+  ^bytes [m]
+  (let [^String text (binding [*print-length* nil *print-level* nil] (pr-str m))]
+    (.getBytes text "UTF-8")))
+
 (defn- apply-shard-change!
-  "Bring `trie` from what shard `old` held to what `new` holds.
+  "Bring the copy of the cluster's subscriptions from what shard `old` held
+   to what `new` holds.
 
    Worked out from the two values rather than from the diff Rama sent with
    them: the diff says the same thing, but reading it means depending on
@@ -689,25 +701,51 @@
    same object before and after, and the walk below skips it on identity —
    the cost is the number of filters in the shard, not of entries, and the
    entries touched are exactly the changed ones. The first change and any
-   resync arrive with an old of nil, and this then inserts the lot."
-  [trie old new]
-  (swap! trie
-         (fn [t]
-           (reduce (fn [t f]
-                     (let [ov (get old f) nv (get new f)]
-                       (if (identical? ov nv)
-                         t
-                         (reduce (fn [t c]
-                                   (let [oe (get ov c) ne (get nv c)]
-                                     (if (= oe ne)
-                                       t
-                                       (cond-> t
+   resync arrive with an old of nil, and this then inserts the lot.
+
+   The view's version moves on with every change to a client's entries,
+   and what changed goes down every link to the other brokers before the
+   new version is planned from — see mqttkat.intent and
+   mqttkat.bridge/broadcast-view!. All of it under the bridge's view-lock,
+   which proxies take one at a time and a new link takes to snapshot."
+  [{:keys [trie view]} old new]
+  (locking bridge/view-lock
+    (let [{t :trie index :index v :v} @view
+          [t' index' touched]
+          (reduce (fn [acc f]
+                    (let [ov (get old f) nv (get new f)]
+                      (if (identical? ov nv)
+                        acc
+                        (reduce (fn [[t index touched :as acc] c]
+                                  (let [oe (get ov c) ne (get nv c)]
+                                    (if (= oe ne)
+                                      acc
+                                      [(cond-> t
                                          oe (trie/trie-delete (:topic-filter oe) oe)
-                                         ne (trie/trie-insert (:topic-filter ne) ne)))))
-                                 t
-                                 (into (set (keys ov)) (keys nv))))))
-                   t
-                   (into (set (keys old)) (keys new))))))
+                                         ne (trie/trie-insert (:topic-filter ne) ne))
+                                       (intent/index-change index oe ne)
+                                       (conj touched c)])))
+                                acc
+                                (into (set (keys ov)) (keys nv))))))
+                  [t index #{}]
+                  (into (set (keys old)) (keys new)))
+          changes (into {}
+                        (keep (fn [c]
+                                (let [now (get index' c)]
+                                  (when-not (= now (get index c)) [c now]))))
+                        touched)
+          v'      (if (seq changes) (inc (long v)) v)]
+      (when (seq changes)
+        (bridge/broadcast-view! (view-payload {:v v' :clients changes})))
+      (reset! view {:trie t' :index index' :v v'})
+      (reset! trie t'))))
+
+(defn- view-snapshot
+  "The whole view as it stands, for a new link to start from. Called with
+   the bridge's view-lock held."
+  [{:keys [view]}]
+  (let [{:keys [v index]} @view]
+    (view-payload {:v v :snapshot? true :clients index})))
 
 (defn- apply-retained-change!
   "Bring the broker's retained messages from what shard `old` held to what
@@ -885,7 +923,7 @@
                 (r/foreign-proxy (keypath shard) subscriptions
                                  {:callback-fn (guarded (str "subscriptions shard " shard)
                                                         (fn [new _diff old]
-                                                          (apply-shard-change! trie old new)))}))
+                                                          (apply-shard-change! conn old new)))}))
               ;; This broker's nudges: a client connected here had
               ;; something queued after it read its queue.
               (for [shard (range module/shard-count)]
@@ -962,10 +1000,16 @@
    subscribers is told nothing about the group, and serves none of it.
 
    With :away-only?, for a copy another broker sent here, only :queue and
-   :leaving: the copy goes no further, and its groups were chosen there."
+   :leaving: the copy goes no further, and its groups were chosen there.
+
+   A plan carries :v, the version of the view it was made from, which every
+   copy it sends carries too (see mqttkat.intent)."
   ([conn topic] (plan conn topic nil))
-  ([{:keys [trie]} topic {:keys [away-only?]}]
-   (let [matches (trie/sieve-dollar topic (trie/trie-matching-vals @trie topic))]
+  ([{:keys [view]} topic {:keys [away-only?]}]
+   ;; One read of the view: the version the copies carry is the one the
+   ;; plan was made from.
+   (let [{t :trie v :v} @view
+         matches (trie/sieve-dollar topic (trie/trie-matching-vals t topic))]
      (if away-only?
        ;; Only the clients this broker's copy has here, or last had here:
        ;; the sender's copy may not know yet that they left. Those it has
@@ -978,7 +1022,7 @@
              moved   (per-client (filter #(and (true? (:connected? %)) (not (here? %))) matches))]
          (when (or (seq queue) (seq leaving) (seq moved))
            {:queue queue :leaving leaving :moved moved}))
-       (plan-matches matches)))))
+       (some-> (plan-matches matches) (assoc :v v))))))
 
 (defn- plan-matches
   "plan's work for a publish from this broker's own clients, on the
@@ -1090,9 +1134,18 @@
                                                     :on-lost #(reroute! [gk] (conj tried b))))
 
                         :else (reroute! [gk] (conj tried b))))))))]
-      (doseq [[peer-id group-keys] (:brokers plan)]
-        (let [holders (get-in plan [:holders peer-id])
-              ;; What was for this broker's clients, queued for them if it does
+      (doseq [[peer-id group-keys] (:brokers plan)
+              :let [delivered (or (:delivered plan) #{})
+                    all       (get-in plan [:holders peer-id])
+                    ;; Clients the view has on that broker that are live here
+                    ;; after all, and had it from here: the copy says so, and
+                    ;; that broker neither delivers it to them nor queues it.
+                    ;; Nor does this broker, if the copy goes astray.
+                    served    (into #{} (comp (map :client-id) (filter delivered)) all)
+                    holders   (remove #(contains? served (:client-id %)) all)]
+              ;; Nobody left there to send it to.
+              :when (or (seq holders) (seq group-keys))]
+        (let [;; What was for this broker's clients, queued for them if it does
               ;; not get there — only for those whose sessions outlive their
               ;; connection, which the cluster checks against its own record: a
               ;; clean session on a broker that died died with it — and its
@@ -1109,7 +1162,8 @@
                                #(queue-for holders true))]
           (if-let [peer (get @brokers peer-id)]
             (bridge/send-to! broker-id peer-id peer group-keys topic
-                             (assoc msg :on-lost on-lost :on-undelivered on-undelivered))
+                             (assoc msg :on-lost on-lost :on-undelivered on-undelivered
+                                        :view-v (:v plan) :not-served served))
             (do (log/warn "no address for broker" peer-id "- queuing" topic "for its sessions")
                 (when on-lost (on-lost)))))))
     (when (pos? qos)
@@ -1117,9 +1171,11 @@
       ;; above: that client has it, and queuing too would deliver twice on
       ;; its next resume. A client leaving here is queued only if its
       ;; session is kept: a clean one's messages end with its connection.
+      ;; Both only if the session is kept: a client the view has away may
+      ;; since have come back with a clean one, and its queue is nobody's.
       (let [delivered (or (:delivered plan) #{})
             away      (fn [clients] (remove #(contains? delivered (:client-id %)) clients))]
-        (queue-for (away (:queue plan)) false)
+        (queue-for (away (:queue plan)) true)
         (queue-for (away (:leaving plan)) true)))))
 
 ;; ── the running broker's connection ──────────────────────────────────────
@@ -1422,6 +1478,7 @@
   (reset! bridge/planner (fn ([topic] (plan conn topic)) ([topic opts] (plan conn topic opts))))
   (reset! bridge/forwarder (fn [plan topic msg] (forward-publish! conn plan topic msg)))
   (reset! bridge/peer-alive? (fn [peer-id] (listed? conn peer-id)))
+  (reset! bridge/view-source (fn [] (view-snapshot conn)))
   (reset! retained/sink (fn [topic message] (record! conn (->retain topic message))))
   (reset! handlers/redirector (fn [client-id] (redirect-target client-id)))
   (reset! handlers/session-source
@@ -1447,6 +1504,7 @@
   (reset! bridge/planner nil)
   (reset! bridge/forwarder nil)
   (reset! bridge/peer-alive? nil)
+  (reset! bridge/view-source nil)
   (reset! retained/sink nil)
   (reset! handlers/redirector nil)
   (reset! handlers/session-source nil)

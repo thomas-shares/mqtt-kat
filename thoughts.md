@@ -2,6 +2,47 @@
 
 In this file will go my thoughts and ramblings about this project and what I have done and what I might do next.
 
+## 20261003
+
+### Whom a copy was meant for
+
+The publisher's broker plans a publish from its copy of the cluster's
+subscriptions, and that copy lags. A client that has just moved from B to
+C is still on B in it: the copy for it goes to B, which no longer has it,
+and if C gets a copy for its own subscribers the client is among them.
+Neither end could tell what the sender meant. B queued for clients that
+had left in the last minute, C delivered to whoever it had, and between
+the two the no-chaos load run lost some messages and sent others twice.
+
+Now the sender says. Its view of the subscriptions has a version, which
+moves on whenever a client's entries change, and every copy carries the
+version it was planned at. What changed goes down every bridge link,
+client by client, before the new version is planned from, and a new link
+starts with a snapshot of the whole. One TCP connection, read in order, so
+the receiver always has the sender's view as of the copy in front of it,
+and keeps the last few states of each client to judge copies that waited
+behind others. It then delivers to a kept session only if the sender had
+all its matching subscriptions here, or none at all, and queues under the
+message's key for every client the sender had here and that did not get
+it live. Each broker asks the same question of the same version, so one
+of them delivers or queues and the others leave it. A client the sender
+delivered to itself, though its view had it elsewhere, is named on the
+copy, and nobody else touches it. The rules are in `mqttkat.intent`,
+which is pure and tested on its own.
+
+Three smaller things came with it. The sender queues for the clients a
+lost or undelivered copy was for minus those it delivered to itself, which
+it did not before. It queues for clients its view has away only if their
+session is still kept. And a will is named like any other publish, so the
+brokers it reaches queue it the same way.
+
+A copy planned before its link's snapshot, a copy for groups only, and
+one from a broker running older code are judged as before. What is left
+for the next stage is the link itself: a link that drops takes the copies
+behind it with it, and a QoS 2 copy the peer had taken is handed back as
+if it had not. That wants the bridge to keep its MQTT session across
+reconnects.
+
 ## 20261002
 
 ### The queue tells the broker
