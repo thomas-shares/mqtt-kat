@@ -692,9 +692,17 @@
   "The link to `peer-id`, started if there is none. nil if the peer was
    unreachable recently."
   [my-id peer-id peer]
-  (let [existing (get @connections peer-id)]
-    (if (some-> ^AtomicBoolean (:running existing) .get)
+  (let [{:keys [down-until] :as existing} (get @connections peer-id)]
+    (cond
+      (some-> ^AtomicBoolean (:running existing) .get)
       existing
+
+      ;; Not even the locks, for a peer that is down: every publish for it
+      ;; comes here.
+      (and down-until (< (System/currentTimeMillis) (long down-until)))
+      nil
+
+      :else
       ;; The view first: a new link starts with a snapshot of it, and no
       ;; change may be sent to the others in between.
       (locking view-lock

@@ -684,6 +684,8 @@
 
 ;; ── the copy of the cluster's subscriptions ──────────────────────────────
 
+(declare ^:dynamic *connection*)
+
 (defn- view-payload
   "A change to the view, or a snapshot of it, as the bridge carries it."
   ^bytes [m]
@@ -708,7 +710,7 @@
    new version is planned from — see mqttkat.intent and
    mqttkat.bridge/broadcast-view!. All of it under the bridge's view-lock,
    which proxies take one at a time and a new link takes to snapshot."
-  [{:keys [trie view]} old new]
+  [{:keys [trie view] :as conn} old new]
   (locking bridge/view-lock
     (let [{t :trie index :index v :v} @view
           [t' index' touched]
@@ -735,7 +737,9 @@
                                   (when-not (= now (get index c)) [c now]))))
                         touched)
           v'      (if (seq changes) (inc (long v)) v)]
-      (when (seq changes)
+      ;; Only the running broker's: a test's second connection in the same
+      ;; JVM keeps a view of its own, and the links are the JVM's.
+      (when (and (seq changes) (identical? conn @*connection*))
         (bridge/broadcast-view! (view-payload {:v v' :clients changes})))
       (reset! view {:trie t' :index index' :v v'})
       (reset! trie t'))))

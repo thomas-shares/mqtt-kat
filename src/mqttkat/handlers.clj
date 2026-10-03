@@ -2977,24 +2977,24 @@
   "What judging bridged copy `msg` by its sender's view takes, or nil when
    it cannot be: no version on it, no view of its sender here yet, or a
    view that starts after the copy was planned."
-  [{:keys [client-key] v ::view-v :as msg}]
+  [{:keys [client-key qos] v ::view-v :as msg}]
   (when v
     (let [view (get @origin-views client-key)
           me   (:my-broker-id @session-source)]
       (when (and me (intent/covers? view v))
-        {:view view :me me :v v :not-served (or (::not msg) #{})}))))
+        {:view view :me me :v v :qos (long (or qos 0)) :not-served (or (::not msg) #{})}))))
 
 (defn- withhold-fn
   "For a judged copy on `topic`: whether to leave a subscriber out. Only a
-   client whose session is kept, whose sender meant it to have the copy
-   elsewhere, or served it itself. A clean session here is a new session,
-   whatever the sender had for an older one; a kept one that the sender
-   meant elsewhere is that broker's to deliver or queue for."
-  [topic {:keys [view me v not-served]}]
+   client whose session is kept, and that its sender served itself or
+   meant to have the copy kept for it elsewhere (intent/withhold?). A clean
+   session here is a new session, whatever the sender had for an older one;
+   a kept one that the sender meant elsewhere is that broker's to queue for."
+  [topic {:keys [view me v qos not-served]}]
   (fn [{:keys [client-key]}]
     (let [client (get @*clients* client-key)]
       (and (keep-session? client)
-           (not (intent/serve? view me (:client-id client) topic v not-served))))))
+           (intent/withhold? view me (:client-id client) topic v qos not-served)))))
 
 (defn- judged-plan
   "For a judged copy on `topic`: whom this broker queues it for, as
@@ -3002,8 +3002,10 @@
    clients whose sessions are kept and whom it serves, should the delivery
    be refused; and every client the sender had here, connected or not,
    unless it is live here with no such subscription — it unsubscribed, and
-   the sender had not heard."
-  [topic {:keys [view me v not-served]}]
+   the sender had not heard. And, as before there were views, those this
+   broker's own copy has here or just gone, if the view's history of them
+   does not reach back to the copy."
+  [topic {:keys [view me v qos not-served]}]
   (let [clients @*clients*
         local   (reduce (fn [m {:keys [client-key qos share-group]}]
                           (let [c (get clients client-key)]
@@ -3013,15 +3015,23 @@
                         {}
                         (matching-subscribers topic))
         served  (keep (fn [[c q]]
-                        (when (intent/serve? view me c topic v not-served)
+                        (when-not (intent/withhold? view me c topic v qos not-served)
                           {:client-id c :qos q}))
                       local)
         owed    (remove (fn [{:keys [client-id]}]
                           (and (live-connection client-id) (not (contains? local client-id))))
                         (intent/owed view me topic v not-served))
+        ;; A client whose history the view no longer reaches back to is
+        ;; judged as copies were before there was a view: see route.
+        unknown (when-let [p (bridge/plan topic {:away-only? true})]
+                  (let [unknown? #(= ::intent/unknown (intent/state-at view (:client-id %) v))
+                        gone?    (comp recently-gone? :client-id)]
+                    (concat (filter #(and (unknown? %) (gone? %)) (:queue p))
+                            (filter unknown? (:leaving p))
+                            (filter #(and (unknown? %) (gone? %)) (:moved p)))))
         leaving (reduce (fn [m {:keys [client-id qos]}] (update m client-id (fnil max 0) (long qos)))
                         {}
-                        (concat served owed))]
+                        (concat served owed unknown))]
     (when (seq leaving)
       {:leaving (mapv (fn [[c q]] {:client-id c :qos q}) leaving)})))
 

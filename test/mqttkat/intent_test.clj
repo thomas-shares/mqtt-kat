@@ -69,19 +69,26 @@
       (is (= {} (intent/state-at v "here" 12)) "gone from the view: nothing")
       (is (= {} (intent/state-at v "stranger" 11)) "never in it: nothing"))
 
-    (testing "served here: had here, had nowhere, or matching nothing it had"
-      (is (intent/serve? v "b" "here" "t/1" 10 #{}))
-      (is (intent/serve? v "b" "here" "t/1" 12 #{}) "the sender no longer has it: nobody is serving it")
-      (is (intent/serve? v "b" "stranger" "t/1" 10 #{}))
-      (is (intent/serve? v "b" "there" "u/1" 10 #{}) "nothing it had matches"))
+    (testing "delivered here: had here, had nowhere, or matching nothing it had"
+      (is (not (intent/withhold? v "b" "here" "t/1" 10 1 #{})))
+      (is (not (intent/withhold? v "b" "here" "t/1" 12 1 #{})) "the sender no longer has it: nobody is serving it")
+      (is (not (intent/withhold? v "b" "stranger" "t/1" 10 1 #{})))
+      (is (not (intent/withhold? v "b" "there" "u/1" 10 1 #{})) "nothing it had matches"))
 
     (testing "withheld: had elsewhere, or away, or partly elsewhere, or served by the sender"
-      (is (not (intent/serve? v "b" "there" "t/1" 10 #{})) "on c when this was planned")
-      (is (intent/serve? v "b" "there" "t/1" 11 #{}) "on b by the next version")
-      (is (not (intent/serve? v "b" "away" "t/1" 10 #{})) "the sender queued it")
-      (is (not (intent/serve? v "b" "mixed" "t/x" 10 #{})))
-      (is (intent/serve? v "b" "mixed" "t/y" 10 #{}) "only the filter here matches")
-      (is (not (intent/serve? v "b" "here" "t/1" 10 #{"here"}))))
+      (is (intent/withhold? v "b" "there" "t/1" 10 1 #{}) "on c when this was planned")
+      (is (not (intent/withhold? v "b" "there" "t/1" 11 1 #{})) "on b by the next version")
+      (is (intent/withhold? v "b" "away" "t/1" 10 1 #{}) "the sender queued it")
+      (is (intent/withhold? v "b" "mixed" "t/x" 10 1 #{}))
+      (is (not (intent/withhold? v "b" "mixed" "t/y" 10 1 #{})) "only the filter here matches")
+      (is (intent/withhold? v "b" "here" "t/1" 10 1 #{"here"})))
+
+    (testing "but not where nobody else keeps it: QoS 0, or a QoS 0 subscription there"
+      (is (not (intent/withhold? v "b" "there" "t/1" 10 0 #{})))
+      (is (not (intent/withhold? v "b" "away" "t/1" 10 0 #{})))
+      (is (intent/withhold? v "b" "here" "t/1" 10 0 #{"here"}) "though one the sender served itself, still")
+      (let [w (intent/view-apply v "b" {:v 13 :clients {"there" {"t/#" [0 "c"]}}})]
+        (is (not (intent/withhold? w "b" "there" "t/1" 13 2 #{})))))
 
     (testing "owed: every client with a matching filter here, at its highest QoS here"
       (is (= #{{:client-id "here" :qos 1} {:client-id "mixed" :qos 1}}
@@ -115,9 +122,15 @@
                      {:v i :clients {"s" {"a" [1 (if (odd? i) "c" "b")]}}}))]
       (is (= (long intent/history) (count (get-in v [:clients "s" :states]))))
       (is (= ::intent/unknown (intent/state-at v "s" 1)))
-      (is (intent/serve? v "b" "s" "a" 1 #{}) "unknown: delivered, as before")
+      (is (not (intent/withhold? v "b" "s" "a" 1 1 #{})) "unknown: delivered, as before")
       (is (empty? (intent/owed v "b" "a" 1 #{})) "and not queued")
       (is (= {"a" [1 (if (odd? (dec n)) "c" "b")]} (intent/state-at v "s" (dec n))))))
+  (testing "a client with no subscriptions left is forgotten, in time"
+    (let [v (view 0 {"s" {"a" [1 "b"]}} {:v 1 :clients {"s" nil}})
+          w (intent/view-apply v "b" {:v (+ 2 (long intent/forget-after)) :clients {"t" {"x" [0 "b"]}}})]
+      (is (contains? (:clients v) "s"))
+      (is (not (contains? (:clients w) "s")))
+      (is (empty? (trie/trie-matching-vals (:here w) "a")))))
   (testing "the filters here follow every state kept, and only those"
     (let [v (view 0 {"s" {"a" [1 "b"]}}
                   {:v 1 :clients {"s" {"a" [1 "c"]}}})]

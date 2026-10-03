@@ -19,10 +19,11 @@
    asks of each subscriber what the sender's view had for it at that
    version:
 
-     serve? — deliver to it here: nothing the sender knew of matches, or
-              everything that matches was here.
-     owed   — the clients whose matching subscriptions the sender had
-              here. Each is this broker's to deliver to, or to queue for.
+     withhold? — leave it out here: the sender had a subscription of it
+                 that matches somewhere else, or away, where the message
+                 is kept for it; or served it itself.
+     owed      — the clients whose matching subscriptions the sender had
+                 here. Each is this broker's to deliver to, or to queue for.
 
    Exactly one broker owes a client a given copy, because every broker
    asks the same question of the same version.
@@ -39,8 +40,17 @@
 
 (def history
   "How many states of one client a receiver keeps. A copy planned at a
-   version older than the oldest of them is not judged: see state-at."
-  32)
+   version older than the oldest of them is not judged for that client:
+   see state-at. The sender's version moves once per shard of the
+   subscriptions a change touches, so one client with many filters moving
+   once is many states."
+  128)
+
+(def forget-after
+  "How many versions after a client's last subscription went a receiver
+   forgets it. A copy planned before that and judged after is very old,
+   and finds nothing of the client: delivered if it is here, as before."
+  65536)
 
 ;; ── the sender's view ────────────────────────────────────────────────────
 
@@ -126,12 +136,29 @@
   (let [{:keys [from states]} (get-in view [:clients client-id])
         grown  (conj (or states []) [v (not-empty entries)])
         [states' from'] (if (> (count grown) (long history))
-                          (let [kept (subvec grown (- (count grown) (long history)))]
+                          ;; Copied: a subvec holds on to all of what it was cut from.
+                          (let [kept (into [] (subvec grown (- (count grown) (long history))))]
                             [kept (ffirst kept)])
                           [grown (or from (:base view))])]
     (-> view
         (assoc-in [:clients client-id] {:from from' :states states'})
         (update :here reindex me client-id states states'))))
+
+(defn- forget-gone
+  "`view` without the clients that have had no subscription for
+   forget-after versions: otherwise it holds every client the sender ever
+   had for as long as the link lasts."
+  [view me]
+  (let [cutoff (- (long (:v view)) (long forget-after))]
+    (reduce-kv (fn [view c {:keys [states]}]
+                 (let [[sv entries] (peek states)]
+                   (if (and (nil? entries) (< (long sv) cutoff))
+                     (-> view
+                         (update :clients dissoc c)
+                         (update :here reindex me c states []))
+                     view)))
+               view
+               (:clients view))))
 
 (defn view-apply
   "The receiver's copy `view` of a sender's view, as seen from broker `me`,
@@ -150,9 +177,11 @@
       view
 
       :else
-      (reduce-kv (fn [view c entries] (record view me v c entries))
-                 (assoc view :v v)
-                 clients))))
+      (cond-> (reduce-kv (fn [view c entries] (record view me v c entries))
+                         (assoc view :v v)
+                         clients)
+        ;; Now and then, not on every change: a walk of every client.
+        (not= (quot v 1024) (quot (long (:v view)) 1024)) (forget-gone me)))))
 
 (defn covers?
   "Whether `view` can judge a copy planned at version `v`."
@@ -175,18 +204,24 @@
               {}))
         {}))))
 
-(defn serve?
-  "Whether broker `me` delivers a copy on `topic`, planned at `v`, to its
-   subscriber `client-id` — its sender did not say it served the client
-   itself (`not`), and either knew of nothing of the client's that
-   matches, or had everything that matches here. Unknown, it delivers, as
-   it did before any of this."
-  [view me client-id topic v not-served]
-  (and (not (contains? not-served client-id))
-       (let [st (state-at view client-id v)]
-         (or (= ::unknown st)
-             (every? (fn [[f [_ at]]] (or (= me at) (not (filter-matches? f topic))))
-                     st)))))
+(defn withhold?
+  "Whether broker `me` leaves its subscriber `client-id` out of a copy at
+   `qos` on `topic`, planned at `v`: its sender delivered it to the client
+   itself (`not-served`), or had a matching subscription of the client's
+   somewhere else, or away, that keeps a message at this QoS — so the
+   broker it is on queues it, or the sender did. A copy nobody else keeps
+   — QoS 0, or a QoS 0 subscription — is delivered here, as is one the
+   sender knew nothing of the client for, or one too old to judge."
+  [view me client-id topic v qos not-served]
+  (or (contains? not-served client-id)
+      (let [st (state-at view client-id v)]
+        (and (map? st)
+             (boolean
+              (some (fn [[f [q at]]]
+                      (and (not= me at)
+                           (pos? (min (long qos) (long q)))
+                           (filter-matches? f topic)))
+                    st))))))
 
 (defn owed
   "The clients a copy on `topic`, planned at `v`, is broker `me`'s to
