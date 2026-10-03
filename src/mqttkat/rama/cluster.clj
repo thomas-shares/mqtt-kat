@@ -144,6 +144,8 @@
      :brokers-state  PState client, the registry
      :retained-state PState client, shard -> topic -> retained message
      :queued-state   PState client, client-id -> key -> queued message
+     :nudges-state   PState client, `$$nudges`: which clients connected
+                     here have had something queued since
      :trie           atom, the in-memory copy of every subscription in the
                      cluster; empty until watch!
      :brokers        atom, the in-memory copy of the registry:
@@ -186,6 +188,7 @@
      :settings-state (r/foreign-pstate cluster module-name "$$settings")
      :retained-state (r/foreign-pstate cluster module-name "$$retained")
      :queued-state  (r/foreign-pstate cluster module-name "$$queued")
+     :nudges-state  (r/foreign-pstate cluster module-name "$$nudges")
      :stats-state   (r/foreign-pstate cluster module-name "$$rama-stats")
      :detail-state  (r/foreign-pstate cluster module-name "$$broker-detail")
      :history-state (r/foreign-pstate cluster module-name "$$broker-history")
@@ -639,13 +642,22 @@
   [{:keys [sessions]} client-id]
   (or (r/foreign-select-one (keypath client-id :subscriptions) sessions) {}))
 
+(defn- entries
+  "Only [key message] pairs. The load run's brokers resumed sessions with
+   an entry that was neither — nil, by the message the broker built from it:
+   no key, no topic, no QoS — which went on the client's queue and threw in
+   the flush after the CONNACK. Not reproduced against the in-process
+   cluster, so it is left out here rather than explained."
+  [selected]
+  (filterv (fn [e] (when e (let [[k m] e] (and (some? k) (map? m))))) selected))
+
 (defn queued
   "What is waiting for `client-id`, oldest first: a seq of [key message].
    The first `limit` of it, when given."
   ([{:keys [queued-state]} client-id]
-   (r/foreign-select [(keypath client-id) ALL] queued-state))
+   (entries (r/foreign-select [(keypath client-id) ALL] queued-state)))
   ([{:keys [queued-state]} client-id limit]
-   (r/foreign-select [(keypath client-id) (sorted-map-range-from-start limit) ALL] queued-state)))
+   (entries (r/foreign-select [(keypath client-id) (sorted-map-range-from-start limit) ALL] queued-state))))
 
 (defn resume
   "What a broker needs on `client-id`'s CONNECT: {:session the record,
@@ -658,9 +670,11 @@
     (if (false? (:clean-session? s))
       {:session       s
        :subscriptions (or (:subscriptions s) {})
-       ;; As much as the broker's own queue holds: the rest is read once
-       ;; the client has worked through that (handlers/catch-up!).
-       :queued        (vec (queued conn client-id handlers/pending-limit))}
+       ;; Half what the broker's own queue holds: the rest is read once
+       ;; the client has worked through that (handlers/catch-up!). Not all
+       ;; of it: a session that came back to a full queue had its live
+       ;; deliveries refused until the client worked through it.
+       :queued        (vec (queued conn client-id (quot handlers/pending-limit 2)))}
       {:session s :subscriptions {} :queued []})))
 
 ;; ── the copy of the cluster's subscriptions ──────────────────────────────
@@ -734,6 +748,11 @@
    gone — leaves its queue alone, for whichever resume comes next."
   [conn clients]
   (let [back  (filterv #(taken-back? conn %) clients)
+        ;; A persistent session is read as a nudge reads it, one read at a
+        ;; time: two readers at once each sent what the other had.
+        back  (filterv (fn [{:keys [client-id connect-id]}]
+                         (not (handlers/read-queue! client-id connect-id 0 restated-settle-millis)))
+                       back)
         drain (fn [taken]
                 (into {}
                       (for [{:keys [client-id connect-id]} back]
@@ -824,13 +843,22 @@
       (catch Throwable t
         (log/error t "applying a change to" what "failed")))))
 
+(defn- nudged!
+  "The clients whose entries in this broker's `$$nudges` changed from `old`
+   to `new`: each has something new on its queue. A first callback, or a
+   resync, has an `old` of nil, and then every client in it is read."
+  [old new]
+  (doseq [[client-id k] new
+          :when (not= k (get old client-id))]
+    (handlers/nudged! client-id)))
+
 (defn watch!
   "Open a proxy on every shard of `$$subscriptions` and keep `:trie` fed
    from them, and one on the registry for `:brokers`. The first callback of
    each carries the value as it stands, so this is also how both are built
    on start: no scan, no separate load, the same code path as any later
    change. Idempotent."
-  [{:keys [subscriptions brokers-state retained-state settings-state stats-state
+  [{:keys [subscriptions brokers-state retained-state settings-state stats-state nudges-state
            trie brokers settings stats proxies] :as conn}]
   (when (empty? @proxies)
     (reset! proxies
@@ -858,6 +886,14 @@
                                  {:callback-fn (guarded (str "subscriptions shard " shard)
                                                         (fn [new _diff old]
                                                           (apply-shard-change! trie old new)))}))
+              ;; This broker's nudges: a client connected here had
+              ;; something queued after it read its queue.
+              (for [shard (range module/shard-count)]
+                (r/foreign-proxy (keypath (module/nudge-shard-key broker-id shard)) nudges-state
+                                 {:callback-fn (guarded (str "nudges shard " shard)
+                                                        (fn [new _diff old]
+                                                          (when (identical? conn @*connection*)
+                                                            (nudged! old new))))}))
               (for [shard (range module/shard-count)]
                 (r/foreign-proxy (keypath shard) retained-state
                                  {:callback-fn (guarded (str "retained shard " shard)
@@ -1316,7 +1352,15 @@
       ;; another broker's copy be consulted about it — until the cluster has
       ;; it connected.
       :client-connected    (awaited (record! c (->connect connect)))
-      :client-disconnected (record! c (->disconnect broker-event))
+      ;; Once what the broker handed over for the session is on its queue:
+      ;; a broker resuming it waits for the record to say it has gone from
+      ;; here, then reads the queue (handlers/adopt-session!). Recorded at
+      ;; once, the hand-over's writes could land after that read, and their
+      ;; messages went out again under new identifiers, QoS 2 twice.
+      :client-disconnected (let [record #(record! c (->disconnect broker-event) {:wait? false})]
+                             (if-let [^CompletableFuture handed (handlers/handed-over (:client-id broker-event))]
+                               (.whenComplete handed (reify BiConsumer (accept [_ _ _] (record))))
+                               (record! c (->disconnect broker-event))))
       ;; Waited for, these two: the handler emits them before it sends the
       ;; SUBACK or UNSUBACK, so waiting here is what makes the acknowledgement
       ;; mean the cluster has the change — with :ack, the topology has
@@ -1354,19 +1398,17 @@
                                f))
       nil)))
 
-(def reporting-within-millis
-  "How recently a broker must have reported for another to take it as up
-   while its bridge is not acknowledging: a report every five seconds, and
-   under load each can be late."
-  30000)
-
-(defn reporting?
-  "Whether broker `peer-id` is in the registry and has reported within
-   reporting-within-millis."
+(defn listed?
+  "Whether broker `peer-id` is in the registry: what a bridge that is
+   connected to it and waiting on its acknowledgements asks before giving
+   up on it. Not whether it reported lately: under load the reports reach
+   the others late, all of them at once, and every link in a load run gave
+   up on a connected peer in the same second, handing back some ninety
+   thousand messages that clean sessions could not be queued. A broker that
+   has really stopped is closed by its socket, or dropped from the registry
+   (see drop!), and either ends the link."
   [{:keys [brokers]} peer-id]
-  (when-let [{:keys [at stats-at]} (get @brokers peer-id)]
-    (< (- (System/currentTimeMillis) (long (max (long (or at 0)) (long (or stats-at 0)))))
-       (long reporting-within-millis))))
+  (contains? @brokers peer-id))
 
 (defn attach!
   "Make `conn` the broker's connection: record its session events, watch
@@ -1379,7 +1421,7 @@
   (events/listen! ::rama on-broker-event)
   (reset! bridge/planner (fn ([topic] (plan conn topic)) ([topic opts] (plan conn topic opts))))
   (reset! bridge/forwarder (fn [plan topic msg] (forward-publish! conn plan topic msg)))
-  (reset! bridge/peer-alive? (fn [peer-id] (reporting? conn peer-id)))
+  (reset! bridge/peer-alive? (fn [peer-id] (listed? conn peer-id)))
   (reset! retained/sink (fn [topic message] (record! conn (->retain topic message))))
   (reset! handlers/redirector (fn [client-id] (redirect-target client-id)))
   (reset! handlers/session-source

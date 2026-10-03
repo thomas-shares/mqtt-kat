@@ -415,7 +415,8 @@
                         :publishing  (AtomicBoolean. true)
                         :tally       (atom {})
                         :actions     (atom (sorted-map))
-                        :control-log (str (io/file dir (str run-id "-control.log")))})
+                        :control-log (str (io/file dir (str run-id "-control.log")))
+                        :drain       (atom nil)})
         chk     (:check cfg)]
     (println "chaos run" run-id "seed" seed)
     (when-let [down (seq (remove listening? bs))]
@@ -471,7 +472,13 @@
         (wait-until #(every? c/connected? (:clients state)) 30000))
       (println "draining")
       (let [how (drain! state)]
-        (println " " (pr-str (assoc (progress state) :drain how))))
+        (println " " (pr-str (assoc (progress state) :drain how)))
+        (when (= :gave-up how)
+          ;; What was still on its way counts as lost below, and a broker
+          ;; this far behind may yet have delivered it.
+          (println "  the drain gave up with messages still arriving: a loss below may only be late"
+                   "- give :check :max-drain-ms more, or the brokers less load"))
+        (reset! (:drain state) how))
       (.set ^AtomicBoolean (:running state) false)
       (.join ^Thread dog))
     (let [snap   (ledger/snapshot lg)
@@ -492,16 +499,18 @@
                       :clients  counters
                       :sessions (:clients snap)
                       :chaos    @(:actions state)
+                      :drain    @(:drain state)
                       :result   (summarise result (:max-violations chk))
                       :events   (:events snap)})))
-      (assoc result :report path :run-id run-id :clients counters))))
+      (assoc result :report path :run-id run-id :clients counters :drain @(:drain state)))))
 
 (defn -main [& paths]
   (when (empty? paths)
     (println "usage: clojure -m mqttkat.chaos.runner config.edn [more.edn ...]")
     (System/exit 2))
   (let [result (run-scenario! (config paths))]
-    (pp/pprint (select-keys result [:ok? :stats :counts :lost-by :lost-by-client :clients :report]))
+    (pp/pprint (select-keys result [:ok? :drain :stats :counts :lost-by :lost-route :lost-by-session
+                                    :lost-by-client :duplicate-by :clients :report]))
     (doseq [v (take 10 (:violations result))]
       (println " " (pr-str (dissoc v :context))))
     (shutdown-agents)

@@ -4,6 +4,131 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261002
 
+### The queue tells the broker
+
+What another broker puts on a session's queue after the client has
+resumed somewhere was read only if a catch-up read came after it, and
+those stop a minute after the CONNECT. Under load the writes come later
+than that: the copy that makes a broker queue for a client it has just
+lost can sit a minute or more behind the bridge, and Rama behind it adds
+seconds more. Those messages waited on the queue for the client's next
+resume, and in a load run that is never.
+
+So the module says so. An enqueue for a client the cluster has connected
+writes the last key to `$$nudges`, under the broker it is connected on and
+a shard of the client, and each broker watches its own sixty-four shards
+with proxies. A change is a read of that client's queue. The CONNECT
+record nudges too when the queue is not empty, since the broker read it a
+moment before saying it had the client, and the end of the connection
+takes the entry away. Every way a message reaches the queue is covered,
+because the nudge is made where they all land.
+
+Reading for the whole connection rather than its first minute meant the
+"had" set had to stop growing. A key now stays in it until its take-off
+from the queue has landed, and goes when the next read begins: reads are
+one at a time per client, and a read that begins after the take-off
+landed cannot find it. One that was under way could, which is why a key
+cannot simply go when it lands. The suite found the other half of that:
+a restatement read the queue on its own while a nudge read it too, and
+each sent what the other had just put on the client's queue. Now a
+restatement reads through the same one-at-a-time reader, and
+deliver-queued! takes one caller at a time per client besides.
+
+### A session that moves, and what it was in the middle of
+
+The no-chaos load run moves every persistent subscriber to another broker
+at the end, gracefully, and the duplicates it found were nearly all on
+those sessions after that move. The old broker hands what the client had
+not acknowledged over to the cluster's queue, each with the identifier it
+was in flight under, and records the disconnect. Both were writes to Rama
+that nobody waited on, so under load the disconnect could land first; the
+new broker read the queue without the hand-over, gave the client fresh
+identifiers starting at 1, and a catch-up read found the handed-over
+entries seconds later. They then went on the ordinary queue under new
+identifiers: a QoS 2 message the client had already taken arrived as a
+new one, and a PUBREL went in flight and was never sent, so the client
+kept holding that identifier and dropped the next message sent under it
+as a repeat.
+
+Now the disconnect is recorded once the hand-over's writes have landed,
+and a CONNECT that finds the session still connected on a live peer waits
+for that record, ten seconds at most, before it reads the queue. Read
+then, the hand-over is restored under its identifiers before anything
+else is sent, so live deliveries take others. One a catch-up read still
+finds late goes out at once under its own identifier, as a DUP PUBLISH or
+a PUBREL, and stays on the queue while that identifier is in use here.
+That last case is not fixed, only narrowed: after a takeover the word to
+the old broker waits behind the bridge, so the wait can run out, and an
+identifier the new broker has used meanwhile cannot be given back. The
+old broker would have to record which identifiers it held.
+
+Three smaller things from the same reading. A resume restores half of
+pending-limit, not all of it, so a session coming back to a long queue
+still has room for live messages; a delivery refused by a full queue no
+longer counts as live, so the cluster queues it for a kept session
+instead of nobody having it; and a catch-up read checks what the client
+has had after the read, not before it, since the read can take seconds.
+
+The larger loss, copies that reach the old broker more than a minute
+after the session left, is the design question still open: the receiving
+broker guesses from its own view whom a copy was for, and only the sender
+knew.
+
+### NOT_ALIVE, or never there
+
+With the cluster emptied for a clean load run, `bb scripts/rama.bb update`
+tried to update the module and Rama said "Module not alive". It was not
+dead, it was not there: `moduleStatus` answers NOT_ALIVE for a module the
+cluster has never heard of, and the script took that for one deployed,
+which gets an update. What tells them apart is the depot the module
+appends to: `"appendTargetId":null` until its first launch, set from
+then on. Read that way, an empty cluster gets a launch. There is a
+`reset` too now, for a clean slate before a load run: stop, delete
+local-rama-data and local-zk together, start, launch.
+
+### Listed, not reporting
+
+The next no-chaos run on the branch: at 15:10:20 every bridge in the
+cluster gave up on its peer within seven seconds of the others, "nothing
+acknowledged" after 5 to 20 s, and handed back about 22,000 messages each,
+some ninety thousand in all, then gave up on another 28,000 the peers had
+taken and not yet confirmed. A handed-back message is queued only for
+sessions that outlive their connection, so for every clean subscriber on
+the other end it was gone, and one bridged message is a delivery for each
+subscriber there.
+
+The wait from the morning's change asked whether the peer had reported to
+the cluster in the last 30 s. Under that load the reports reach the others
+late, and late for all of them at the same moment, so the safeguard turned
+off exactly when it was needed. A connected peer is now waited on for as
+long as the registry lists it. A broker that has really gone either closes
+its socket, which ends the link at once, or is dropped from the registry,
+whose drop! ends it; a broker that is only slow keeps its link and holds
+the publishers feeding it, which is the back-pressure QoS 1 asks for.
+
+The cost is a broker that hangs with its sockets open: the others hold
+their publishers for it until the registry forgets it, which is
+broker-forgotten-after-millis, ten minutes. Slower, but nothing is lost.
+
+### One message with no QoS, and a whole queue behind it
+
+The broker logs from the no-chaos load run had 334 CONNECTs fail at
+11:19, all persistent subscribers on their final reconnect, every one with
+a NullPointerException out of MqttPublish.encode: a message on the
+session's queue had no :qos. The flush after the CONNACK threw on it, so
+nothing behind it on that queue was ever sent, and since the message stayed
+at the head of the window, the next flush or resume threw again. The same
+throw inside a forwarded publish's fan-out left the subscribers after it
+without the message and the forwarding broker without its PUBACK.
+
+send-publish! no longer throws on such a message. One with no QoS goes out
+at QoS 1: only QoS 1 and 2 are ever held, so at least once is the floor
+the subscriber was owed. One with no topic cannot be sent and is dropped,
+which also takes it off the cluster's queue. Either is logged with its
+keys, once every five seconds, because where it comes from is not found
+yet: every path I can read that queues a message gives it a QoS. The next
+run's log line should say which.
+
 ### A slow broker is not a dead one
 
 Thomas's bridge logs from the 10,000-a-second run: eight links dropped with

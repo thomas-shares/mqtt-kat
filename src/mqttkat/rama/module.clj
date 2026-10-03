@@ -48,6 +48,14 @@
    one event — Rama gives an event five seconds, and one that overruns is
    retried until it does not, which it never would.
 
+   `$$nudges` — for each broker, the clients connected there that have had
+   something put on their queue, and the key of the last of it: the broker
+   watches its own with proxies and reads the client's queue on each change
+   (handlers/nudged!). A queue write that lands after the client resumed
+   elsewhere is otherwise read only if a catch-up read happens to come
+   after it. Keyed by nudge-key, the broker and a shard of the client, so
+   one proxy per shard watches a small map.
+
    `$$settings` — what the operator has set for the whole cluster, under
    one key so one proxy watches it: for now the connection redirect policy.
 
@@ -319,6 +327,15 @@
   [broker-id incarnation]
   [broker-id (or incarnation "")])
 
+(defn nudge-shard-key [broker-id shard]
+  (str broker-id "|" shard))
+
+(defn nudge-key
+  "How `$$nudges` is keyed: the broker the client is connected on, and the
+   client's shard, so that a broker watches shard-count small maps."
+  [broker-id client-id]
+  (nudge-shard-key broker-id (shard-of client-id)))
+
 (def queue-limit
   "How many messages are kept for one session that is away before more are
    refused, and counted as \"queue-refused\": something has to happen to a
@@ -444,6 +461,9 @@
     ;; message — its time and a random suffix — so they come back in the
     ;; order they were queued, and the same message queued twice is once.
     (declare-pstate s $$queued {String (map-schema String Object {:subindex? true})})
+    ;; nudge-key -> client-id -> the last key queued for it while it was
+    ;; connected there. Not subindexed: a proxy watches each one whole.
+    (declare-pstate s $$nudges {String (map-schema String String)})
     ;; One entry per task, keyed by the task itself: the index for the
     ;; sessions on this task lives on this task, next to them, and the sweep
     ;; runs everywhere at once without a hop. Inside, a sorted map of due
@@ -666,16 +686,24 @@
         (case> :enqueue)
         (local-select> [(keypath *client-id)] $$sessions :> *session)
         (<<if (enqueue-allowed? *record *session)
-          ;; One at a time, in order, each counted against the limit as the
-          ;; one before it left the queue.
-          (ops/explode (enqueued *record) :> [*key *message])
-          (local-select> [(keypath *client-id) (view count)] $$queued :> *n)
-          (local-select> [(keypath *client-id *key)] $$queued :> *had)
-          (<<if (or> *had (< *n queue-limit))
-            (local-transform> [(keypath *client-id *key) (termval *message)] $$queued)
-            (count> (presence-delta "queued" *had true))
-            (else>)
-            (count> {"queue-refused" 1})))
+          (<<atomic
+            ;; One at a time, in order, each counted against the limit as
+            ;; the one before it left the queue.
+            (ops/explode (enqueued *record) :> [*key *message])
+            (local-select> [(keypath *client-id) (view count)] $$queued :> *n)
+            (local-select> [(keypath *client-id *key)] $$queued :> *had)
+            (<<if (or> *had (< *n queue-limit))
+              (local-transform> [(keypath *client-id *key) (termval *message)] $$queued)
+              (count> (presence-delta "queued" *had true))
+              (else>)
+              (count> {"queue-refused" 1})))
+          ;; Then, once, the broker it is connected on is told: it has
+          ;; read its queue already, on the CONNECT, and this came after.
+          (<<if (and> (get *session :connected?) (get *session :broker-id))
+            (nudge-key (get *session :broker-id) *client-id :> *nudge)
+            (first (last (enqueued *record)) :> *last-key)
+            (|hash *nudge)
+            (local-transform> [(keypath *nudge *client-id) (termval *last-key)] $$nudges)))
 
         (case> :dequeue)
         (ops/explode (get *record :keys) :> *key)
@@ -739,6 +767,14 @@
                                 $$expiring))
             (local-select> [(keypath *client-id)] $$sessions :> *after)
             (count> (session-deltas *current *after))
+            ;; What was queued before this record and after the broker read
+            ;; the queue on the CONNECT: it read before saying so.
+            (local-select> [(keypath *client-id) (view count)] $$queued :> *waiting)
+            (<<if (pos? *waiting)
+              (nudge-key *b *client-id :> *nudge)
+              (|hash *nudge)
+              (local-transform> [(keypath *nudge *client-id) (termval (str "connect " *connect-id))]
+                                $$nudges))
             (run-key *b (get *record :incarnation) :> *run)
             (|hash *run)
             (local-transform> [(keypath *run) NONE-ELEM (termval *client-id)] $$broker->clients)
@@ -813,6 +849,9 @@
               (local-transform> [(keypath *client-id) :lost? NONE>] $$sessions))
             (local-select> [(keypath *client-id)] $$sessions :> *after)
             (count> (session-deltas *current *after))
+            (nudge-key *b *client-id :> *nudge)
+            (|hash *nudge)
+            (local-transform> [(keypath *nudge *client-id) NONE>] $$nudges)
             (run-key *b (get *current :incarnation) :> *run)
             (|hash *run)
             (local-transform> [(keypath *run) (set-elem *client-id) NONE>] $$broker->clients)

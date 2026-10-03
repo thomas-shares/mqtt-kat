@@ -147,7 +147,10 @@
    has: its subscription ends here."
   [c at]
   (locking (:lock c)
-    (when @(:conn c)
+    (when-let [{:keys [broker]} @(:conn c)]
+      ;; With the CONNACKs below, where each client was and when: what a
+      ;; loss or a second delivery near a reconnect is read against.
+      (ledger/event! (:ledger c) {:type :dropped :client (:id c) :broker broker})
       (close-socket! c)
       (reset! (:conn c) nil)
       (reset! (:last-drop c) at)
@@ -226,6 +229,8 @@
         (let [present? (boolean (:session-present? msg))]
           (swap! (:conn c) assoc :connected? true :had-session-before @(:had-session? c))
           (bump! c :connects)
+          (ledger/event! lg {:type :connected :client (:id c) :broker (broker-of c)
+                             :session-present? present?})
           (when (and (:persistent? c) @(:had-session? c) (not present?))
             (let [at (or @(:last-drop c) (ledger/now lg))]
               (ledger/session-lost! lg (:id c) (ledger/now lg))
@@ -241,7 +246,7 @@
       (when (and (= :subscribing state) (= pid (:packet-identifier msg)))
         (let [granted (long (first (:response msg)))]
           (if (< granted 0x80)
-            (do (ledger/subscribed! (:ledger c) (:id c) (:filter c) granted first-sent)
+            (do (ledger/subscribed! (:ledger c) (:id c) (:filter c) granted first-sent (broker-of c))
                 (reset! (:sub c) {:state :subscribed})
                 (sync-subscription! c))
             (do (bump! c :refused)

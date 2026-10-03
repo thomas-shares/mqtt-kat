@@ -72,10 +72,13 @@
 ;; ── subscribing ────────────────────────────────────────────────────────
 
 (defn subscribed!
-  "A SUBACK granting `qos` for a SUBSCRIBE first sent at `sub-sent`."
-  [ledger client filter qos sub-sent]
-  (swap! (:subscriptions ledger) update client (fnil conj [])
-         {:filter filter :qos qos :sub-sent sub-sent :from (now ledger)}))
+  "A SUBACK granting `qos` for a SUBSCRIBE first sent at `sub-sent`, from
+   `broker`, the broker the subscription is on, when known."
+  ([ledger client filter qos sub-sent] (subscribed! ledger client filter qos sub-sent nil))
+  ([ledger client filter qos sub-sent broker]
+   (swap! (:subscriptions ledger) update client (fnil conj [])
+          (cond-> {:filter filter :qos qos :sub-sent sub-sent :from (now ledger)}
+            broker (assoc :broker broker)))))
 
 (defn- close-open [subs f]
   (if-let [open (and (seq subs) (nil? (:to (peek subs))) (peek subs))]

@@ -164,19 +164,24 @@
   (let [v (vec (sort-by t xs))]
     {:xs v :ts (long-array (map t v))}))
 
+(defn- events-between
+  "What happened to `client`, and to any broker, from `lo` to `hi`."
+  [{:keys [xs ^longs ts]} client lo hi]
+  (let [n (alength ts)]
+    (loop [i (first-at-or-after ts lo) acc (transient [])]
+      (if (and (< i n) (<= (aget ts i) (long hi)))
+        (let [e (nth xs i)]
+          (recur (inc i) (if (or (= client (:client e)) (broker-event? e)) (conj! acc e) acc)))
+        (persistent! acc)))))
+
 (defn- context
   "The chaos around a message for `client`: what happened to that client, and
    to any broker, from `before` it was sent until `after` its
    acknowledgement."
-  [{:keys [xs ^longs ts]} client m before after]
-  (let [lo (- (long (:sent m)) (long before))
-        hi (+ (long (or (:acked m) (:sent m))) (long after))
-        n  (alength ts)]
-    (loop [i (first-at-or-after ts lo) acc (transient [])]
-      (if (and (< i n) (<= (aget ts i) hi))
-        (let [e (nth xs i)]
-          (recur (inc i) (if (or (= client (:client e)) (broker-event? e)) (conj! acc e) acc)))
-        (persistent! acc)))))
+  [events client m before after]
+  (events-between events client
+                  (- (long (:sent m)) (long before))
+                  (+ (long (or (:acked m) (:sent m))) (long after))))
 
 (defn- matcher
   "matches?, remembered: a run has a handful of filters and topics."
@@ -212,7 +217,8 @@
                 (let [q (effective-qos m sub)
                       v (.get acc id)]
                   (.put acc id {:required (max q (long (or (:required v) 0)))
-                                :ended-by (:ended-by sub)}))))
+                                :ended-by (:ended-by sub)
+                                :broker   (:broker sub)}))))
             (recur (inc i))))))
     acc))
 
@@ -266,6 +272,9 @@
         counts     (java.util.HashMap.)
         violations (java.util.ArrayList.)
         lost-by    (volatile! {})
+        lost-route (volatile! {})
+        lost-by-session (volatile! {})
+        dup-by     (volatile! {})
         lost       (volatile! 0)
         add!       (fn [v]
                      (let [n (inc (long (.getOrDefault counts (:kind v) 0)))]
@@ -276,7 +285,7 @@
     ;; What it was owed.
     (doseq [^java.util.Map$Entry e owed
             :let [id (.getKey e)
-                  {:keys [required ended-by]} (.getValue e)]]
+                  {:keys [required ended-by broker]} (.getValue e)]]
       (bump! 0 1)
       (if (delivery ds id)
         (bump! 1 1)
@@ -287,11 +296,18 @@
           ;; a killed broker is a known gap (see thoughts.md); one elsewhere
           ;; is news.
           (vswap! lost-by update-in [required (if near? :near-broker-chaos :elsewhere)] (fnil inc 0))
+          ;; Published on one broker, owed by a subscription on another: which
+          ;; link a loss is on, when the subscription's broker is known.
+          (vswap! lost-route update [(:pub-broker m) broker] (fnil inc 0))
+          ;; A kept session moves at the final reconnect, a clean one
+          ;; stays: which of the two lost it says much about where.
+          (vswap! lost-by-session update (if (:persistent? (get clients client)) :kept :clean) (fnil inc 0))
           (vswap! lost inc)
           (add! {:kind :lost :client client :msg id :qos required
                  :session (select-keys (get clients client) [:persistent? :mqtt5? :filter :sub-qos])
                  :topic (:topic m) :sent (:sent m) :acked (:acked m)
                  :pub-broker (:pub-broker m)
+                 :sub-broker broker
                  ;; How the subscription that owed it ended: nil while it
                  ;; lasts.
                  :sub-ended-by ended-by
@@ -330,15 +346,28 @@
             (case (long possible)
               1 (when (> n 1) (bump! 3 (dec n)))
               (when (> n 1)
+                (vswap! dup-by update possible (fnil inc 0))
                 (add! {:kind :duplicate :client client :msg id :qos possible :times n
                        :at at :brokers brokers
+                       :session (select-keys (get clients client) [:persistent? :mqtt5? :filter :sub-qos])
+                       :sent (:sent m) :acked (:acked m) :pub-broker (:pub-broker m)
                        :near-broker-chaos? (boolean (some broker-event?
-                                                          (context events client m before after)))})))))))
+                                                          (context events client m before after)))
+                       ;; From the publish to the last copy: a second copy
+                       ;; can come long after the first, from wherever the
+                       ;; client went in between.
+                       :context (events-between events client
+                                                (- (long (:sent m)) (long before))
+                                                (+ (long (reduce max (long (:sent m)) (or at [])))
+                                                   (long after)))})))))))
     {:stats      (zipmap [:required :delivered-required :deliveries :qos1-repeats :optional-delivered]
                          (vec stats))
      :counts     (into {} counts)
      :violations (vec violations)
      :lost-by    @lost-by
+     :lost-route @lost-route
+     :lost-by-session @lost-by-session
+     :duplicate-by @dup-by
      :lost       @lost}))
 
 (defn check
@@ -374,11 +403,15 @@
                                (update :stats #(merge-with + % (:stats r)))
                                (update :counts #(merge-with + % (:counts r)))
                                (update :lost-by #(merge-with (partial merge-with +) % (:lost-by r)))
+                               (update :lost-route #(merge-with + % (:lost-route r)))
+                               (update :lost-by-session #(merge-with + % (:lost-by-session r)))
+                               (update :duplicate-by #(merge-with + % (:duplicate-by r)))
                                (cond-> (pos? (long (:lost r)))
                                  (assoc-in [:lost-clients client] (:lost r)))))
                          {:stats {:required 0 :delivered-required 0 :deliveries 0
                                   :qos1-repeats 0 :optional-delivered 0}
-                          :counts {} :lost-by (sorted-map) :lost-clients {}}
+                          :counts {} :lost-by (sorted-map) :lost-route {} :lost-clients {}
+                          :lost-by-session {} :duplicate-by (sorted-map)}
                          (map vector clients per))
         counts   (atom (:counts merged))
         add!     (fn [v]
@@ -401,6 +434,12 @@
                         :subscribers (count subscriptions))
      :counts     @counts
      :lost-by    (:lost-by merged)
+     ;; [publisher's broker, subscriber's broker] -> how many were lost.
+     :lost-route (into (sorted-map-by #(compare (str %1) (str %2))) (:lost-route merged))
+     ;; {:kept n :clean n}: lost by sessions that are kept, and clean ones.
+     :lost-by-session (:lost-by-session merged)
+     ;; {qos n}: second deliveries by QoS — 2 or 0, as 1 may repeat.
+     :duplicate-by (:duplicate-by merged)
      ;; The ten clients that lost the most: the report keeps only the first
      ;; :max-violations of each kind, all of which may be one client's.
      :lost-by-client (into {} (take 10 (sort-by (comp - val) (:lost-clients merged))))

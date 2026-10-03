@@ -569,6 +569,11 @@
                    (cluster/plan conn "away/t"))
                 "away: queued here, forwarded nowhere")
 
+            (testing "a session that never had anything queued resumes with nothing queued"
+              ;; Not [nil]: that was taken for a message, queued with no
+              ;; topic and no QoS, and threw in the flush after the CONNACK.
+              (is (= [] (cluster/queued conn "away-1")))
+              (is (= [] (:queued (cluster/resume conn "away-1")))))
             (record! conn (cluster/->enqueue "away-1" {:topic "away/t" :payload (.getBytes "first") :qos 1}))
             (Thread/sleep 2)
             (record! conn (cluster/->enqueue "away-1" {:topic "away/t" :payload (.getBytes "second") :qos 1}))
@@ -1353,6 +1358,32 @@
                           (finally
                             (tu/close! here))))))
 
+                  (testing "a kept session connected on the peer is resumed here once the peer has handed it over"
+                    ;; The peer records the disconnect once what it handed
+                    ;; over is on the session's queue. Read before then, the
+                    ;; queue lacked it, and a later read sent it under a new
+                    ;; identifier: QoS 2 twice.
+                    (let [c (on-broker (cluster/->connect (connect-map "mover" :clean? false)) "peer-x" "peer-run")
+                          {:keys [client ch]} (tu/client! 16 true)]
+                      (record! conn c)
+                      (try
+                        (client/send-message client {:packet-type :CONNECT :protocol-name "MQTT" :protocol-version 4
+                                                     :keep-alive 100 :clean-session? false :client-id "mover"})
+                        (is (nil? (tu/take! ch 500)) "no CONNACK while the peer has it")
+                        (record! conn (cluster/->enqueue "mover" {:topic "moving/t" :payload (.getBytes "in flight")
+                                                                  :qos 2 :packet-identifier 77}))
+                        (record! conn (cluster/->disconnect c))
+                        (is (true? (:session-present? (tu/expect! ch :CONNACK 3000))))
+                        (let [got (tu/expect-eventually! ch :PUBLISH)]
+                          (is (= 77 (:packet-identifier got)) "under the identifier it was in flight under")
+                          (is (true? (:duplicate? got)))
+                          (client/send-message client {:packet-type :PUBREC :packet-identifier 77})
+                          (tu/expect-eventually! ch :PUBREL)
+                          (client/send-message client {:packet-type :PUBCOMP :packet-identifier 77}))
+                        (is (tu/wait-until #(empty? (cluster/queued conn "mover"))))
+                        (finally
+                          (tu/close! {:client client :ch ch :client-id "mover"})))))
+
                   (testing "told by another broker to drop a client, this broker does — if it still holds that connection"
                     (let [victim (tu/connect-v5! "victim" :id "victim-here")
                           _      (is (tu/wait-until #(= cluster/broker-id (:broker-id (cluster/session conn "victim-here")))))
@@ -1652,9 +1683,66 @@
                                                     [["k" {:topic (str topic "/a") :payload (.getBytes "x") :qos 1}]]
                                                     nil))
                           "nothing for a connection that is not the one here")))
+                  (testing "and what a hand-over put there in flight goes out at once, under its identifier"
+                    ;; As the broker the client left puts it there: with the
+                    ;; identifier the client may hold it under. On the queue
+                    ;; here it went out under a new one, QoS 2 twice, and a
+                    ;; PUBREL went in flight and was never sent.
+                    (let [cid     (get-in @h/*clients* [(h/live-connection id) :connect-id])
+                          handed  [["k-msg" {:topic (str topic "/a") :payload (.getBytes "handed") :qos 2
+                                             :packet-identifier 4321}]
+                                   ["k-rel" {:topic (str topic "/a") :qos 2 :packet-identifier 4322 :released? true}]]
+                          took    (h/deliver-queued! id cid handed nil)
+                          got     (tu/take-n! (:ch c) 2 2000)]
+                      (is (= #{"k-msg" "k-rel"} took))
+                      (is (= [4321] (map :packet-identifier (:PUBLISH got))))
+                      (is (every? #(true? (:duplicate? %)) (:PUBLISH got)) "as a redelivery")
+                      (is (= [4322] (map :packet-identifier (:PUBREL got))))
+                      (is (= #{} (h/deliver-queued! id cid handed nil)) "and nothing twice")
+                      (is (= #{} (h/deliver-queued! id cid [["k-other" {:topic (str topic "/a") :qos 2
+                                                                        :payload (.getBytes "other")
+                                                                        :packet-identifier 4321}]]
+                                                    nil))
+                          "one whose identifier is in use here stays on the cluster's queue for later")
+                      (is (empty? (:PUBLISH (tu/take-n! (:ch c) 1 300))))
+                      (client/send-message (:client c) {:packet-type :PUBCOMP :packet-identifier 4322})
+                      (client/send-message (:client c) {:packet-type :PUBREC :packet-identifier 4321})
+                      (is (= 4321 (:packet-identifier (tu/expect-eventually! (:ch c) :PUBREL))))
+                      (client/send-message (:client c) {:packet-type :PUBCOMP :packet-identifier 4321})))
                   (finally
                     @(cluster/record! conn (cluster/->broker-down))
                     (tu/close! c)))))
+
+            (testing "what is queued for a client connected here is sent to it at once: the cluster says so"
+              ;; Not resumed, so no catch-up read is coming: only the nudge
+              ;; can say it is there. Written late by a broker that took it
+              ;; for away, it waited for the client's next resume.
+              (let [id     (tu/client-id "nudged")
+                    nudge  #(r/foreign-select-one [(keypath (module/nudge-key cluster/broker-id id)) (keypath id)]
+                                                  (:nudges-state conn))
+                    c      (tu/connect! "nudged" :id id :clean-session? false :ordered? true)]
+                (try
+                  (is (tu/wait-until #(true? (cluster/connected? conn id))))
+                  (record! conn (cluster/->enqueue id {:topic "nudge/t" :payload (.getBytes "nudged") :qos 1}))
+                  (is (some? (nudge)) "the cluster notes it for this broker")
+                  (let [got (tu/expect-eventually! (:ch c) :PUBLISH 3000)]
+                    (is (= "nudged" (tu/payload-str got)))
+                    (client/send-message (:client c) {:packet-type :PUBACK
+                                                      :packet-identifier (:packet-identifier got)}))
+                  (is (tu/wait-until #(empty? (cluster/queued conn id))) "acknowledged: off the queue")
+                  (testing "and another, once, though the cluster says so twice"
+                    (let [k (h/new-message-key)]
+                      (record! conn (cluster/->enqueue id {:topic "nudge/t" :payload (.getBytes "again") :qos 1} k))
+                      (let [got (tu/expect-eventually! (:ch c) :PUBLISH 3000)]
+                        (is (= "again" (tu/payload-str got)))
+                        (record! conn (cluster/->enqueue id {:topic "nudge/t" :payload (.getBytes "again") :qos 1} k))
+                        (is (empty? (:PUBLISH (tu/take-n! (:ch c) 1 1000))) "in flight already")
+                        (client/send-message (:client c) {:packet-type :PUBACK
+                                                          :packet-identifier (:packet-identifier got)}))
+                      (is (tu/wait-until #(empty? (cluster/queued conn id))))))
+                  (finally
+                    (tu/close! c)))
+                (is (tu/wait-until #(nil? (nudge))) "and the note goes with the connection")))
 
             (testing "an anonymous client is recorded under the id it was given"
               (let [c   (tu/connect-v5! "anon" :id "")
@@ -1885,12 +1973,11 @@
           (web-cluster/forget!)
           (cluster/close! conn))))))
 
-(deftest a-broker-is-reporting-while-its-reports-are-recent
+(deftest a-bridge-waits-on-a-broker-while-it-is-listed
   (let [now  (System/currentTimeMillis)
-        conn {:brokers (atom {"fresh"   {:at (- now 600000) :stats-at (- now 4000)}
-                              "started" {:at (- now 1000)}
-                              "quiet"   {:at (- now 600000) :stats-at (- now cluster/reporting-within-millis 1000)}})}]
-    (is (cluster/reporting? conn "fresh"))
-    (is (cluster/reporting? conn "started") "announced a moment ago, and not reported yet")
-    (is (not (cluster/reporting? conn "quiet")))
-    (is (not (cluster/reporting? conn "unknown")))))
+        conn {:brokers (atom {"fresh" {:at (- now 600000) :stats-at (- now 4000)}
+                              "quiet" {:at (- now 600000) :stats-at (- now 60000)}})}]
+    (is (cluster/listed? conn "fresh"))
+    (is (cluster/listed? conn "quiet")
+        "reports late under load: still listed, still waited on")
+    (is (not (cluster/listed? conn "unknown")) "dropped from the registry: given up on")))

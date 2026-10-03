@@ -13,6 +13,11 @@
 ;;                                  module is RUNNING, however the cluster was
 ;;                                  started; exits 1 after --timeout s
 ;;   bb scripts/rama.bb status      what is running, and on which ports
+;;   bb scripts/rama.bb reset       stop, delete the cluster's data — every module
+;;                                  and everything in it — start, and launch the
+;;                                  module fresh: for a cluster no update gets out
+;;                                  of trouble, or one a load run has filled with
+;;                                  sessions and queues
 ;;   bb scripts/rama.bb update      build the module's thin jar (`lein jar`) and
 ;;                                  deploy it: an update, keeping the data, when
 ;;                                  the module is deployed already, a launch when
@@ -26,7 +31,10 @@
 ;; goes to logs/rama/<daemon>.out here; Rama's own logs stay in <rama-dir>/logs.
 ;;
 ;; Stopping keeps the cluster's data (<rama-dir>/local-rama-data, local-zk); the
-;; module is still deployed when it comes back.
+;; module is still deployed when it comes back. Delete the two only together
+;; and only with Rama stopped: one without the other can leave ZooKeeper
+;; naming a Supervisor the data no longer has ("Could not find heartbeat for
+;; supervisor"). `reset` does it that way.
 (require '[babashka.cli :as cli]
          '[babashka.fs :as fs]
          '[babashka.process :as p]
@@ -119,9 +127,14 @@
    the like — :not-deployed, or nil if the Conductor could not say."
   [rama-dir]
   (let [{:keys [out err]} (p/sh {:dir rama-dir :continue true} "./rama" "moduleStatus" module)
-        text (str out err)]
+        text  (str out err)
+        state (second (re-find #"\"moduleState\":\"([A-Z_]+)\"" text))]
     (cond
-      (re-find #"\"moduleState\":\"([A-Z_]+)\"" text) (second (re-find #"\"moduleState\":\"([A-Z_]+)\"" text))
+      ;; A module the cluster has never heard of is NOT_ALIVE too, but with
+      ;; no depot to append to: one deployed has had one since its launch.
+      ;; Taken for a dead module, it got an update, which Rama refuses.
+      (and (= "NOT_ALIVE" state) (re-find #"\"appendTargetId\":null" text)) :not-deployed
+      state state
       (re-find #"(?i)does not exist|not found|unknown module" text) :not-deployed
       :else nil)))
 
@@ -168,7 +181,7 @@
           (do (println "RUNNING") true)
 
           (= :not-deployed state)
-          (do (println (str "not deployed - see the README: `lein jar`, then `./rama deploy --action launch`"))
+          (do (println "not deployed - `bb scripts/rama.bb update` launches it")
               false)
 
           (> (System/currentTimeMillis) deadline)
@@ -180,7 +193,7 @@
               (Thread/sleep 3000)
               (recur state)))))))
 
-(defn start! [{:keys [rama-dir]}]
+(defn start! [{:keys [rama-dir] :as opts}]
   (let [rama (fs/path rama-dir "rama")]
     (when-not (fs/exists? rama)
       (println "no Rama at" rama-dir "- give --rama-dir, or set RAMA_HOME")
@@ -207,8 +220,10 @@
     (println "UI         http://localhost:8888/")
     ;; A restarted cluster brings its module back by itself, which takes a
     ;; while; the brokers cannot connect until it has. Not a failure of
-    ;; start if it never is: a first start is followed by the deploy.
-    (wait-module! rama-dir 180)))
+    ;; start if it never is: a first start is followed by the deploy. Not
+    ;; asked at all on a cluster just emptied, which has nothing to bring back.
+    (when-not (::empty? opts)
+      (wait-module! rama-dir 180))))
 
 (defn wait!
   "Until the cluster can take the brokers: the Conductor listening, then the
@@ -267,6 +282,11 @@
   (when-not (listening? 1973)
     (println "the Conductor is not listening on :1973 - start Rama first (`bb scripts/rama.bb start`)")
     (System/exit 1))
+  (when (= "NOT_ALIVE" (module-state rama-dir))
+    ;; The Conductor refuses it, "Module not alive", so not worth a build.
+    (println module "is NOT_ALIVE, and Rama will not update a module in that state.")
+    (println "`bb scripts/rama.bb reset` starts the cluster over, deleting its data, and launches the module fresh.")
+    (System/exit 1))
   (when build (build-jar!))
   (let [jar (first (jars false))]
     (when-not jar
@@ -289,6 +309,25 @@
       (when-not (wait-module! rama-dir timeout)
         (System/exit 1)))))
 
+(defn reset-cluster!
+  "Stop Rama, delete local-rama-data and local-zk together, start it
+   again, and launch the module on the empty cluster."
+  [{:keys [rama-dir] :as opts}]
+  (when-not (fs/exists? (fs/path rama-dir "rama"))
+    (println "no Rama at" rama-dir "- give --rama-dir, or set RAMA_HOME")
+    (System/exit 1))
+  ;; Everything stopped first: ZooKeeper writes local-zk while it runs, and
+  ;; a Supervisor or worker left behind writes local-rama-data.
+  (when (seq (rama-processes))
+    (stop! opts "TERM"))
+  (doseq [d ["local-rama-data" "local-zk"]
+          :let [path (fs/path rama-dir d)]
+          :when (fs/exists? path)]
+    (fs/delete-tree path)
+    (println (format "%-10s %s" "deleted" path)))
+  (start! (assoc opts ::empty? true))
+  (update! opts))
+
 (defn -main [& args]
   (let [{:keys [args opts]} (cli/parse-args args {:spec spec})]
     (case (first args)
@@ -299,7 +338,8 @@
       "status"  (status! opts)
       "wait"    (wait! opts)
       "update"  (update! opts)
-      (do (println "usage: bb scripts/rama.bb start | stop | kill | restart | status | wait | update")
+      "reset"   (reset-cluster! opts)
+      (do (println "usage: bb scripts/rama.bb start | stop | kill | restart | status | wait | update | reset")
           (println "       [--rama-dir DIR] [--grace 15] [--timeout 180] [--no-build] [--tasks 4 --threads 2 --workers 1]")
           (System/exit 2)))))
 

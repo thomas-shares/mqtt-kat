@@ -217,14 +217,14 @@
         (is (zero? @lost))
         (finally (bridge/drop! "peer-11"))))))
 
-(deftest a-peer-still-reporting-is-waited-for
+(deftest a-peer-still-listed-is-waited-for
   ;; A load run with nothing killed lost five million deliveries: a broker
   ;; stops reading a bridge while one of its subscribers catches up, the
   ;; other end saw nothing acknowledged for five seconds and dropped the
   ;; link, and what it handed back was queued for clients still connected
   ;; there, who never read it.
   (with-redefs [bridge/window-wait-ms 200]
-    (testing "a full window on a peer the cluster still hears from: waited on, nothing handed back"
+    (testing "a full window on a peer the cluster still lists: waited on, nothing handed back"
       (let [p    (peer connack-2)
             lost (atom 0)]
         (try
@@ -243,7 +243,7 @@
             (bridge/drop! "peer-20")
             (.stop ^MqttServer (:server p) 100)))))
 
-    (testing "one it does not hear from is dropped, as before"
+    (testing "one it no longer lists is dropped, as before"
       (let [p    (peer connack-2)
             lost (atom 0)]
         (try
