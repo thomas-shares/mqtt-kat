@@ -37,6 +37,15 @@ it did not before. It queues for clients its view has away only if their
 session is still kept. And a will is named like any other publish, so the
 brokers it reaches queue it the same way.
 
+Judging runs on the one thread that reads a bridge, so it has to be
+cheap. The first version asked about each subscriber twice per copy, and
+split the topic and the filter again for every question: about 1.6 ms
+for a copy to a topic with 170 subscribers. The load run at 10,000 a
+second then got a third of its publishes out, and the bridges fell far
+behind. Now a copy is judged once, with its topic split once and each
+filter's levels kept, and the old way of judging is asked only when some
+client's history may be too short for the copy. That is about 0.1 ms.
+
 A copy planned before its link's snapshot, a copy for groups only, and
 one from a broker running older code are judged as before. What is left
 for the next stage is the link itself: a link that drops takes the copies

@@ -31,8 +31,7 @@
    Pure: the views are values, and what keeps them and sends them is
    mqttkat.rama.cluster on the sending side and mqttkat.handlers on the
    receiving one."
-  (:require [clojure.string :as str]
-            [mqttkat.trie :as trie]))
+  (:require [mqttkat.trie :as trie]))
 
 (def away
   "Where a subscription is in a view when its client is not connected."
@@ -89,30 +88,64 @@
 
 ;; ── matching ─────────────────────────────────────────────────────────────
 
+(defn topic
+  "`topic-name` split into its levels once, for judging every subscriber a
+   copy on it might go to: judging one copy asks of a hundred and more
+   clients, and splitting the name again for each, and each filter with
+   it, was most of what judging cost."
+  [^String topic-name]
+  {:name    topic-name
+   :levels  (.split topic-name "/" -1)
+   :dollar? (.startsWith topic-name "$")})
+
+(defonce ^:private filter-levels-cache
+  ;; topic filter -> its levels. A cluster has few filters and they repeat.
+  (java.util.concurrent.ConcurrentHashMap.))
+
+(defn- filter-levels [^String topic-filter]
+  (or (.get ^java.util.concurrent.ConcurrentHashMap filter-levels-cache topic-filter)
+      (let [levels (.split topic-filter "/" -1)
+            ^java.util.concurrent.ConcurrentHashMap c filter-levels-cache]
+        ;; A backstop, not an eviction policy: only a cluster whose clients
+        ;; make up filters as they go would ever reach it.
+        (when (> (.size c) 65536) (.clear c))
+        (.put c topic-filter levels)
+        levels)))
+
+(defn- matches-topic? [^String topic-filter {:keys [levels dollar?]}]
+  (and (not (and dollar? (trie/wildcard-rooted? topic-filter)))
+       (let [^objects fs (filter-levels topic-filter)
+             ^objects ts levels
+             nf (alength fs)
+             nt (alength ts)]
+         (loop [i 0]
+           (cond
+             (= i nf)                 (= i nt)
+             (= "#" (aget fs i))      true
+             (= i nt)                 false
+             (or (= "+" (aget fs i))
+                 (= (aget fs i) (aget ts i))) (recur (inc i))
+             :else                    false)))))
+
+(defn- prepared [t] (if (string? t) (topic t) t))
+
 (defn filter-matches?
   "Whether `topic-filter` matches `topic` (§4.7), including the rule that a
-   filter starting with a wildcard does not match a topic starting with $."
-  [^String topic-filter ^String topic]
-  (and (not (and (.startsWith topic "$") (trie/wildcard-rooted? topic-filter)))
-       (loop [fs (str/split topic-filter #"/" -1)
-              ts (str/split topic #"/" -1)]
-         (cond
-           (empty? fs)            (empty? ts)
-           (= "#" (first fs))     true
-           (empty? ts)            false
-           (or (= "+" (first fs))
-               (= (first fs) (first ts))) (recur (rest fs) (rest ts))
-           :else                  false))))
+   filter starting with a wildcard does not match a topic starting with $.
+   `topic` is a name, or one prepared by `topic`."
+  [topic-filter topic]
+  (matches-topic? topic-filter (prepared topic)))
 
 ;; ── the receiver's copy ──────────────────────────────────────────────────
 ;;
 ;; {:base v :v v
 ;;  :clients {client-id {:from v :states [[v entries-or-nil] …]}}
-;;  :here trie}
+;;  :here trie :floor v}
 ;;
 ;; :base is the version of the snapshot the link started with: a copy
-;; planned before it is not judged. For one client, every version from
-;; :from on is known: its state is the last of :states at or before it,
+;; planned before it is not judged. :floor is the newest :from of any
+;; client: a copy planned at or after it finds every client known. For
+;; one client, every version from :from on is known: its state is the last of :states at or before it,
 ;; or none at all before the first. :here holds every filter the sender
 ;; placed here in any state still kept, so that the clients owed a copy can
 ;; be found by its topic rather than by asking of every client.
@@ -127,9 +160,9 @@
   (let [old (here-filters me before)
         new (here-filters me after)]
     (as-> here h
-      (reduce (fn [h f] (trie/trie-delete h f {:client-id client-id :topic-filter f}))
+      (reduce (fn [h f] (trie/trie-delete h f client-id))
               h (remove new old))
-      (reduce (fn [h f] (trie/trie-insert h f {:client-id client-id :topic-filter f}))
+      (reduce (fn [h f] (trie/trie-insert h f client-id))
               h (remove old new)))))
 
 (defn- record [view me v client-id entries]
@@ -142,6 +175,9 @@
                           [grown (or from (:base view))])]
     (-> view
         (assoc-in [:clients client-id] {:from from' :states states'})
+        ;; The newest version some client's history no longer reaches back
+        ;; past: see may-be-unknown?.
+        (update :floor (fnil max 0) (long from'))
         (update :here reindex me client-id states states'))))
 
 (defn- forget-gone
@@ -188,6 +224,13 @@
   [view v]
   (boolean (and view v (>= (long v) (long (:base view))))))
 
+(defn may-be-unknown?
+  "Whether some client's state at `v` may be ::unknown in `view`: its
+   history was cut short after `v`. Mostly not, and then nobody need be
+   asked."
+  [view v]
+  (< (long v) (long (or (:floor view) 0))))
+
 (defn state-at
   "`client-id`'s entries in the sender's view at version `v` — {} for none
    — or ::unknown when the history kept does not reach back that far."
@@ -196,12 +239,18 @@
     (cond
       (< v (long (:base view))) ::unknown
       :else
-      (if-let [{:keys [from states]} (get-in view [:clients client-id])]
+      (if-let [{:keys [from states]} (get (:clients view) client-id)]
         (if (< v (long from))
           ::unknown
-          (or (some (fn [[sv entries]] (when (<= (long sv) v) (or entries {})))
-                    (rseq states))
-              {}))
+          ;; From the newest back: a copy is mostly planned at a version
+          ;; later than the client's last change.
+          (loop [i (dec (count states))]
+            (if (neg? i)
+              {}
+              (let [[sv entries] (nth states i)]
+                (if (<= (long sv) v)
+                  (or entries {})
+                  (recur (dec i)))))))
         {}))))
 
 (defn withhold?
@@ -211,31 +260,41 @@
    somewhere else, or away, that keeps a message at this QoS — so the
    broker it is on queues it, or the sender did. A copy nobody else keeps
    — QoS 0, or a QoS 0 subscription — is delivered here, as is one the
-   sender knew nothing of the client for, or one too old to judge."
+   sender knew nothing of the client for, or one too old to judge.
+   `topic` is a name, or one prepared by `topic`."
   [view me client-id topic v qos not-served]
   (or (contains? not-served client-id)
-      (let [st (state-at view client-id v)]
-        (and (map? st)
-             (boolean
-              (some (fn [[f [q at]]]
-                      (and (not= me at)
-                           (pos? (min (long qos) (long q)))
-                           (filter-matches? f topic)))
-                    st))))))
+      (and (pos? (long qos))
+           (let [st (state-at view client-id v)]
+             (and (map? st)
+                  (let [t (prepared topic)]
+                    (reduce-kv (fn [_ f [q at]]
+                                 (if (and (pos? (long q))
+                                          (not= me at)
+                                          (matches-topic? f t))
+                                   (reduced true)
+                                   false))
+                               false
+                               st)))))))
 
 (defn owed
   "The clients a copy on `topic`, planned at `v`, is broker `me`'s to
    deliver or queue: [{:client-id :qos}], each at the highest QoS of its
    matching subscriptions the sender had here."
   [view me topic v not-served]
-  (into []
-        (keep (fn [c]
-                (when-not (contains? not-served c)
-                  (let [st (state-at view c v)]
-                    (when (map? st)
-                      (let [qs (keep (fn [[f [q at]]]
-                                       (when (and (= me at) (filter-matches? f topic)) q))
-                                     st)]
-                        (when (seq qs)
-                          {:client-id c :qos (long (apply max qs))})))))))
-        (distinct (map :client-id (trie/trie-matching-vals (:here view) topic)))))
+  (let [t (prepared topic)]
+    (into []
+          (keep (fn [c]
+                  (when-not (contains? not-served c)
+                    (let [st (state-at view c v)]
+                      (when (map? st)
+                        (let [q (reduce-kv (fn [best f [q at]]
+                                             (if (and (= me at) (matches-topic? f t))
+                                               (max (long best) (long q))
+                                               best))
+                                           -1
+                                           st)]
+                          (when-not (neg? (long q))
+                            {:client-id c :qos q})))))))
+          ;; A set: a client with several filters here is asked once.
+          (trie/trie-matching-vals (:here view) (:name t)))))

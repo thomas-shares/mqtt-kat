@@ -41,7 +41,12 @@
   (is (not (intent/filter-matches? "#" "$SYS/x")) "§4.7.2: not a $ topic")
   (is (not (intent/filter-matches? "+/x" "$SYS/x")))
   (is (intent/filter-matches? "$SYS/#" "$SYS/x"))
-  (is (intent/filter-matches? "a//b" "a//b") "an empty level is a level"))
+  (is (intent/filter-matches? "a//b" "a//b") "an empty level is a level")
+  (testing "a topic split once, for every filter it is asked of"
+    (let [t (intent/topic "$SYS/x")]
+      (is (intent/filter-matches? "$SYS/+" t))
+      (is (not (intent/filter-matches? "#" t)))
+      (is (not (intent/filter-matches? "$SYS" t))))))
 
 (defn- view
   "B's copy of A's view, from a snapshot at `v` and then each change."
@@ -122,6 +127,8 @@
                      {:v i :clients {"s" {"a" [1 (if (odd? i) "c" "b")]}}}))]
       (is (= (long intent/history) (count (get-in v [:clients "s" :states]))))
       (is (= ::intent/unknown (intent/state-at v "s" 1)))
+      (is (intent/may-be-unknown? v 1))
+      (is (not (intent/may-be-unknown? v (dec n))) "nobody is unknown that late")
       (is (not (intent/withhold? v "b" "s" "a" 1 1 #{})) "unknown: delivered, as before")
       (is (empty? (intent/owed v "b" "a" 1 #{})) "and not queued")
       (is (= {"a" [1 (if (odd? (dec n)) "c" "b")]} (intent/state-at v "s" (dec n))))))
@@ -129,6 +136,7 @@
     (let [v (view 0 {"s" {"a" [1 "b"]}} {:v 1 :clients {"s" nil}})
           w (intent/view-apply v "b" {:v (+ 2 (long intent/forget-after)) :clients {"t" {"x" [0 "b"]}}})]
       (is (contains? (:clients v) "s"))
+      (is (not (intent/may-be-unknown? v 0)) "every client known from the snapshot on")
       (is (not (contains? (:clients w) "s")))
       (is (empty? (trie/trie-matching-vals (:here w) "a")))))
   (testing "the filters here follow every state kept, and only those"
