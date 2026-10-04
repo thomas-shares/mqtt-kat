@@ -21,11 +21,15 @@ client by client, before the new version is planned from, and a new link
 starts with a snapshot of the whole. One TCP connection, read in order, so
 the receiver always has the sender's view as of the copy in front of it,
 and keeps the last few states of each client to judge copies that waited
-behind others. It then leaves a kept session out only where the sender
-had a matching subscription of it elsewhere, or away, that keeps this
-message (so not at QoS 0, which nobody queues), and queues under the
+behind others. It then leaves a kept session out where the sender had a
+matching subscription of it elsewhere, or away, and queues under the
 message's key for every client the sender had here and that did not get
-it live. Each broker asks the same question of the same version, so one
+it live. That holds at QoS 0 too, where nobody queues: the copy is then
+the other broker's to deliver or drop. For a while this rule spared QoS
+0, to lose nothing, and the load run sent some three million QoS 0
+messages twice, most likely to the kept sessions its final reconnect
+moves while the bridges are far behind. At most once allows the loss,
+and not that. Each broker asks the same question of the same version, so one
 of them delivers or queues and the others leave it. A client the sender
 delivered to itself, though its view had it elsewhere, is named on the
 copy, and nobody else touches it. The rules are in `mqttkat.intent`,
@@ -40,11 +44,10 @@ brokers it reaches queue it the same way.
 Judging runs on the one thread that reads a bridge, so it has to be
 cheap. The first version asked about each subscriber twice per copy, and
 split the topic and the filter again for every question: about 1.6 ms
-for a copy to a topic with 170 subscribers. The load run at 10,000 a
-second then got a third of its publishes out, and the bridges fell far
-behind. Now a copy is judged once, with its topic split once and each
-filter's levels kept, and the old way of judging is asked only when some
-client's history may be too short for the copy. That is about 0.1 ms.
+for a copy to a topic with 170 subscribers. Now a copy is judged once,
+with its topic split once and each filter's levels kept, and the old way
+of judging is asked only when some client's history may be too short for
+the copy. That is about 0.1 ms.
 
 A copy planned before its link's snapshot, a copy for groups only, and
 one from a broker running older code are judged as before. What is left

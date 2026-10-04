@@ -1486,11 +1486,16 @@
                           (copy! "served there" 2 k4 :not-served here-id)
                           (is (nil? (tu/take! (:ch here) 300)))
                           (is (empty? (cluster/queued conn here-id))))
-                        (testing "but at QoS 0, which nobody keeps for it elsewhere, delivered here all the same"
-                          (client/send-message (:client b) (publish-msg "judge/t" "zero" 0 nil
-                                                                        :properties {:user-properties
-                                                                                     [[bridge/view-v-property "1"]]}))
-                          (is (= "zero" (tu/payload-str (tu/expect-eventually! (:ch here) :PUBLISH)))))
+                        (testing "at QoS 0 alike: at most once, so only where its sender had the client"
+                          (let [zero! (fn [payload v]
+                                        (client/send-message
+                                         (:client b)
+                                         (publish-msg "judge/t" payload 0 nil
+                                                      :properties {:user-properties
+                                                                   [[bridge/view-v-property (str v)]]})))]
+                            (zero! "zero, elsewhere" 1)
+                            (zero! "zero, here" 2)
+                            (is (= "zero, here" (tu/payload-str (tu/expect-eventually! (:ch here) :PUBLISH))))))
                         (is (tu/wait-until #(= #{k1 k2 k3 k4} (keys-of gone-id)))
                             "and every one queued for the client the view had here and away")
                         (testing "without a version, or from before the view: as before, delivered"

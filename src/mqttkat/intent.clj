@@ -254,28 +254,27 @@
         {}))))
 
 (defn withhold?
-  "Whether broker `me` leaves its subscriber `client-id` out of a copy at
-   `qos` on `topic`, planned at `v`: its sender delivered it to the client
-   itself (`not-served`), or had a matching subscription of the client's
-   somewhere else, or away, that keeps a message at this QoS — so the
-   broker it is on queues it, or the sender did. A copy nobody else keeps
-   — QoS 0, or a QoS 0 subscription — is delivered here, as is one the
-   sender knew nothing of the client for, or one too old to judge.
+  "Whether broker `me` leaves its subscriber `client-id` out of a copy on
+   `topic`, planned at `v`, whatever its QoS: its sender delivered it to the client itself
+   (`not-served`), or had a matching subscription of the client's
+   somewhere else, or away. Above QoS 0 the broker it is on queues it, or
+   the sender did. At QoS 0 nobody queues it, and the copy is the other
+   broker's to deliver or to drop: at most once allows losing it, and not
+   sending it twice, which delivering here as well did to every client
+   that moved while the bridges were behind. A copy the sender knew
+   nothing of the client for, or one too old to judge, is delivered here.
    `topic` is a name, or one prepared by `topic`."
-  [view me client-id topic v qos not-served]
+  [view me client-id topic v not-served]
   (or (contains? not-served client-id)
-      (and (pos? (long qos))
-           (let [st (state-at view client-id v)]
-             (and (map? st)
-                  (let [t (prepared topic)]
-                    (reduce-kv (fn [_ f [q at]]
-                                 (if (and (pos? (long q))
-                                          (not= me at)
-                                          (matches-topic? f t))
-                                   (reduced true)
-                                   false))
-                               false
-                               st)))))))
+      (let [st (state-at view client-id v)]
+        (and (map? st)
+             (let [t (prepared topic)]
+               (reduce-kv (fn [_ f [_ at]]
+                            (if (and (not= me at) (matches-topic? f t))
+                              (reduced true)
+                              false))
+                          false
+                          st))))))
 
 (defn owed
   "The clients a copy on `topic`, planned at `v`, is broker `me`'s to

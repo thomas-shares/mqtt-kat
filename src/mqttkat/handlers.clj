@@ -2985,19 +2985,17 @@
    Judged once, here, for every subscriber it might go to: `:local`, this
    broker's subscribers to it whose sessions are kept, client-id -> the
    highest QoS of their subscriptions here, and `:withheld`, those of them
-   its sender served itself or meant to have the copy kept for elsewhere
-   (intent/withhold?). Only a kept session is withheld: a clean one here is
-   a new session, whatever the sender had for an older one. Asked once per
-   subscriber and again per plan, as it first was, judging a copy to 170
-   subscribers took 1.6 ms on the one thread that reads the bridge, and a
-   load run got a third of its publishes out."
-  [topic {:keys [client-key qos] v ::view-v :as msg}]
+   its sender served itself or had elsewhere (intent/withhold?). Only a
+   kept session is withheld: a clean one here is a new session, whatever
+   the sender had for an older one. Asked once per subscriber and again
+   per plan, as it first was, judging a copy to 170 subscribers took
+   1.6 ms on the one thread that reads the bridge."
+  [topic {:keys [client-key] v ::view-v :as msg}]
   (when v
     (let [view (get @origin-views client-key)
           me   (:my-broker-id @session-source)]
       (when (and me (intent/covers? view v))
         (let [clients    @*clients*
-              qos        (long (or qos 0))
               not-served (or (::not msg) #{})
               t          (intent/topic topic)
               matches    (matching-subscribers topic)
@@ -3008,11 +3006,11 @@
                                        (update m (:client-id c) (fnil max 0) (long (or qos 0))))))
                                  {}
                                  matches)]
-          {:view       view :me me :v v :qos qos :not-served not-served :topic t
+          {:view       view :me me :v v :not-served not-served :topic t
            :matches    matches
            :local      local
            :withheld   (into #{}
-                             (filter #(intent/withhold? view me % t v qos not-served))
+                             (filter #(intent/withhold? view me % t v not-served))
                              (keys local))})))))
 
 (defn- withhold-fn
