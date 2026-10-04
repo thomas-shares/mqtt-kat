@@ -2080,3 +2080,58 @@
     (is (cluster/listed? conn "quiet")
         "reports late under load: still listed, still waited on")
     (is (not (cluster/listed? conn "unknown")) "dropped from the registry: given up on")))
+
+(deftest a-session-event-is-appended-until-it-lands
+  ;; The other brokers trust the record of where a client is: one connect
+  ;; lost to a timeout under load had a client away for the rest of a run,
+  ;; and left out of every copy. No Rama here: record! is stood in for.
+  (let [conn  {:stand-in true}
+        calls (atom [])
+        fails (atom 0)
+        live  (atom nil)
+        run   (fn [rec]
+                (reset! calls [])
+                (cluster/record-until-landed! conn rec nil))]
+    (with-redefs [cluster/*connection*      (atom conn)
+                  cluster/record-retry-millis [10 20]
+                  cluster/record-retries    3
+                  cluster/record!           (fn [_ rec _]
+                                              (swap! calls conj rec)
+                                              (if (neg? (swap! fails dec))
+                                                (java.util.concurrent.CompletableFuture/completedFuture nil)
+                                                (java.util.concurrent.CompletableFuture/failedFuture
+                                                 (ex-info "ack-timeout" {}))))
+                  h/live-client             (fn [_] @live)]
+      (testing "a connect, while its connection is the one here; then what it subscribed to meanwhile"
+        (reset! live {:connect-id "c1" :subscribed-topics #{{:filter "a/#" :topic-filter "a/#" :qos 1}}})
+        (reset! fails 2)
+        (run {:event :connect :client-id "x" :connect-id "c1"})
+        (is (tu/wait-until #(= [:connect :connect :connect :subscribe] (map :event @calls))))
+        (is (= "c1" (:connect-id (last @calls))))
+        (is (= "a/#" (:filter (last @calls)))))
+      (testing "not for a connection that has gone"
+        (reset! live nil)
+        (reset! fails 1)
+        (run {:event :connect :client-id "x" :connect-id "c1"})
+        (Thread/sleep 200)
+        (is (= [:connect] (map :event @calls))))
+      (testing "nor for one that has been replaced here"
+        (reset! live {:connect-id "c2"})
+        (reset! fails 1)
+        (run {:event :subscribe :client-id "x" :connect-id "c1" :filter "a/#"})
+        (Thread/sleep 200)
+        (is (= 1 (count @calls))))
+      (testing "a connect that lands after its connection ended is followed by its disconnect"
+        ;; Here when it failed, gone by the time it was sent again and landed.
+        (let [asked (atom 0)]
+          (with-redefs [h/live-client (fn [_] (when (= 1 (swap! asked inc)) {:connect-id "c3"}))]
+            (reset! fails 1)
+            (run {:event :connect :client-id "x" :connect-id "c3"})
+            (is (tu/wait-until #(= [:connect :connect :disconnect] (map :event @calls))))
+            (is (= "c3" (:connect-id (last @calls)))))))
+      (testing "a disconnect, which this broker cannot check, a few times and no more"
+        (reset! fails 100)
+        (run {:event :disconnect :client-id "x" :connect-id "c1"})
+        (is (tu/wait-until #(= 4 (count @calls))))
+        (Thread/sleep 200)
+        (is (= 4 (count @calls)))))))

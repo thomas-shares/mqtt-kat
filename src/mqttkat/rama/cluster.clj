@@ -488,6 +488,96 @@
             (newThread [_ r]
               (doto (Thread. ^Runnable r "rama-queue-retry") (.setDaemon true)))))))
 
+;; ── a session's events, until they land ──────────────────────────────────
+;;
+;; The other brokers judge where a client is by what the cluster's record
+;; of it says, and since mqttkat.intent they trust it: a copy is left out
+;; wherever the view has the client elsewhere. An event that never landed
+;; leaves the record wrong for as long as the connection lasts. A load run
+;; whose appends timed out under load lost the connect of a client, which
+;; the record then had away, and every broker left it out of every copy for
+;; the rest of the run. So a session event that fails is appended again,
+;; for as long as it still says what this broker has. Each is safe to run
+;; twice (see mqttkat.rama.module): a connect the record carries is not
+;; counted again, and the rest name their connection.
+
+(def record-retry-millis
+  "How long a session event that did not land waits to be appended again:
+   the first wait, and the longest it grows to."
+  [200 5000])
+
+(def record-retries
+  "How many times an event this broker cannot check against what it has —
+   a disconnect, a redirect — is appended again before it is given up."
+  30)
+
+(declare ^:dynamic *connection*)
+
+(defn- holds-filter? [client filter]
+  (boolean (some #(= filter (:filter %)) (:subscribed-topics client))))
+
+(defn- still-true?
+  "Whether session event `rec` still says what this broker has: the
+   connection it names is the one holding its client here, with the
+   subscription it made, or without the one it gave up."
+  [{:keys [event client-id connect-id filter]}]
+  (let [c (handlers/live-client client-id)]
+    (and c
+         (= connect-id (:connect-id c))
+         (case event
+           :connect     true
+           :subscribe   (holds-filter? c filter)
+           :unsubscribe (not (holds-filter? c filter))
+           false))))
+
+(declare record-until-landed!)
+
+(defn- restate-subscriptions!
+  "Every subscription the connection holding `client-id` has, appended
+   again under connection `connect-id`: made before its connect landed,
+   they named a connection the record did not have, and changed nothing."
+  [conn client-id connect-id]
+  (when-let [c (handlers/live-client client-id)]
+    (when (= connect-id (:connect-id c))
+      (doseq [e (:subscribed-topics c)]
+        (record-until-landed! conn (->subscribe {:connect-id connect-id :client-id client-id
+                                                 :filter (:filter e) :entry e})
+                              {:wait? false})))))
+
+(defn record-until-landed!
+  "record!, for an event about a client's session, appended again after a
+   failure: a connect, subscribe or unsubscribe while it still says what
+   this broker has (still-true?), a disconnect or redirect up to
+   record-retries times. Returns the first attempt's future."
+  [conn rec opts]
+  (letfn [(attempt [opts tries delay-ms]
+            (let [^CompletableFuture f (record! conn rec opts)]
+              (.whenComplete
+               f (reify BiConsumer
+                   (accept [_ _ e]
+                     (cond
+                       (and e
+                            (identical? conn @*connection*)
+                            (if (#{:disconnect :redirected} (:event rec))
+                              (< (long tries) (long record-retries))
+                              (still-true? rec)))
+                       (let [again (min (* 2 (long delay-ms)) (long (second record-retry-millis)))]
+                         (.schedule ^java.util.concurrent.ScheduledExecutorService @retry-timer
+                                    ^Runnable #(.execute ^java.util.concurrent.Executor @queue-executor
+                                                         ^Runnable (fn [] (attempt {:wait? false} (inc (long tries)) again)))
+                                    (long delay-ms) TimeUnit/MILLISECONDS))
+
+                       ;; Landed late: what its connection subscribed to in
+                       ;; the meantime landed before it, and counted for
+                       ;; nothing; and if the connection has ended since,
+                       ;; its disconnect did too.
+                       (and (nil? e) (pos? (long tries)) (= :connect (:event rec)))
+                       (if (still-true? rec)
+                         (restate-subscriptions! conn (:client-id rec) (:connect-id rec))
+                         (record-until-landed! conn (->disconnect rec) {:wait? false}))))))
+              f))]
+    (attempt opts 0 (first record-retry-millis))))
+
 (defn queue-writer
   "What `enqueue!` and `dequeue!` write through: one lane per client, which
    has one batch on its way to Rama at a time. What a client's queue is
@@ -1382,7 +1472,7 @@
       ;; every client arriving in between stays here.
       (note-sent! id stats-at)
       (when (not= id broker-id)
-        (awaited (record! @*connection* (->redirected client-id id)))
+        (awaited (record-until-landed! @*connection* (->redirected client-id id) nil))
         {:server-reference (str host ":" port)
          :via              (redirect-via)
          :session-present? (boolean (and record
@@ -1411,16 +1501,16 @@
       ;; emitted before the CONNACK goes out, so the client cannot act — nor
       ;; another broker's copy be consulted about it — until the cluster has
       ;; it connected.
-      :client-connected    (awaited (record! c (->connect connect)))
+      :client-connected    (awaited (record-until-landed! c (->connect connect) nil))
       ;; Once what the broker handed over for the session is on its queue:
       ;; a broker resuming it waits for the record to say it has gone from
       ;; here, then reads the queue (handlers/adopt-session!). Recorded at
       ;; once, the hand-over's writes could land after that read, and their
       ;; messages went out again under new identifiers, QoS 2 twice.
-      :client-disconnected (let [record #(record! c (->disconnect broker-event) {:wait? false})]
+      :client-disconnected (let [record #(record-until-landed! c (->disconnect broker-event) {:wait? false})]
                              (if-let [^CompletableFuture handed (handlers/handed-over (:client-id broker-event))]
                                (.whenComplete handed (reify BiConsumer (accept [_ _ _] (record))))
-                               (record! c (->disconnect broker-event))))
+                               (record-until-landed! c (->disconnect broker-event) nil)))
       ;; Waited for, these two: the handler emits them before it sends the
       ;; SUBACK or UNSUBACK, so waiting here is what makes the acknowledgement
       ;; mean the cluster has the change — with :ack, the topology has
@@ -1430,8 +1520,8 @@
       ;; or so, which a load test sees as lost messages. The thread this runs
       ;; on is the connection's own, and is virtual; a few milliseconds
       ;; blocked cost it nothing.
-      :client-subscribed   (awaited (record! c (->subscribe broker-event)))
-      :client-unsubscribed (awaited (record! c (->unsubscribe broker-event)))
+      :client-subscribed   (awaited (record-until-landed! c (->subscribe broker-event) nil))
+      :client-unsubscribed (awaited (record-until-landed! c (->unsubscribe broker-event) nil))
       :broker-sample       (do
                              ;; Not in the registry, as far as this broker
                              ;; can see, though it announced itself: say so

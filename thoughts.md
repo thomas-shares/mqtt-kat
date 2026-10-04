@@ -2,6 +2,28 @@
 
 In this file will go my thoughts and ramblings about this project and what I have done and what I might do next.
 
+## 20261004
+
+### A record that never landed
+
+The receivers now trust the cluster's record of where a client is, so a
+record that is wrong costs more than it did. Before, a broker delivered
+to whoever it had, and a wrong record meant a second copy; now it means
+none. Under load an append to Rama can time out, and a session event that
+did was logged and forgotten. A load run lost the connect of a client
+that way: the record kept it away for the rest of the run, every broker
+left it out of every copy, and it lost 33,000 messages. Its subscribes
+were lost with it, since they name a connection the record did not have.
+
+So a connect, subscribe or unsubscribe that does not land is appended
+again, for as long as the connection it names is still the one here and
+still holds (or has given up) the subscription. A connect that lands late
+brings the connection's subscriptions after it, or, if the connection has
+ended by then, its disconnect. A disconnect or a redirect, which the
+broker cannot check against anything, is tried a few times. Each is safe
+to run twice: the topology already counts a connect it has once, and
+ignores the rest when they name a connection that is not on record.
+
 ## 20261003
 
 ### Whom a copy was meant for

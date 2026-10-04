@@ -360,6 +360,11 @@
   [client-id]
   (get @*live-clients* client-id))
 
+(defn live-client
+  "The client map of the connection currently holding `client-id`, if any."
+  [client-id]
+  (some->> (live-connection client-id) (get @*clients*)))
+
 (defn live-key?
   "Whether `key` is the connection holding its client right now, and so one
    to deliver to. A connection being torn down is not, once remove-client!
