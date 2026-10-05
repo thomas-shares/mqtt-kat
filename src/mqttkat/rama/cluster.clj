@@ -632,22 +632,41 @@
    :failures (java.util.concurrent.atomic.AtomicLong. 0)
    :warned   (java.util.concurrent.atomic.AtomicLong. 0)})
 
+(def queue-record-max
+  "The most messages, or keys taken off, one queue record carries. A lane
+   gathers whatever its client was asked for while its last batch was out,
+   and a client the broker hands thousands of messages at once while Rama
+   is slow gathers thousands more. Unbounded, one record grew past what
+   the sessions topology gets through in its five seconds: Rama timed it
+   out and tried it again, and again, and every client whose events share
+   its partition waited behind it. A load run stopped acknowledging
+   publishes 47 seconds in, and never started again."
+  256)
+
 (defn- queue-records
   "`ops` for `client-id` — [:enqueue key message if-kept?] and [:dequeue
    keys], in the order they were asked for — as the records to append:
-   neighbours of a kind together."
+   neighbours of a kind together, up to queue-record-max in one."
   [client-id ops]
-  (let [now (System/currentTimeMillis)]
+  (let [now  (System/currentTimeMillis)
+        max  (long queue-record-max)
+        room (fn [prev k] (< (count (get prev k)) max))]
     (reduce (fn [acc [kind a b c]]
               (let [prev (peek acc)]
                 (case kind
-                  :enqueue (if (and (= :enqueue (:event prev)) (= (boolean c) (boolean (:if-kept? prev))))
+                  :enqueue (if (and (= :enqueue (:event prev)) (= (boolean c) (boolean (:if-kept? prev)))
+                                    (room prev :messages))
                              (conj (pop acc) (update prev :messages conj [a b]))
                              (conj acc (cond-> {:event :enqueue :client-id client-id :messages [[a b]] :at now}
                                          c (assoc :if-kept? true))))
-                  :dequeue (if (= :dequeue (:event prev))
-                             (conj (pop acc) (update prev :keys into a))
-                             (conj acc {:event :dequeue :client-id client-id :keys (vec a) :at now})))))
+                  :dequeue (reduce (fn [acc part]
+                                     (let [prev (peek acc)]
+                                       (if (and (= :dequeue (:event prev))
+                                                (<= (+ (count (:keys prev)) (count part)) max))
+                                         (conj (pop acc) (update prev :keys into part))
+                                         (conj acc {:event :dequeue :client-id client-id :keys (vec part) :at now}))))
+                                   acc
+                                   (partition-all max a)))))
             [] ops)))
 
 (defn- run-waiting!

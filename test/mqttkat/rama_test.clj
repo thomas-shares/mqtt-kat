@@ -2168,3 +2168,22 @@
         (is (tu/wait-until #(= 4 (count @calls))))
         (Thread/sleep 200)
         (is (= 4 (count @calls)))))))
+
+(deftest a-queue-record-carries-at-most-so-many
+  ;; One record of thousands of messages took the sessions topology past its
+  ;; five seconds: Rama tried it again for ever, and a load run's
+  ;; acknowledgements stopped behind it.
+  (with-redefs [cluster/queue-record-max 3]
+    (let [records #'cluster/queue-records
+          ops     (concat (for [i (range 7)] [:enqueue (str "k" i) "m" false])
+                          [[:dequeue ["a" "b"]] [:dequeue ["c" "d" "e" "f"]]]
+                          [[:enqueue "k7" "m" true]])
+          rs      (records "x" ops)]
+      (is (= [:enqueue :enqueue :enqueue :dequeue :dequeue :dequeue :enqueue] (map :event rs)))
+      (is (= [3 3 1] (map (comp count :messages) (take 3 rs))))
+      (is (= [["a" "b"] ["c" "d" "e"] ["f"]]
+             (map :keys (filter #(= :dequeue (:event %)) rs)))
+          "in order, split where one would hold more")
+      (is (= (map #(str "k" %) (range 8)) (mapcat #(map first (:messages %)) (filter :messages rs)))
+          "every message, in order")
+      (is (:if-kept? (last rs))))))

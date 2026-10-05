@@ -4,6 +4,22 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261005
 
+### One record too big for Rama's five seconds
+
+The run after that stopped acknowledging publishes 47 seconds in and
+never started again. The Rama worker said why: the sessions topology timed
+out on one event of its session-events depot, at 15:31:14, and from then
+on its task threads took too long on everything. A queue write is one
+append per run of a client's requests, gathered while its last batch was
+out, so the slower Rama gets the bigger the next one. One grew past what
+the topology does in five seconds, a message at a time, and Rama timed it
+out and tried it again, as a stream topology does, and so did the broker,
+the whole batch, again. Everything sharing its partition waited behind
+it, publishers' PUBACKs among them.
+
+A queue record now carries at most 256 messages or keys taken off; a
+longer run of them goes as several, in order.
+
 ### Trying again without adding to the backlog
 
 Making a session event land (20261004) sent each retry past the bound on
