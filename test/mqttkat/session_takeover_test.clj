@@ -235,3 +235,55 @@
         (reset! h/session-source nil)
         (swap! @#'h/catching-up dissoc id)
         (swap! h/*clients* dissoc id)))))
+
+(deftest no-identifiers-until-the-hand-over-lands
+  ;; Not portable: another broker, stood in for. Resumed without the old
+  ;; broker's hand-over, the session gave out identifiers the client still
+  ;; held messages under there, and lost a QoS 2 message to one of them.
+  (let [id     (tu/client-id "gated")
+        moved? (atom false)
+        record (fn [] (if @moved?
+                        {:clean-session? false :connected? false :broker-id "there" :connect-id "old"}
+                        {:clean-session? false :connected? true :broker-id "there" :connect-id "old"}))
+        msg    {:topic "gate/t" :payload (.getBytes "m") :qos 1}]
+    (reset! h/session-source
+            {:my-broker-id "here"
+             :resume       (fn [_] {:session (record) :subscriptions {} :queued []})
+             :enqueue!     (fn [_ _ _] nil)
+             :dequeue!     (fn [_ _] nil)
+             :takeover!    (fn [_ _ _] nil)})
+    (try
+      (with-redefs [h/hand-over-wait-millis 200]
+        (is (true? (h/adopt-session! id)) "resumed once the wait ran out"))
+      (is (nil? (h/acquire-packet-identifier! id msg)) "and gives out no identifier while it is still there")
+      (Thread/sleep 400)
+      (is (nil? (h/acquire-packet-identifier! id msg)) "nor a moment later")
+      (reset! moved? true)
+      (is (tu/wait-until #(some? (h/acquire-packet-identifier! id msg)))
+          "once its record moves on, it does")
+      (finally
+        (reset! h/session-source nil)
+        (swap! @#'h/catching-up dissoc id)
+        (swap! h/*clients* dissoc id)))))
+
+(deftest identifiers-are-given-out-again-if-the-hand-over-never-lands
+  (let [id  (tu/client-id "gated-for-good")
+        msg {:topic "gate/t" :payload (.getBytes "m") :qos 1}]
+    (reset! h/session-source
+            {:my-broker-id "here"
+             :resume       (fn [_] {:session {:clean-session? false :connected? true
+                                              :broker-id "there" :connect-id "old"}
+                                    :subscriptions {} :queued []})
+             :enqueue!     (fn [_ _ _] nil)
+             :dequeue!     (fn [_ _] nil)
+             :takeover!    (fn [_ _ _] nil)})
+    (try
+      (with-redefs [h/hand-over-wait-millis  200
+                    h/identifier-gate-millis 500]
+        (is (true? (h/adopt-session! id)))
+        (is (nil? (h/acquire-packet-identifier! id msg)))
+        (is (tu/wait-until #(some? (h/acquire-packet-identifier! id msg)))))
+      (finally
+        (reset! h/session-source nil)
+        (swap! @#'h/catching-up dissoc id)
+        (swap! h/*clients* dissoc id)))))

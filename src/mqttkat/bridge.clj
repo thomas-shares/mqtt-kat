@@ -445,37 +445,49 @@
    with the PUBREL the QoS 2 handshake needs, and the slot stays taken until
    the PUBCOMP.
 
-   `inflight` is packet identifier -> {:on-lost :hold}, for the messages the
-   peer has not taken yet. A PUBACK, or a PUBREC accepting the message, says
-   it has: from then on it is the peer's to deliver, and its :hold, if it
-   has one, waits in `awaiting` until the peer says its subscribers have it
-   too. A PUBREC refusing it says it will not, and the message is lost here
-   after all."
-  [holder window ^ConcurrentHashMap inflight peer-id
-   {:keys [packet-type packet-identifier reason-code properties] :as msg}]
+   `inflight` is packet identifier -> {:on-lost :hold :packet}, for the
+   messages written and not yet done with. A PUBACK, or a PUBREC accepting
+   the message, says the peer has it: from then on it is the peer's to
+   deliver, and its :hold, if it has one, waits in `awaiting` until the peer
+   says its subscribers have it too. A QoS 2 message stays in `inflight`,
+   :released?, until its PUBCOMP, so that a link that comes back to the
+   peer's session sends its PUBREL again (see resume-inflight!). A PUBREC
+   refusing it says the peer will not, and the message is lost here after
+   all."
+  [holder window present ^ConcurrentHashMap inflight peer-id
+   {:keys [packet-type packet-identifier reason-code properties session-present?] :as msg}]
   (let [release! #(when (realized? window) (.release ^Semaphore @window))
         code     (bit-and 0xFF (long (or reason-code 0)))
         settle!  #(when packet-identifier (.remove inflight (int packet-identifier)))]
     (case packet-type
       :CONNACK (if (>= code 0x80)
                  (log/warn "bridge to" peer-id "refused:" code)
-                 (do (log/info "bridge to" peer-id "up")
+                 (do (log/info "bridge to" peer-id "up" (if session-present? "- its session kept" ""))
+                     (reset! present (boolean session-present?))
                      ;; §3.2.2.3.3: absent means 65,535.
                      (deliver window (Semaphore. (int (or (:receive-maximum properties) 65535))))))
       :PUBACK  (do (await! peer-id (:hold (settle!))) (release!))
-      :PUBCOMP (release!)
+      :PUBCOMP (do (settle!) (release!))
       :PUBREC  (if (>= code 0x80)
                  (let [entry (settle!)]
                    (release!)
                    (lost! peer-id (:on-lost entry) :refused))
                  (when-let [c @holder]
-                   (await! peer-id (:hold (settle!)))
+                   (when-let [entry (when packet-identifier (.get inflight (int packet-identifier)))]
+                     (when-not (:released? entry)
+                       (.put inflight (int packet-identifier) (assoc entry :released? true))
+                       (await! peer-id (:hold entry))))
                    (try
                      (client/send-message c {:packet-type :PUBREL :packet-identifier packet-identifier})
                      (catch IOException e
                        (log/debug "bridge to" peer-id "closed before its PUBREL went:" (.getMessage e))))))
       :DISCONNECT (log/info "bridge to" peer-id "closed by the other end:" (:reason-code msg))
       nil)))
+
+(def session-expiry-secs
+  "How long the peer keeps a bridge's session once its connection has gone
+   (§3.1.2.11.2): long enough for the link to come back to it."
+  300)
 
 (defn- open!
   "Connect to `peer` and introduce this broker, and wait for its CONNACK:
@@ -484,23 +496,31 @@
    dropped by the peer for exceeding it — with everything it had in flight.
    That happened at a few thousand QoS 2 messages a second, with the peer's
    window at 128. On the link's own thread, so the wait holds up nothing
-   but the link."
-  [my-id peer-id {:keys [host port]} inflight]
+   but the link.
+
+   A session the peer keeps for session-expiry-secs, started afresh unless
+   `resume?`: a link that comes back to it after its connection dropped
+   finishes what it had in flight (resume-inflight!). The first link of
+   this run starts a new one, since nothing an earlier run left in it is
+   this run's."
+  [my-id peer-id {:keys [host port]} inflight resume?]
   (let [holder  (atom nil)
         window  (promise)
-        handler (MqttHandler. ^clojure.lang.IFn (fn [msg _] (on-packet holder window inflight peer-id msg)) 1)
+        present (atom false)
+        handler (MqttHandler. ^clojure.lang.IFn (fn [msg _] (on-packet holder window present inflight peer-id msg)) 1)
         c       (client/client host (int port) handler)]
     (reset! holder c)
     (client/send-message c {:packet-type      :CONNECT
                             :protocol-name    "MQTT"
                             :protocol-version 5
                             :keep-alive       0
-                            :clean-session?   true
-                            :client-id        (str client-id-prefix my-id)})
+                            :clean-session?   (not resume?)
+                            :client-id        (str client-id-prefix my-id)
+                            :properties       {:session-expiry-interval session-expiry-secs}})
     (if-let [w (try (deref window connack-wait-ms nil)
                     ;; Dropped while waiting: as good as no answer.
                     (catch InterruptedException _ nil))]
-      {:client c :window w}
+      {:client c :window w :session-present? @present}
       (do (try (client/close c) (catch Exception _ nil))
           (throw (java.net.SocketTimeoutException.
                   (str "no CONNACK from " peer-id " within " connack-wait-ms " ms")))))))
@@ -517,10 +537,10 @@
   "open!, again while the peer takes the connection but sends no CONNACK
    in time, for connack-patience-ms and while the link runs. A peer that
    refuses the connection outright is not waited for."
-  [my-id peer-id peer inflight ^AtomicBoolean running]
+  [my-id peer-id peer inflight resume? ^AtomicBoolean running]
   (let [deadline (+ (System/currentTimeMillis) (long connack-patience-ms))]
     (loop []
-      (let [o (try (open! my-id peer-id peer inflight)
+      (let [o (try (open! my-id peer-id peer inflight resume?)
                    (catch java.net.SocketTimeoutException e
                      (if (and (.get running) (< (System/currentTimeMillis) deadline))
                        (do (log/info "bridge to" peer-id "-" (.getMessage e) "; asking again")
@@ -594,8 +614,10 @@
                   (throw (IOException. (str "nothing acknowledged for " waited " ms")))))))))
     ;; Recorded before the write, so an acknowledgement quicker than the
     ;; line after it still finds it.
-    (when (and id (or on-lost hold))
-      (.put inflight (int id) {:on-lost on-lost :hold hold}))
+    ;; With the packet, for a link that comes back to the peer's session to
+    ;; send again.
+    (when id
+      (.put inflight (int id) {:on-lost on-lost :hold hold :packet (assoc packet :packet-identifier id)}))
     (try
       (client/send-message client (cond-> packet id (assoc :packet-identifier id)))
       (catch IOException e
@@ -618,20 +640,82 @@
                          (if replacement (assoc m peer-id replacement) (dissoc m peer-id))
                          m))))
 
+(declare link!)
+
+(defonce ^:private carried
+  ;; peer-id -> {:queue :inflight :ids} of a link whose connection dropped
+  ;; while its peer was still listed: what the next link to it takes up, on
+  ;; the session the peer kept, rather than handing it all back.
+  (ConcurrentHashMap.))
+
+(def reconnect-after-ms
+  "How long after its connection drops a link to a peer still listed
+   connects again."
+  1000)
+
+(defn- hand-back!
+  "Hand back what `queued` and `inflight` hold that the peer has not taken,
+   and count it. A QoS 2 message whose PUBREC came is the peer's, and its
+   hold waits in `awaiting`."
+  [peer-id queued ^ConcurrentHashMap inflight]
+  (let [unacked (vec (remove :released? (.values inflight)))]
+    (.clear inflight)
+    (when (or (seq queued) (seq unacked))
+      (log/warn "bridge to" peer-id "gone with" (count queued) "messages queued and"
+                (count unacked) "unacknowledged; handing them back")
+      (.add ^LongAdder MqttStat/droppedMessages (+ (count queued) (count unacked))))
+    (doseq [{:keys [on-lost]} queued] (lost! peer-id on-lost :link-gone-queued))
+    (doseq [{:keys [on-lost]} unacked] (lost! peer-id on-lost :link-gone-unacknowledged))))
+
+(defn- resume-inflight!
+  "A link that took up a dropped one's state, now connected: what was in
+   flight goes again, in order, a QoS 2 message the peer had taken as its
+   PUBREL and the rest as DUP publishes (§4.4) — when the peer kept its
+   session. When it did not, it has none of them, and they are handed back
+   as if the link had gone, since the peer has lost them: a QoS 2 message
+   it took is published on its PUBREL (§4.3.3), which it never had.
+
+   Handed back on every drop, as they once were, the ones it already had
+   went out a second time from the cluster's queue, and the QoS 2 ones it
+   had taken and not yet released went nowhere."
+  [peer-id c ^Semaphore window session-present? ^ConcurrentHashMap inflight]
+  (when-not (.isEmpty inflight)
+    (if-not session-present?
+      (do (log/warn "bridge to" peer-id "came back to no session;" (.size inflight)
+                    "messages in flight are handed back")
+          (let [all (vec (.values inflight))]
+            (.clear inflight)
+            (doseq [{:keys [on-lost]} all] (lost! peer-id on-lost :session-lost))))
+      (do (log/info "bridge to" peer-id "came back to its session; sending" (.size inflight)
+                    "messages in flight again")
+          (doseq [id (sort (keys inflight))
+                  :let [{:keys [packet released?]} (.get inflight id)]]
+            ;; Each takes its slot again, as it did the first time.
+            (.tryAcquire window)
+            (client/send-message c (if released?
+                                     {:packet-type :PUBREL :packet-identifier id}
+                                     (assoc packet :duplicate? true))))))))
+
 (defn- run-link!
   "The link's thread: connect, then write whatever is queued, in order,
    until the link is dropped or the peer is lost. Then every message the
    peer had not taken — still queued, or written and not acknowledged — is
    handed back through its on-lost and counted, and every publisher the
-   link held is let go."
+   link held is let go.
+
+   Unless the connection dropped while the peer is still listed: then the
+   queue and what is in flight are kept for the next link, which connects
+   again after reconnect-after-ms to the session the peer kept and goes on
+   where this one left off."
   [my-id peer-id peer {:keys [^LinkedBlockingDeque queue ^AtomicBoolean running client
-                              ^ConcurrentHashMap inflight] :as link}]
+                              ^ConcurrentHashMap inflight ids resume?] :as link}]
   (let [opened  (atom nil)
         lost-at (atom nil)]
     (try
-      (let [{c :client window :window :as o} (open-patiently! my-id peer-id peer inflight running)]
+      (let [{c :client window :window :as o} (open-patiently! my-id peer-id peer inflight resume? running)]
         (reset! opened o)
         (deliver client c)
+        (resume-inflight! peer-id c window (:session-present? o) inflight)
         (loop [swept (System/currentTimeMillis)]
           (when (.get running)
             ;; A peer that has gone shows here, not only on the next write:
@@ -663,42 +747,55 @@
       (catch InterruptedException _ nil)
       (finally
         (.set running false)
-        (forget-link! peer-id link nil)
-        (let [queued  (java.util.ArrayList.)
-              _       (.drainTo queue queued)
-              unacked (vec (.values inflight))]
-          (.clear inflight)
-          (when (or (pos? (.size queued)) (seq unacked))
-            (log/warn "bridge to" peer-id "gone with" (.size queued) "messages queued and"
-                      (count unacked) "unacknowledged; handing them back")
-            (.add ^LongAdder MqttStat/droppedMessages (+ (.size queued) (count unacked))))
-          (doseq [{:keys [on-lost]} queued] (lost! peer-id on-lost :link-gone-queued))
-          (doseq [{:keys [on-lost]} unacked] (lost! peer-id on-lost :link-gone-unacknowledged)))
-        (release-holds! link)
-        (when-let [o @opened]
-          (try (client/close (:client o)) (catch Exception _ nil)))
-        ;; The peer went on its own: what it had taken and not yet said its
-        ;; subscribers have is given up on, once it has had a moment to say
-        ;; so about what was on its way. Dropped by drop! instead, it was
-        ;; given up on there.
-        (when-let [at @lost-at]
-          (try
-            (Thread/sleep (long awaiting-grace-ms))
-            (catch InterruptedException _ nil))
-          (give-up-awaiting! peer-id at))))))
+        (let [carry? (and @lost-at
+                          (when-let [alive? @peer-alive?] (alive? peer-id)))]
+          (if carry?
+            ;; Kept for the next link before this one is forgotten, so that
+            ;; one started meanwhile takes them up.
+            (.put ^ConcurrentHashMap carried peer-id {:queue queue :inflight inflight :ids ids})
+            (let [queued (java.util.ArrayList.)]
+              (.drainTo queue queued)
+              (hand-back! peer-id queued inflight)))
+          (forget-link! peer-id link nil)
+          (release-holds! link)
+          (when-let [o @opened]
+            (try (client/close (:client o)) (catch Exception _ nil)))
+          (cond
+            carry?
+            (do (log/info "bridge to" peer-id "is still listed; connecting again in" reconnect-after-ms "ms")
+                (future
+                  (try
+                    (Thread/sleep (long reconnect-after-ms))
+                    (when (.containsKey ^ConcurrentHashMap carried peer-id)
+                      (link! my-id peer-id peer))
+                    (catch Throwable t
+                      (log/warn t "bridge to" peer-id "could not connect again")))))
+
+            ;; The peer went on its own: what it had taken and not yet said
+            ;; its subscribers have is given up on, once it has had a moment
+            ;; to say so about what was on its way. Dropped by drop! instead,
+            ;; it was given up on there. And a link that took up a dropped
+            ;; one's and could not reach the peer again gives up on it too.
+            (or @lost-at (and resume? (nil? @opened)))
+            (do (try
+                  (Thread/sleep (long awaiting-grace-ms))
+                  (catch InterruptedException _ nil))
+                (give-up-awaiting! peer-id (or @lost-at (System/currentTimeMillis))))))))))
 
 (defn- start-link!
   "A link to `peer-id`, its thread started. `:client` is delivered once the
    peer has accepted the connection."
   [my-id peer-id peer]
-  (let [link {:peer-id  peer-id
-              :queue    (LinkedBlockingDeque.)
-              :inflight (ConcurrentHashMap.)
-              :held    (ConcurrentHashMap/newKeySet)
-              :running (AtomicBoolean. true)
-              :ids     (AtomicInteger. 0)
-              :client  (promise)}
-        t    (doto (Thread. ^Runnable (fn [] (run-link! my-id peer-id peer link))
+  (let [taken (.remove ^ConcurrentHashMap carried peer-id)
+        link  {:peer-id  peer-id
+               :queue    (or (:queue taken) (LinkedBlockingDeque.))
+               :inflight (or (:inflight taken) (ConcurrentHashMap.))
+               :held     (ConcurrentHashMap/newKeySet)
+               :running  (AtomicBoolean. true)
+               :ids      (or (:ids taken) (AtomicInteger. 0))
+               :resume?  (boolean taken)
+               :client   (promise)}
+        t     (doto (Thread. ^Runnable (fn [] (run-link! my-id peer-id peer link))
                             (str "bridge-" peer-id))
                (.setDaemon true))]
     (assoc link :thread t)))
@@ -728,8 +825,11 @@
               (and down-until (< (System/currentTimeMillis) (long down-until))) nil
               :else
               (let [link (start-link! my-id peer-id peer)]
+                ;; Ahead of whatever a link it takes up had queued: the
+                ;; changes there are older than the snapshot, and the peer
+                ;; ignores them (intent/view-apply).
                 (when-let [snapshot @view-source]
-                  (.put ^LinkedBlockingDeque (:queue link) (view-item (snapshot))))
+                  (.putFirst ^LinkedBlockingDeque (:queue link) (view-item (snapshot))))
                 (swap! connections assoc peer-id link)
                 (.start ^Thread (:thread link))
                 link))))))))
@@ -769,6 +869,10 @@
    the registry has dropped is not going to deliver it."
   [peer-id]
   (give-up-awaiting! peer-id Long/MAX_VALUE)
+  (when-let [{:keys [^LinkedBlockingDeque queue inflight]} (.remove ^ConcurrentHashMap carried peer-id)]
+    (let [queued (java.util.ArrayList.)]
+      (.drainTo queue queued)
+      (hand-back! peer-id queued inflight)))
   (let [link (get @connections peer-id)]
     (swap! connections dissoc peer-id)
     (when-let [^AtomicBoolean running (:running link)]
@@ -783,7 +887,7 @@
    they are alive, and queuing it too would deliver it twice."
   []
   (.clear ^ConcurrentHashMap awaiting)
-  (doseq [peer-id (keys @connections)]
+  (doseq [peer-id (distinct (concat (keys @connections) (keys carried)))]
     (drop! peer-id)))
 
 (defn send-to!

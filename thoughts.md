@@ -4,6 +4,47 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261005
 
+### What a moving session was in the middle of, kept
+
+Stage 3, the last of the three. Four things a session or a link was in
+the middle of when it moved or dropped, each lost before.
+
+A bridge link that dropped handed back everything in flight, and the
+sender queued it on the cluster for the clients it was for. What the
+peer already had went out twice, and a QoS 2 message it had taken and
+not yet been released went nowhere: this broker publishes on the PUBREL
+(§4.3.3), and the PUBREL never came. A link now keeps an MQTT session on
+the peer, and when its connection drops while the peer is still listed,
+the next link takes up its queue and what it had in flight, connects
+again to that session, and sends the PUBRELs and the unacknowledged
+publishes again, as DUP. A peer that comes back without the session has
+none of them, and they are handed back as before. The first link of a
+run starts a fresh session. On the peer's side, a PUBREL publishes from
+the connection it came on: from the one the PUBLISH came on, gone after a
+reconnect, a bridged message was taken for a client's and forwarded on
+to every other broker.
+
+A takeover went down the bridge behind every publish queued there, and
+with the bridges a minute behind, the new broker gave up waiting for the
+old one's hand-over. It now goes at the front of the queue. What it
+overtakes reaches the old broker after the client has left, and is
+queued there for it on the cluster, as for any client the sender had
+there and that did not get it live.
+
+A session the new broker resumed without its hand-over, after that wait
+ran out, gave out packet identifiers at once. The hand-over carries the
+identifiers the client still holds messages under on the old broker, and
+a new QoS 2 message under one the client held for an old one was taken
+for that one. Now such a session gives out none until the old broker's
+record moves on, and the queue has been read once more so the hand-over
+takes its identifiers first; or until the old broker leaves the cluster,
+or a minute has gone by. What would have gone out waits on the pending
+queue.
+
+And a PUBREL from a hand-over whose identifier was in use here was taken
+off the cluster's queue at the resume and never sent. It now stays
+there, and a later read sends it once the identifier is free.
+
 ### Brokers forgotten by a topology that was behind
 
 The next run's Rama page said "Pushed by Rama 17:25:59" at 18:24, and a
