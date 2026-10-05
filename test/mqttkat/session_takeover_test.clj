@@ -204,3 +204,34 @@
           ;; Not bound like the rest: if one was scheduled it would fire on
           ;; the shared broker's state, so it goes either way.
           (finally (h/cancel-session-expiry! id)))))))
+
+(deftest a-handed-over-release-whose-identifier-is-in-use-stays-queued
+  ;; Not portable: a session resumed from the cluster, stood in for here. A
+  ;; PUBREL a hand-over left on the queue under an identifier already in
+  ;; flight here was taken off the queue and never sent, and the client went
+  ;; on holding the identifier for it.
+  (let [id       (tu/client-id "release-in-use")
+        dequeued (atom [])
+        queued   [["k-msg" {:topic "rel/t" :payload (.getBytes "m") :qos 2 :packet-identifier 7}]
+                  ["k-rel" {:topic "rel/t" :qos 2 :packet-identifier 7 :released? true}]]]
+    (reset! h/session-source
+            {:my-broker-id "here"
+             :resume       (fn [_] {:session       {:clean-session? false :connected? false}
+                                    :subscriptions {}
+                                    :queued        queued})
+             :enqueue!     (fn [_ _ _] nil)
+             :dequeue!     (fn [_ ks] (swap! dequeued into ks))
+             :takeover!    (fn [_ _ _] nil)})
+    (try
+      (is (true? (h/adopt-session! id)))
+      (is (= #{7} (set (keys (:inflight @(#'h/existing-outbound id)))))
+          "the message is in flight under its identifier")
+      (is (not (::h/released? (get-in @(#'h/existing-outbound id) [:inflight 7])))
+          "the release did not replace it")
+      (is (= [] @dequeued) "and is not taken off the cluster's queue")
+      (is (= #{"k-msg"} (set (keys (get-in @@#'h/catching-up [id :had]))))
+          "nor counted as had, so a later read finds it")
+      (finally
+        (reset! h/session-source nil)
+        (swap! @#'h/catching-up dissoc id)
+        (swap! h/*clients* dissoc id)))))

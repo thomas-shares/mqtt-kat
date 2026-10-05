@@ -1338,7 +1338,8 @@
   "Put a message from the cluster's queue on `client-id`'s outbound state: in
    flight under the identifier it was sent with, when hand-over-unacknowledged!
    recorded one and it is free here, so the resume's redelivery sends it again
-   as the same message (§4.4); otherwise on the queue, for a new identifier."
+   as the same message (§4.4); otherwise on the queue, for a new identifier.
+   False when it stays on the cluster's queue for a later read instead."
   [client-id msg]
   (if (:released? msg)
     (restore-release! client-id msg)
@@ -1355,14 +1356,17 @@
                                            state
                                            (assoc-in state [:inflight identifier] msg))))]
                        (not (identical? before after))))]
-    (when-not placed?
-      (queue-pending! client-id msg))))
+    (or placed? (queue-pending! client-id msg))))
 
 (defn- restore-release!
   "A PUBREL a hand-over left on the cluster's queue: in flight here under its
    identifier, released, so that the resume sends the PUBREL (see
-   redeliver-inflight!) and the PUBCOMP takes it off the queue. Taken off at
-   once when the identifier is in use here already: that exchange is over."
+   redeliver-inflight!) and the PUBCOMP takes it off the queue. False, and
+   left on the cluster's queue, when the identifier is in use here already:
+   a later read sends it once the identifier is free (resend-handed-over!).
+   Taken off instead, as it once was, the client went on holding the
+   identifier for a PUBREL that never came, and took the next message sent
+   under it for one it had."
   [client-id {:keys [packet-identifier] :as msg}]
   (let [k (::cluster-key msg)
         [before after]
@@ -1372,10 +1376,7 @@
                         state
                         (assoc-in state [:inflight packet-identifier]
                                   {:topic (:topic msg) :qos 2 ::released? true ::release-key k}))))]
-    (when (identical? before after)
-      (when-let [{:keys [dequeue!]} @session-source]
-        (when k (dequeue! client-id [k]))))
-    true))
+    (not (identical? before after))))
 
 (def catch-up-reads-millis
   "When, after a persistent session resumes here, its queue on the cluster
@@ -1526,11 +1527,15 @@
                                             :subscribed-topics entries})
           (log/info "session" client-id "taken over from the cluster:"
                     (count entries) "subscriptions," (count queued) "queued"))
-        (swap! catching-up assoc client-id {:had (zipmap (map first queued) (repeat nil))})
-        (doseq [[k msg] queued]
-          (restore-queued! client-id (assoc msg
-                                            ::queued-at (:queued-at msg)
-                                            ::cluster-key k))))
+        ;; Had: what was restored here. What stays on the cluster's queue
+        ;; is left for the reads that follow.
+        (let [restored (into [] (keep (fn [[k msg]]
+                                        (when (restore-queued! client-id (assoc msg
+                                                                                ::queued-at (:queued-at msg)
+                                                                                ::cluster-key k))
+                                          k)))
+                             queued)]
+          (swap! catching-up assoc client-id {:had (zipmap restored (repeat nil))})))
       true)))
 
 (declare deliver-queued!)
