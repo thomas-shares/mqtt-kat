@@ -2982,6 +2982,25 @@
                    (assoc views key view)
                    (dissoc views key))))))))
 
+(defonce ^:private withheld-live
+  ;; client-id -> how many copies were withheld from it while it was live
+  ;; here: see note-withheld-live!.
+  (atom {}))
+
+(defn- note-withheld-live!
+  "Log, the first time and at every power of ten after, a copy withheld
+   from `client-id` while it is connected here: its sender had it somewhere
+   else or away, and some other broker is to queue it. A load run lost
+   nearly everything thirty such clients were sent from the other brokers
+   while they sat on one broker the whole time; this says whether the
+   copies reached their broker and were left out here."
+  [client-id sender v state not-served?]
+  (let [n (long (get (swap! withheld-live update client-id (fnil inc 0)) client-id))]
+    (when (contains? #{1 10 100 1000 10000 100000} n)
+      (log/warn "withheld" n "copies from" client-id "while it is connected here; the last from"
+                sender "at version" v "- its view had" (pr-str state)
+                (if not-served? "and said it served the client itself" "")))))
+
 (defn- judged
   "What judging bridged copy `msg` on `topic` by its sender's view takes,
    or nil when it cannot be: no version on it, no view of its sender here
@@ -3010,13 +3029,18 @@
                                        m
                                        (update m (:client-id c) (fnil max 0) (long (or qos 0))))))
                                  {}
-                                 matches)]
+                                 matches)
+              withheld   (into #{}
+                               (filter #(intent/withhold? view me % t v not-served))
+                               (keys local))]
+          (doseq [c withheld]
+            (when (live-connection c)
+              (note-withheld-live! c (:client-id (get clients client-key)) v
+                                   (intent/state-at view c v) (contains? not-served c))))
           {:view       view :me me :v v :not-served not-served :topic t
            :matches    matches
            :local      local
-           :withheld   (into #{}
-                             (filter #(intent/withhold? view me % t v not-served))
-                             (keys local))})))))
+           :withheld   withheld})))))
 
 (defn- withhold-fn
   "For a judged copy: whether to leave a subscriber out. A kept session
