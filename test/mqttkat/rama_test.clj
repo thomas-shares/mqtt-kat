@@ -876,7 +876,14 @@
                           (is (true? (:snapshot? snapshot)))
                           (is (= {"bridge/#" [2 "peer-x"]} (get-in snapshot [:clients "remote-sub"])))
                           (is (= {"bridge/#" [1 cluster/broker-id]} (get-in snapshot [:clients (:client-id local)])))
-                          (is (every? #(<= (long (:v snapshot)) (long (v-of %))) (publishes)))
+                          ;; The copy that opened the link was planned before
+                          ;; it, and the view can move in between: one that
+                          ;; landed then was at the version before the
+                          ;; snapshot, and CI saw it. The receiver leaves such
+                          ;; a copy unjudged (intent/covers?). Every copy
+                          ;; planned once the link was there is at or after.
+                          (is (<= (long (v-of (first (publishes)))) (long (:v snapshot))))
+                          (is (every? #(<= (long (:v snapshot)) (long (v-of %))) (rest (publishes))))
                           (testing "and a subscription that changes goes down it as a change to the view"
                             (let [before (count (views))]
                               (client/send-message (:client local) (subscribe-msg "view/#" 0 2))
