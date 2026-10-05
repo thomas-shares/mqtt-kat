@@ -276,6 +276,8 @@
         lost-by-session (volatile! {})
         dup-by     (volatile! {})
         lost       (volatile! 0)
+        lost-sent  (volatile! {})
+        lost-span  (volatile! nil)
         add!       (fn [v]
                      (let [n (inc (long (.getOrDefault counts (:kind v) 0)))]
                        (.put counts (:kind v) n)
@@ -303,6 +305,12 @@
           ;; stays: which of the two lost it says much about where.
           (vswap! lost-by-session update (if (:persistent? (get clients client)) :kept :clean) (fnil inc 0))
           (vswap! lost inc)
+          ;; When the lost ones were sent, by the second, and this client's
+          ;; first and last: a loss throughout the run is another bug from one
+          ;; around the final reconnect.
+          (let [s (quot (long (:sent m)) 1000000)]
+            (vswap! lost-sent update s (fnil inc 0))
+            (vswap! lost-span (fn [[lo hi]] [(min (long (or lo s)) s) (max (long (or hi s)) s)])))
           (add! {:kind :lost :client client :msg id :qos required
                  :session (select-keys (get clients client) [:persistent? :mqtt5? :filter :sub-qos])
                  :topic (:topic m) :sent (:sent m) :acked (:acked m)
@@ -368,7 +376,9 @@
      :lost-route @lost-route
      :lost-by-session @lost-by-session
      :duplicate-by @dup-by
-     :lost       @lost}))
+     :lost       @lost
+     :lost-sent  @lost-sent
+     :lost-span  @lost-span}))
 
 (defn check
   "The verdict on a run. `opts`: :subscribe-settle and :clean-grace in
@@ -406,12 +416,15 @@
                                (update :lost-route #(merge-with + % (:lost-route r)))
                                (update :lost-by-session #(merge-with + % (:lost-by-session r)))
                                (update :duplicate-by #(merge-with + % (:duplicate-by r)))
+                               (update :lost-sent #(merge-with + % (:lost-sent r)))
                                (cond-> (pos? (long (:lost r)))
-                                 (assoc-in [:lost-clients client] (:lost r)))))
+                                 (-> (assoc-in [:lost-clients client] (:lost r))
+                                     (assoc-in [:lost-spans client] (:lost-span r))))))
                          {:stats {:required 0 :delivered-required 0 :deliveries 0
                                   :qos1-repeats 0 :optional-delivered 0}
                           :counts {} :lost-by (sorted-map) :lost-route {} :lost-clients {}
-                          :lost-by-session {} :duplicate-by (sorted-map)}
+                          :lost-by-session {} :duplicate-by (sorted-map) :lost-sent {}
+                          :lost-spans {}}
                          (map vector clients per))
         counts   (atom (:counts merged))
         add!     (fn [v]
@@ -443,4 +456,13 @@
      ;; The ten clients that lost the most: the report keeps only the first
      ;; :max-violations of each kind, all of which may be one client's.
      :lost-by-client (into {} (take 10 (sort-by (comp - val) (:lost-clients merged))))
+     ;; {client [first last]}: the seconds into the run the ten clients
+     ;; above sent the first and the last of what they lost.
+     :lost-span  (into {} (for [[c _] (take 10 (sort-by (comp - val) (:lost-clients merged)))]
+                            [c (get-in merged [:lost-spans c])]))
+     ;; {10 n, 20 n, ...}: lost, by the ten seconds into the run they were
+     ;; sent in.
+     :lost-by-sent (into (sorted-map)
+                         (reduce-kv (fn [m s n] (update m (* 10 (quot (long s) 10)) (fnil + 0) n))
+                                    {} (:lost-sent merged)))
      :violations (vec violations)}))

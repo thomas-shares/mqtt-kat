@@ -510,7 +510,7 @@
     (System/exit 2))
   (let [result (run-scenario! (config paths))]
     (pp/pprint (select-keys result [:ok? :drain :stats :counts :lost-by :lost-route :lost-by-session
-                                    :lost-by-client :duplicate-by :clients :report]))
+                                    :lost-by-client :lost-span :lost-by-sent :duplicate-by :clients :report]))
     (doseq [v (take 10 (:violations result))]
       (println " " (pr-str (dissoc v :context))))
     (shutdown-agents)
