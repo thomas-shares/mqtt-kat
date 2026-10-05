@@ -58,6 +58,15 @@
       (is (= {:kept 3} (:lost-by-session r)))
       (is (every? #(= 1 (:sub-broker %)) (:violations r)))))
 
+  (testing "and by when it was sent: ten seconds to a bucket, and each client's first and last"
+    (let [r (run {:sub sub
+                  :publishes {[0 1] (msg 1 12500000 12600000)
+                              [0 2] (msg 1 17000000 17100000)
+                              [0 3] (msg 1 25000000 25100000)}
+                  :deliveries {}})]
+      (is (= {10 2 20 1} (:lost-by-sent r)))
+      (is (= [[12 25]] (vals (:lost-span r))))))
+
   (testing "the lower QoS decides: a QoS 2 publish to a QoS 0 subscription is owed nothing"
     (let [r (run {:sub (assoc sub :qos 0) :publishes {[0 1] (msg 2 500 600)}
                   :deliveries {}})]

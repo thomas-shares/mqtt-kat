@@ -44,6 +44,7 @@
             [mqttkat.bridge :as bridge]
             [mqttkat.events :as events]
             [mqttkat.handlers :as handlers]
+            [mqttkat.intent :as intent]
             [mqttkat.rama.module :as module]
             [mqttkat.retained :as retained]
             [mqttkat.trie :as trie])
@@ -148,6 +149,9 @@
                      here have had something queued since
      :trie           atom, the in-memory copy of every subscription in the
                      cluster; empty until watch!
+     :view           atom, the same trie with its version and the index of
+                     it the other brokers are sent (see mqttkat.intent):
+                     {:trie :v :index}, which a publish is planned from
      :brokers        atom, the in-memory copy of the registry:
                      broker-id -> {:host :port :at}; empty until watch!
      :settings       atom, the cluster's settings: name -> value
@@ -195,6 +199,7 @@
      :append-permits (Semaphore. (int appends-in-flight))
      :queue-writer  (queue-writer)
      :trie          (atom (trie/make-trie))
+     :view          (atom {:trie (trie/make-trie) :v 0 :index {}})
      :brokers       (atom {})
      :settings      (atom {})
      :stats         (atom {})
@@ -417,6 +422,23 @@
                                         "ms - sending this one past the bound")
                               false))))
 
+(defn- append-record!
+  "record!'s append, `permit?` saying whether it holds a permit to give back."
+  [events ^Semaphore append-permits permit? ack-level {:keys [event client-id broker-id] :as record}]
+  (let [^CompletableFuture fut
+        (try
+          (r/foreign-append-async! events record ack-level)
+          (catch Throwable t
+            (when permit? (.release append-permits))
+            (throw t)))]
+    (doto fut
+      (.whenComplete (reify BiConsumer
+                       (accept [_ _ e]
+                         (when permit? (.release append-permits))
+                         (when e
+                           (log/warn e "could not record the" (name event) "of"
+                                     (or client-id broker-id (:topic record))))))))))
+
 (defn record!
   "Append `event` — a map as one of the `->` functions builds — and return
    a future that completes once the session record reflects it.
@@ -426,6 +448,12 @@
    threads, which goes ahead without waiting, nor with `:wait? false` in
    `opts`.
 
+   With `:if-permitted? true` as well, nothing is appended when no permit
+   is free, and this returns nil: for an append that is only being tried
+   again, which can wait for one to come back rather than add to a backlog.
+   `:ack-level`, :ack unless given, is what the future waits for: :ack for
+   the topology to have it, :append-ack for the depot to.
+
    Asynchronous, because this is called on the connection's own thread, and
    a network round trip to Rama is not something a CONNACK or a close should
    wait for: the broker has the session the moment add-client! returns, and
@@ -433,22 +461,11 @@
    client can see. A failure is logged rather than thrown for the same reason
    — the session exists whether or not the record of it made it."
   ([conn record] (record! conn record nil))
-  ([{:keys [events ^Semaphore append-permits]} {:keys [event client-id broker-id] :as record}
-    {:keys [wait?] :or {wait? true}}]
-   (let [permit? (take-permit! append-permits wait?)
-         ^CompletableFuture fut
-         (try
-           (r/foreign-append-async! events record :ack)
-           (catch Throwable t
-             (when permit? (.release append-permits))
-             (throw t)))]
-     (doto fut
-       (.whenComplete (reify BiConsumer
-                        (accept [_ _ e]
-                          (when permit? (.release append-permits))
-                          (when e
-                            (log/warn e "could not record the" (name event) "of"
-                                      (or client-id broker-id (:topic record)))))))))))
+  ([{:keys [events ^Semaphore append-permits]} record
+    {:keys [wait? if-permitted? ack-level] :or {wait? true ack-level :ack}}]
+   (let [permit? (take-permit! append-permits wait?)]
+     (when (or permit? (not if-permitted?))
+       (append-record! events append-permits permit? ack-level record)))))
 
 ;; ── the queues, written in order and until they land ─────────────────────
 
@@ -483,6 +500,133 @@
             (newThread [_ r]
               (doto (Thread. ^Runnable r "rama-queue-retry") (.setDaemon true)))))))
 
+;; ── a session's events, until they land ──────────────────────────────────
+;;
+;; The other brokers judge where a client is by what the cluster's record
+;; of it says, and since mqttkat.intent they trust it: a copy is left out
+;; wherever the view has the client elsewhere. An event that never landed
+;; leaves the record wrong for as long as the connection lasts. A load run
+;; whose appends timed out under load lost the connect of a client, which
+;; the record then had away, and every broker left it out of every copy for
+;; the rest of the run. So a session event that fails is appended again,
+;; for as long as it still says what this broker has. Each is safe to run
+;; twice (see mqttkat.rama.module): a connect the record carries is not
+;; counted again, and the rest name their connection.
+
+(def record-retry-millis
+  "How long a session event that did not land waits to be appended again:
+   the first wait, and the longest it grows to."
+  [200 5000])
+
+(def record-retries
+  "How many times an event this broker cannot check against what it has —
+   a disconnect, a redirect — is appended again before it is given up."
+  30)
+
+(declare ^:dynamic *connection*)
+
+(defn- holds-filter? [client filter]
+  (boolean (some #(= filter (:filter %)) (:subscribed-topics client))))
+
+(defn- still-true?
+  "Whether session event `rec` still says what this broker has: the
+   connection it names is the one holding its client here, with the
+   subscription it made, or without the one it gave up."
+  [{:keys [event client-id connect-id filter]}]
+  (let [c (handlers/live-client client-id)]
+    (and c
+         (= connect-id (:connect-id c))
+         (case event
+           :connect     true
+           :subscribe   (holds-filter? c filter)
+           :unsubscribe (not (holds-filter? c filter))
+           false))))
+
+(declare record-until-landed!)
+
+(defn- restate-subscriptions!
+  "Every subscription the connection holding `client-id` has, appended
+   again under connection `connect-id`: made before its connect landed,
+   they named a connection the record did not have, and changed nothing."
+  [conn client-id connect-id]
+  (when-let [c (handlers/live-client client-id)]
+    (when (= connect-id (:connect-id c))
+      (doseq [e (:subscribed-topics c)]
+        (record-until-landed! conn (->subscribe {:connect-id connect-id :client-id client-id
+                                                 :filter (:filter e) :entry e})
+                              {:wait? false})))))
+
+(defn- superseded?
+  "Whether disconnect or redirect `rec` no longer matters: its client is
+   connected here again on a newer connection, whose connect replaces
+   whatever the record has."
+  [{:keys [event client-id connect-id]}]
+  (and (= :disconnect event)
+       (when-let [c (handlers/live-client client-id)]
+         (not= connect-id (:connect-id c)))))
+
+(defn record-until-landed!
+  "record!, for an event about a client's session, appended again after a
+   failure: a connect, subscribe or unsubscribe while it still says what
+   this broker has (still-true?), a disconnect or redirect up to
+   record-retries times, unless its client is back here on a newer
+   connection. Returns the first attempt's future.
+
+   An attempt again goes only when one of record!'s permits is free, and
+   waits for one otherwise without counting as a try. Sent past the bound,
+   as they were, a run whose Rama fell behind at the end had every broker
+   append each of its clients' disconnects thirty times over, to a Rama
+   that already could not keep up.
+
+   And it is done once the depot has it (:append-ack), not once the
+   topology has processed it. The first attempt's failure is mostly that:
+   a timeout waiting on a topology more than five seconds behind, with the
+   event already in its depot. Waited on at :ack, every attempt again timed
+   out the same way, and a connect or subscribe was appended every five
+   seconds for as long as its connection lasted: a load run's Rama was
+   handed 48,374 connects for some 4,700, and 88,183 subscribes for 1,600,
+   and was still working through them a quarter of an hour later. In the
+   depot, the topology processes it in its turn, after the attempt before
+   it if that got there too: each is safe twice."
+  [conn rec opts]
+  (letfn [(again! [tries delay-ms waited?]
+            (let [next-delay (min (* 2 (long delay-ms)) (long (second record-retry-millis)))]
+              (.schedule ^java.util.concurrent.ScheduledExecutorService @retry-timer
+                         ^Runnable #(.execute ^java.util.concurrent.Executor @queue-executor
+                                              ^Runnable (fn [] (retry tries next-delay waited?)))
+                         (long delay-ms) TimeUnit/MILLISECONDS)))
+          (wanted? [tries]
+            (and (identical? conn @*connection*)
+                 (if (#{:disconnect :redirected} (:event rec))
+                   (and (< (long tries) (long record-retries)) (not (superseded? rec)))
+                   (still-true? rec))))
+          ;; Asked again only after waiting for a permit: the failure
+          ;; that scheduled it asked already.
+          (retry [tries delay-ms waited?]
+            (when (or (not waited?) (wanted? tries))
+              (if-let [f (record! conn rec {:wait? false :if-permitted? true :ack-level :append-ack})]
+                (follow f (inc (long tries)) delay-ms)
+                ;; No permit: Rama is behind. Not a try.
+                (again! tries delay-ms true))))
+          (follow [^CompletableFuture f tries delay-ms]
+            (.whenComplete
+             f (reify BiConsumer
+                 (accept [_ _ e]
+                   (cond
+                     (and e (wanted? tries))
+                     (again! tries delay-ms false)
+
+                     ;; Landed late: what its connection subscribed to in
+                     ;; the meantime landed before it, and counted for
+                     ;; nothing; and if the connection has ended since,
+                     ;; its disconnect did too.
+                     (and (nil? e) (pos? (long tries)) (= :connect (:event rec)))
+                     (if (still-true? rec)
+                       (restate-subscriptions! conn (:client-id rec) (:connect-id rec))
+                       (record-until-landed! conn (->disconnect rec) {:wait? false}))))))
+            f)]
+    (follow (record! conn rec opts) 0 (first record-retry-millis))))
+
 (defn queue-writer
   "What `enqueue!` and `dequeue!` write through: one lane per client, which
    has one batch on its way to Rama at a time. What a client's queue is
@@ -502,22 +646,41 @@
    :failures (java.util.concurrent.atomic.AtomicLong. 0)
    :warned   (java.util.concurrent.atomic.AtomicLong. 0)})
 
+(def queue-record-max
+  "The most messages, or keys taken off, one queue record carries. A lane
+   gathers whatever its client was asked for while its last batch was out,
+   and a client the broker hands thousands of messages at once while Rama
+   is slow gathers thousands more. Unbounded, one record grew past what
+   the sessions topology gets through in its five seconds: Rama timed it
+   out and tried it again, and again, and every client whose events share
+   its partition waited behind it. A load run stopped acknowledging
+   publishes 47 seconds in, and never started again."
+  256)
+
 (defn- queue-records
   "`ops` for `client-id` — [:enqueue key message if-kept?] and [:dequeue
    keys], in the order they were asked for — as the records to append:
-   neighbours of a kind together."
+   neighbours of a kind together, up to queue-record-max in one."
   [client-id ops]
-  (let [now (System/currentTimeMillis)]
+  (let [now  (System/currentTimeMillis)
+        max  (long queue-record-max)
+        room (fn [prev k] (< (count (get prev k)) max))]
     (reduce (fn [acc [kind a b c]]
               (let [prev (peek acc)]
                 (case kind
-                  :enqueue (if (and (= :enqueue (:event prev)) (= (boolean c) (boolean (:if-kept? prev))))
+                  :enqueue (if (and (= :enqueue (:event prev)) (= (boolean c) (boolean (:if-kept? prev)))
+                                    (room prev :messages))
                              (conj (pop acc) (update prev :messages conj [a b]))
                              (conj acc (cond-> {:event :enqueue :client-id client-id :messages [[a b]] :at now}
                                          c (assoc :if-kept? true))))
-                  :dequeue (if (= :dequeue (:event prev))
-                             (conj (pop acc) (update prev :keys into a))
-                             (conj acc {:event :dequeue :client-id client-id :keys (vec a) :at now})))))
+                  :dequeue (reduce (fn [acc part]
+                                     (let [prev (peek acc)]
+                                       (if (and (= :dequeue (:event prev))
+                                                (<= (+ (count (:keys prev)) (count part)) max))
+                                         (conj (pop acc) (update prev :keys into part))
+                                         (conj acc {:event :dequeue :client-id client-id :keys (vec part) :at now}))))
+                                   acc
+                                   (partition-all max a)))))
             [] ops)))
 
 (defn- run-waiting!
@@ -546,7 +709,15 @@
 
 (declare start-lane!)
 
-(defn- send-batch! [w conn client-id lane records futs delay-ms]
+(defn- send-batch!
+  "Append `records` for `client-id`'s lane, and once they land complete
+   `futs` and start what the lane gathered meanwhile; on a failure, the same
+   records again after `delay-ms`. Tried again, a batch is done once the
+   depot has it (:append-ack): what failed was mostly a wait on a topology
+   more than five seconds behind, with the batch in its depot already, and
+   waited on that way every attempt again failed the same way and added
+   the same batch to what the topology was behind on."
+  [w conn client-id lane records futs delay-ms ack-level]
   (with-permit! w
     (fn []
       (let [done (fn [_ e]
@@ -563,14 +734,14 @@
                      :else
                      (do (note-queue-failure! w client-id e)
                          (let [again (min (* 2 (long delay-ms)) (long (second queue-retry-millis)))
-                               retry ^Runnable #(send-batch! w conn client-id lane records futs again)]
+                               retry ^Runnable #(send-batch! w conn client-id lane records futs again :append-ack)]
                            (.schedule ^java.util.concurrent.ScheduledExecutorService @retry-timer
                                       ^Runnable #(.execute ^java.util.concurrent.Executor @queue-executor retry)
                                       (long delay-ms) java.util.concurrent.TimeUnit/MILLISECONDS)))))]
         (try
           (.whenCompleteAsync (CompletableFuture/allOf
                                (into-array java.util.concurrent.CompletableFuture
-                                           (mapv #(r/foreign-append-async! (:events conn) % :ack) records)))
+                                           (mapv #(r/foreign-append-async! (:events conn) % ack-level) records)))
                               (reify BiConsumer (accept [_ v e] (done v e)))
                               ^java.util.concurrent.Executor @queue-executor)
           (catch Throwable e (done nil e)))))))
@@ -584,7 +755,7 @@
                                               (assoc s :busy? false :gone? true))))]
     (if (seq (:ops before))
       (send-batch! w conn client-id lane (queue-records client-id (:ops before)) (:futs before)
-                   (first queue-retry-millis))
+                   (first queue-retry-millis) :ack)
       (.remove ^java.util.concurrent.ConcurrentHashMap (:lanes w) client-id lane))))
 
 (defn- queue-op!
@@ -679,8 +850,17 @@
 
 ;; ── the copy of the cluster's subscriptions ──────────────────────────────
 
+(declare ^:dynamic *connection*)
+
+(defn- view-payload
+  "A change to the view, or a snapshot of it, as the bridge carries it."
+  ^bytes [m]
+  (let [^String text (binding [*print-length* nil *print-level* nil] (pr-str m))]
+    (.getBytes text "UTF-8")))
+
 (defn- apply-shard-change!
-  "Bring `trie` from what shard `old` held to what `new` holds.
+  "Bring the copy of the cluster's subscriptions from what shard `old` held
+   to what `new` holds.
 
    Worked out from the two values rather than from the diff Rama sent with
    them: the diff says the same thing, but reading it means depending on
@@ -689,25 +869,53 @@
    same object before and after, and the walk below skips it on identity —
    the cost is the number of filters in the shard, not of entries, and the
    entries touched are exactly the changed ones. The first change and any
-   resync arrive with an old of nil, and this then inserts the lot."
-  [trie old new]
-  (swap! trie
-         (fn [t]
-           (reduce (fn [t f]
-                     (let [ov (get old f) nv (get new f)]
-                       (if (identical? ov nv)
-                         t
-                         (reduce (fn [t c]
-                                   (let [oe (get ov c) ne (get nv c)]
-                                     (if (= oe ne)
-                                       t
-                                       (cond-> t
+   resync arrive with an old of nil, and this then inserts the lot.
+
+   The view's version moves on with every change to a client's entries,
+   and what changed goes down every link to the other brokers before the
+   new version is planned from — see mqttkat.intent and
+   mqttkat.bridge/broadcast-view!. All of it under the bridge's view-lock,
+   which proxies take one at a time and a new link takes to snapshot."
+  [{:keys [trie view] :as conn} old new]
+  (locking bridge/view-lock
+    (let [{t :trie index :index v :v} @view
+          [t' index' touched]
+          (reduce (fn [acc f]
+                    (let [ov (get old f) nv (get new f)]
+                      (if (identical? ov nv)
+                        acc
+                        (reduce (fn [[t index touched :as acc] c]
+                                  (let [oe (get ov c) ne (get nv c)]
+                                    (if (= oe ne)
+                                      acc
+                                      [(cond-> t
                                          oe (trie/trie-delete (:topic-filter oe) oe)
-                                         ne (trie/trie-insert (:topic-filter ne) ne)))))
-                                 t
-                                 (into (set (keys ov)) (keys nv))))))
-                   t
-                   (into (set (keys old)) (keys new))))))
+                                         ne (trie/trie-insert (:topic-filter ne) ne))
+                                       (intent/index-change index oe ne)
+                                       (conj touched c)])))
+                                acc
+                                (into (set (keys ov)) (keys nv))))))
+                  [t index #{}]
+                  (into (set (keys old)) (keys new)))
+          changes (into {}
+                        (keep (fn [c]
+                                (let [now (get index' c)]
+                                  (when-not (= now (get index c)) [c now]))))
+                        touched)
+          v'      (if (seq changes) (inc (long v)) v)]
+      ;; Only the running broker's: a test's second connection in the same
+      ;; JVM keeps a view of its own, and the links are the JVM's.
+      (when (and (seq changes) (identical? conn @*connection*))
+        (bridge/broadcast-view! (view-payload {:v v' :clients changes})))
+      (reset! view {:trie t' :index index' :v v'})
+      (reset! trie t'))))
+
+(defn- view-snapshot
+  "The whole view as it stands, for a new link to start from. Called with
+   the bridge's view-lock held."
+  [{:keys [view]}]
+  (let [{:keys [v index]} @view]
+    (view-payload {:v v :snapshot? true :clients index})))
 
 (defn- apply-retained-change!
   "Bring the broker's retained messages from what shard `old` held to what
@@ -885,7 +1093,7 @@
                 (r/foreign-proxy (keypath shard) subscriptions
                                  {:callback-fn (guarded (str "subscriptions shard " shard)
                                                         (fn [new _diff old]
-                                                          (apply-shard-change! trie old new)))}))
+                                                          (apply-shard-change! conn old new)))}))
               ;; This broker's nudges: a client connected here had
               ;; something queued after it read its queue.
               (for [shard (range module/shard-count)]
@@ -962,10 +1170,16 @@
    subscribers is told nothing about the group, and serves none of it.
 
    With :away-only?, for a copy another broker sent here, only :queue and
-   :leaving: the copy goes no further, and its groups were chosen there."
+   :leaving: the copy goes no further, and its groups were chosen there.
+
+   A plan carries :v, the version of the view it was made from, which every
+   copy it sends carries too (see mqttkat.intent)."
   ([conn topic] (plan conn topic nil))
-  ([{:keys [trie]} topic {:keys [away-only?]}]
-   (let [matches (trie/sieve-dollar topic (trie/trie-matching-vals @trie topic))]
+  ([{:keys [view]} topic {:keys [away-only?]}]
+   ;; One read of the view: the version the copies carry is the one the
+   ;; plan was made from.
+   (let [{t :trie v :v} @view
+         matches (trie/sieve-dollar topic (trie/trie-matching-vals t topic))]
      (if away-only?
        ;; Only the clients this broker's copy has here, or last had here:
        ;; the sender's copy may not know yet that they left. Those it has
@@ -978,7 +1192,7 @@
              moved   (per-client (filter #(and (true? (:connected? %)) (not (here? %))) matches))]
          (when (or (seq queue) (seq leaving) (seq moved))
            {:queue queue :leaving leaving :moved moved}))
-       (plan-matches matches)))))
+       (some-> (plan-matches matches) (assoc :v v))))))
 
 (defn- plan-matches
   "plan's work for a publish from this broker's own clients, on the
@@ -1090,9 +1304,18 @@
                                                     :on-lost #(reroute! [gk] (conj tried b))))
 
                         :else (reroute! [gk] (conj tried b))))))))]
-      (doseq [[peer-id group-keys] (:brokers plan)]
-        (let [holders (get-in plan [:holders peer-id])
-              ;; What was for this broker's clients, queued for them if it does
+      (doseq [[peer-id group-keys] (:brokers plan)
+              :let [delivered (or (:delivered plan) #{})
+                    all       (get-in plan [:holders peer-id])
+                    ;; Clients the view has on that broker that are live here
+                    ;; after all, and had it from here: the copy says so, and
+                    ;; that broker neither delivers it to them nor queues it.
+                    ;; Nor does this broker, if the copy goes astray.
+                    served    (into #{} (comp (map :client-id) (filter delivered)) all)
+                    holders   (remove #(contains? served (:client-id %)) all)]
+              ;; Nobody left there to send it to.
+              :when (or (seq holders) (seq group-keys))]
+        (let [;; What was for this broker's clients, queued for them if it does
               ;; not get there — only for those whose sessions outlive their
               ;; connection, which the cluster checks against its own record: a
               ;; clean session on a broker that died died with it — and its
@@ -1109,7 +1332,8 @@
                                #(queue-for holders true))]
           (if-let [peer (get @brokers peer-id)]
             (bridge/send-to! broker-id peer-id peer group-keys topic
-                             (assoc msg :on-lost on-lost :on-undelivered on-undelivered))
+                             (assoc msg :on-lost on-lost :on-undelivered on-undelivered
+                                        :view-v (:v plan) :not-served served))
             (do (log/warn "no address for broker" peer-id "- queuing" topic "for its sessions")
                 (when on-lost (on-lost)))))))
     (when (pos? qos)
@@ -1117,9 +1341,11 @@
       ;; above: that client has it, and queuing too would deliver twice on
       ;; its next resume. A client leaving here is queued only if its
       ;; session is kept: a clean one's messages end with its connection.
+      ;; Both only if the session is kept: a client the view has away may
+      ;; since have come back with a clean one, and its queue is nobody's.
       (let [delivered (or (:delivered plan) #{})
             away      (fn [clients] (remove #(contains? delivered (:client-id %)) clients))]
-        (queue-for (away (:queue plan)) false)
+        (queue-for (away (:queue plan)) true)
         (queue-for (away (:leaving plan)) true)))))
 
 ;; ── the running broker's connection ──────────────────────────────────────
@@ -1322,7 +1548,7 @@
       ;; every client arriving in between stays here.
       (note-sent! id stats-at)
       (when (not= id broker-id)
-        (awaited (record! @*connection* (->redirected client-id id)))
+        (awaited (record-until-landed! @*connection* (->redirected client-id id) nil))
         {:server-reference (str host ":" port)
          :via              (redirect-via)
          :session-present? (boolean (and record
@@ -1351,16 +1577,16 @@
       ;; emitted before the CONNACK goes out, so the client cannot act — nor
       ;; another broker's copy be consulted about it — until the cluster has
       ;; it connected.
-      :client-connected    (awaited (record! c (->connect connect)))
+      :client-connected    (awaited (record-until-landed! c (->connect connect) nil))
       ;; Once what the broker handed over for the session is on its queue:
       ;; a broker resuming it waits for the record to say it has gone from
       ;; here, then reads the queue (handlers/adopt-session!). Recorded at
       ;; once, the hand-over's writes could land after that read, and their
       ;; messages went out again under new identifiers, QoS 2 twice.
-      :client-disconnected (let [record #(record! c (->disconnect broker-event) {:wait? false})]
+      :client-disconnected (let [record #(record-until-landed! c (->disconnect broker-event) {:wait? false})]
                              (if-let [^CompletableFuture handed (handlers/handed-over (:client-id broker-event))]
                                (.whenComplete handed (reify BiConsumer (accept [_ _ _] (record))))
-                               (record! c (->disconnect broker-event))))
+                               (record-until-landed! c (->disconnect broker-event) nil)))
       ;; Waited for, these two: the handler emits them before it sends the
       ;; SUBACK or UNSUBACK, so waiting here is what makes the acknowledgement
       ;; mean the cluster has the change — with :ack, the topology has
@@ -1370,8 +1596,8 @@
       ;; or so, which a load test sees as lost messages. The thread this runs
       ;; on is the connection's own, and is virtual; a few milliseconds
       ;; blocked cost it nothing.
-      :client-subscribed   (awaited (record! c (->subscribe broker-event)))
-      :client-unsubscribed (awaited (record! c (->unsubscribe broker-event)))
+      :client-subscribed   (awaited (record-until-landed! c (->subscribe broker-event) nil))
+      :client-unsubscribed (awaited (record-until-landed! c (->unsubscribe broker-event) nil))
       :broker-sample       (do
                              ;; Not in the registry, as far as this broker
                              ;; can see, though it announced itself: say so
@@ -1422,6 +1648,7 @@
   (reset! bridge/planner (fn ([topic] (plan conn topic)) ([topic opts] (plan conn topic opts))))
   (reset! bridge/forwarder (fn [plan topic msg] (forward-publish! conn plan topic msg)))
   (reset! bridge/peer-alive? (fn [peer-id] (listed? conn peer-id)))
+  (reset! bridge/view-source (fn [] (view-snapshot conn)))
   (reset! retained/sink (fn [topic message] (record! conn (->retain topic message))))
   (reset! handlers/redirector (fn [client-id] (redirect-target client-id)))
   (reset! handlers/session-source
@@ -1447,6 +1674,7 @@
   (reset! bridge/planner nil)
   (reset! bridge/forwarder nil)
   (reset! bridge/peer-alive? nil)
+  (reset! bridge/view-source nil)
   (reset! retained/sink nil)
   (reset! handlers/redirector nil)
   (reset! handlers/session-source nil)

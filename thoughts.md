@@ -2,6 +2,196 @@
 
 In this file will go my thoughts and ramblings about this project and what I have done and what I might do next.
 
+## 20261005
+
+### Brokers forgotten by a topology that was behind
+
+The next run's Rama page said "Pushed by Rama 17:25:59" at 18:24, and a
+minute later 17:27:20: the sessions topology was an hour behind its
+session events, and catching up at about a third of real time. Behind like
+that, it also showed no broker registered, with three announcements and no
+withdrawals. The sweep had forgotten all three.
+
+The sweep runs off a tick depot of its own, so it is on time whatever the
+session events are behind on, and it forgot a broker whose latest report
+was stamped more than ten minutes before the tick. With the topology more
+than ten minutes behind, every report it had taken was that old, from
+brokers reporting every few seconds. A forgotten broker's clients are let
+go, and copies for a client let go are queued on Rama instead of sent:
+more for a topology that was already behind.
+
+A broker is now silent only by the reports the registry has taken: ten
+minutes behind the tick and behind the newest report from any broker. A
+topology behind on all of them forgets none, and a killed broker is still
+forgotten once the others are heard from ten minutes past it.
+
+### Waiting for the depot, not the topology, when trying again
+
+With that fixed, the next run lost publishes from a minute in, and every
+bridge link stopped being acknowledged near the end. Rama's own page said
+why: its sessions topology had been handed 48,374 connects for some 4,700
+connections, and 88,183 subscribes for 1,600 subscriptions, and a quarter
+of an hour after the run it was still working through them at 755 a
+second.
+
+That was the retry again. An append waits for the topology to have
+processed the event (`:ack`), and gives up after five seconds. Once the
+topology is five seconds behind, every append times out, with its event
+in the depot all the same. Tried again at `:ack`, a connect timed out the
+same way, and was appended again five seconds later, for as long as its
+connection lasted, each copy adding to what the topology was behind on.
+The queue writer did the same with whole batches.
+
+A retry now waits only for the depot (`:append-ack`). In the depot, the
+topology gets to it in turn, and a connect, a subscribe or a queue batch
+that lands twice ends where it did once. The first attempt still waits for
+the topology, as what reads the record next expects. So a backlog costs
+at most one copy more of each event, not one every five seconds.
+
+### One record too big for Rama's five seconds
+
+The run after that stopped acknowledging publishes 47 seconds in and
+never started again. The Rama worker said why: the sessions topology timed
+out on one event of its session-events depot, at 15:31:14, and from then
+on its task threads took too long on everything. A queue write is one
+append per run of a client's requests, gathered while its last batch was
+out, so the slower Rama gets the bigger the next one. One grew past what
+the topology does in five seconds, a message at a time, and Rama timed it
+out and tried it again, as a stream topology does, and so did the broker,
+the whole batch, again. Everything sharing its partition waited behind
+it, publishers' PUBACKs among them.
+
+A queue record now carries at most 256 messages or keys taken off; a
+longer run of them goes as several, in order.
+
+### Trying again without adding to the backlog
+
+Making a session event land (20261004) sent each retry past the bound on
+appends in flight, and a disconnect up to thirty times whatever had
+happened since. When Rama fell behind at the end of a run, every broker
+then appended each of its clients' disconnects over and over, to a
+cluster that already could not keep up: seven thousand failures per
+broker. A retry now goes only when one of the permits is free, and waits
+for one otherwise without counting as a try; and a disconnect is not
+tried again once its client is back on this broker on a newer
+connection, whose connect replaces whatever the record has.
+
+### A client that went round the brokers for the whole run
+
+With the links probing their sockets, the next run still lost a million
+deliveries, but to about thirty kept subscribers, each losing nearly all
+it was owed from half a minute in. One of them, in the brokers' logs: sent
+on by a redirect, it reached a broker that found its session still on
+record elsewhere (the disconnect that should have cleared it was among the
+twenty thousand Rama did not take), waited the full ten seconds for a
+hand-over that never came, and resumed it. The chaos client gives up on a
+CONNACK after ten seconds too, so it had always just left. It came back to
+the first broker, was redirected, and went round again, every fifteen
+seconds, to the end.
+
+The runner now waits as long for a CONNACK as it does for anything else
+on connecting, thirty seconds. That a broker holds a CONNACK for ten
+seconds on a stale record is the real cost; the record goes stale because
+Rama is refusing appends, and the takeover that would end the wait sits
+behind a full window on the bridge, which stage 3 moves to the front.
+
+### A link that waited on a socket nobody had
+
+A 3,000-client run with nothing killed lost 1.4 million deliveries, all of
+them between brokers. Every bridge stopped being acknowledged at the same
+moment, the one where publishing stopped and the subscribers all came back
+at once, and stayed that way for the rest of the run. The brokers held no
+socket for any of them any more; yet the channels said they were open and
+their readers sat in a read that never returned. A link waiting on a full
+window asked only whether its channel was open and whether the cluster
+still listed the peer, and both said yes for eleven minutes, so everything
+queued behind it, minutes of traffic, went nowhere.
+
+Asking is not enough; a link now writes. While it waits on its window it
+sends the peer a PINGREQ each time it gives up waiting, and when idle it
+sends one at every sweep. A write to a socket that is gone fails, and the
+link ends as any lost one does: what it held is handed back, and the next
+message opens a new one. A peer that has merely stopped reading takes the
+two bytes, or holds the write as it holds the window, and is waited for as
+before. Who let go of those sockets is still open: the server's close
+paths say nothing above debug.
+
+## 20261004
+
+### A record that never landed
+
+The receivers now trust the cluster's record of where a client is, so a
+record that is wrong costs more than it did. Before, a broker delivered
+to whoever it had, and a wrong record meant a second copy; now it means
+none. Under load an append to Rama can time out, and a session event that
+did was logged and forgotten. A load run lost the connect of a client
+that way: the record kept it away for the rest of the run, every broker
+left it out of every copy, and it lost 33,000 messages. Its subscribes
+were lost with it, since they name a connection the record did not have.
+
+So a connect, subscribe or unsubscribe that does not land is appended
+again, for as long as the connection it names is still the one here and
+still holds (or has given up) the subscription. A connect that lands late
+brings the connection's subscriptions after it, or, if the connection has
+ended by then, its disconnect. A disconnect or a redirect, which the
+broker cannot check against anything, is tried a few times. Each is safe
+to run twice: the topology already counts a connect it has once, and
+ignores the rest when they name a connection that is not on record.
+
+## 20261003
+
+### Whom a copy was meant for
+
+The publisher's broker plans a publish from its copy of the cluster's
+subscriptions, and that copy lags. A client that has just moved from B to
+C is still on B in it: the copy for it goes to B, which no longer has it,
+and if C gets a copy for its own subscribers the client is among them.
+Neither end could tell what the sender meant. B queued for clients that
+had left in the last minute, C delivered to whoever it had, and between
+the two the no-chaos load run lost some messages and sent others twice.
+
+Now the sender says. Its view of the subscriptions has a version, which
+moves on whenever a client's entries change, and every copy carries the
+version it was planned at. What changed goes down every bridge link,
+client by client, before the new version is planned from, and a new link
+starts with a snapshot of the whole. One TCP connection, read in order, so
+the receiver always has the sender's view as of the copy in front of it,
+and keeps the last few states of each client to judge copies that waited
+behind others. It then leaves a kept session out where the sender had a
+matching subscription of it elsewhere, or away, and queues under the
+message's key for every client the sender had here and that did not get
+it live. That holds at QoS 0 too, where nobody queues: the copy is then
+the other broker's to deliver or drop. For a while this rule spared QoS
+0, to lose nothing, and the load run sent some three million QoS 0
+messages twice, most likely to the kept sessions its final reconnect
+moves while the bridges are far behind. At most once allows the loss,
+and not that. Each broker asks the same question of the same version, so one
+of them delivers or queues and the others leave it. A client the sender
+delivered to itself, though its view had it elsewhere, is named on the
+copy, and nobody else touches it. The rules are in `mqttkat.intent`,
+which is pure and tested on its own.
+
+Three smaller things came with it. The sender queues for the clients a
+lost or undelivered copy was for minus those it delivered to itself, which
+it did not before. It queues for clients its view has away only if their
+session is still kept. And a will is named like any other publish, so the
+brokers it reaches queue it the same way.
+
+Judging runs on the one thread that reads a bridge, so it has to be
+cheap. The first version asked about each subscriber twice per copy, and
+split the topic and the filter again for every question: about 1.6 ms
+for a copy to a topic with 170 subscribers. Now a copy is judged once,
+with its topic split once and each filter's levels kept, and the old way
+of judging is asked only when some client's history may be too short for
+the copy. That is about 0.1 ms.
+
+A copy planned before its link's snapshot, a copy for groups only, and
+one from a broker running older code are judged as before. What is left
+for the next stage is the link itself: a link that drops takes the copies
+behind it with it, and a QoS 2 copy the peer had taken is handed back as
+if it had not. That wants the bridge to keep its MQTT session across
+reconnects.
+
 ## 20261002
 
 ### The queue tells the broker

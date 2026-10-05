@@ -224,6 +224,29 @@
    for a moment is a hundred reports short of this."
   600000)
 
+(defn broker-silent?
+  "Whether registry `entry` has gone without a report for longer than
+   broker-forgotten-after-millis: by `now`, the sweep's tick, and by
+   `latest`, the newest time stamped on any report the topology has taken
+   from any broker (nil before the first).
+
+   The second, because the sweep runs off a tick depot of its own, on time
+   whatever the session events are behind on. A load run left the topology
+   an hour behind them; against the tick alone, every broker's latest
+   report looked ten minutes old, and the sweep forgot all three while they
+   reported every few seconds, and let their two thousand clients go. By
+   the reports it has taken, a broker is silent only while the others are
+   heard from: a topology behind on all of them forgets none."
+  [entry now latest]
+  (let [heard (max (long (get entry :at 0)) (long (get entry :stats-at 0)))
+        upto  (min (long now) (long (or latest now)))]
+    (< heard (- upto (long broker-forgotten-after-millis)))))
+
+(defn later-of
+  "The later of two times, either of which may be nil."
+  [a b]
+  (max (long (or a 0)) (long (or b 0))))
+
 (def broker-history-millis
   "How much of each broker's chart history `$$broker-history` keeps: the
    half hour the console charts by default. Older points are dropped as
@@ -448,6 +471,9 @@
     (declare-pstate s $$subscriptions {Long (map-schema String (map-schema String Object))})
     (declare-pstate s $$retained {Long (map-schema String Object)})
     (declare-pstate s $$brokers {String (map-schema String Object)})
+    ;; registry-key -> the newest time stamped on a broker's report taken
+    ;; so far: the registry's own clock, for broker-silent?.
+    (declare-pstate s $$registry-clock {String Long})
     (declare-pstate s $$settings {String (map-schema String Object)})
     ;; broker-id -> the broker's latest detail, a plain value, read whole.
     (declare-pstate s $$broker-detail {String Object})
@@ -508,10 +534,10 @@
       (<<branch <tick>
         (identity registry-key :> *registry)
         (|hash *registry)
+        (local-select> [(keypath *registry)] $$registry-clock :> *latest)
         (anchor> <registry>)
         (local-select> [(keypath *registry) ALL] $$brokers :> [*b *entry])
-        (max (get *entry :at 0) (get *entry :stats-at 0) :> *heard)
-        (<<if (< *heard (- *now broker-forgotten-after-millis))
+        (<<if (broker-silent? *entry *now *latest)
           (local-transform> [(keypath *registry *b) NONE>] $$brokers)
           ;; And its run is over, as when a new run replaces it: a broker
           ;; that was killed never comes back to say so, and its clients
@@ -587,6 +613,9 @@
         (get *record :broker-id :> *b)
         (identity registry-key :> *registry)
         (|hash *registry)
+        (local-select> [(keypath *registry)] $$registry-clock :> *clock)
+        (local-transform> [(keypath *registry) (termval (later-of *clock *at))]
+                          $$registry-clock)
         (local-select> [(keypath *registry *b)] $$brokers :> *entry)
         (local-transform> [(keypath *registry *b)
                            (termval {:host        (get *record :host)
@@ -618,6 +647,9 @@
         (get *record :broker-id :> *b)
         (identity registry-key :> *registry)
         (|hash *registry)
+        (local-select> [(keypath *registry)] $$registry-clock :> *clock)
+        (local-transform> [(keypath *registry) (termval (later-of *clock *at))]
+                          $$registry-clock)
         (local-select> [(keypath *registry *b)] $$brokers :> *entry)
         (<<if (and> *entry (= (get *entry :incarnation) (get *record :incarnation)))
           (local-transform> [(keypath *registry *b)

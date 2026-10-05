@@ -12,7 +12,8 @@
    by the time the append's future is realised the session is in the PState
    and assertions can be immediate. Through the broker the append is
    asynchronous, so those assertions wait."
-  (:require [clojure.string :as str]
+  (:require [clojure.edn :as edn]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [com.rpl.rama :as r]
             [com.rpl.rama.path :refer [keypath]]
@@ -566,7 +567,7 @@
             (is (tu/wait-until #(and (contains? (matches conn "away/t") "away-1")
                                      (not (present-in-trie? conn "away/t" "away-1")))))
             (is (= {:brokers {} :skip #{} :queue [{:client-id "away-1" :qos 1}] :leaving [] :holders {} :groups {}}
-                   (cluster/plan conn "away/t"))
+                   (dissoc (cluster/plan conn "away/t") :v))
                 "away: queued here, forwarded nowhere")
 
             (testing "a session that never had anything queued resumes with nothing queued"
@@ -811,8 +812,12 @@
 
             (testing "forwarding to another broker"
               (let [{:keys [^MqttServer server port received]} (peer-broker)
-                    of-type   (fn [t] (filterv #(= t (:packet-type %)) @received))
+                    ;; Not the view the link carries alongside: see the
+                    ;; test of it below.
+                    view?     #(= bridge/view-topic (:topic %))
+                    of-type   (fn [t] (filterv #(and (= t (:packet-type %)) (not (view? %))) @received))
                     publishes #(of-type :PUBLISH)
+                    views     #(mapv (comp edn/read-string tu/payload-str) (filterv view? @received))
                     peer-addr {:host "127.0.0.1" :port port :at 0 :incarnation "peer-run"}]
                 (try
                   (testing "the peer announces itself and every broker sees it"
@@ -861,6 +866,35 @@
                         (is (= 1 (:qos (second (publishes)))))
                         (is (some? (:packet-identifier (second (publishes)))))
                         (is (= "one" (tu/payload-str (tu/expect-eventually! (:ch local) :PUBLISH)))))
+
+                      (testing "the link starts with this broker's view, and every copy says which version it was planned at"
+                        (let [first-publish (first (filterv #(= :PUBLISH (:packet-type %)) @received))
+                              snapshot      (first (views))
+                              v-of          (fn [p] (some (fn [[k v]] (when (= bridge/view-v-property k) (parse-long v)))
+                                                          (get-in p [:properties :user-properties])))]
+                          (is (view? first-publish) "before any copy")
+                          (is (true? (:snapshot? snapshot)))
+                          (is (= {"bridge/#" [2 "peer-x"]} (get-in snapshot [:clients "remote-sub"])))
+                          (is (= {"bridge/#" [1 cluster/broker-id]} (get-in snapshot [:clients (:client-id local)])))
+                          ;; The copy that opened the link was planned before
+                          ;; it, and the view can move in between: one that
+                          ;; landed then was at the version before the
+                          ;; snapshot, and CI saw it. The receiver leaves such
+                          ;; a copy unjudged (intent/covers?). Every copy
+                          ;; planned once the link was there is at or after.
+                          (is (<= (long (v-of (first (publishes)))) (long (:v snapshot))))
+                          (is (every? #(<= (long (:v snapshot)) (long (v-of %))) (rest (publishes))))
+                          (testing "and a subscription that changes goes down it as a change to the view"
+                            (let [before (count (views))]
+                              (client/send-message (:client local) (subscribe-msg "view/#" 0 2))
+                              (tu/expect! (:ch local) :SUBACK)
+                              (is (tu/wait-until #(some (fn [m] (get-in m [:clients (:client-id local) "view/#"]))
+                                                        (drop before (views)))))
+                              (let [m (last (views))]
+                                (is (nil? (:snapshot? m)))
+                                (is (= {"bridge/#" [1 cluster/broker-id] "view/#" [0 cluster/broker-id]}
+                                       (get-in m [:clients (:client-id local)])))
+                                (is (> (long (:v m)) (long (:v snapshot)))))))))
 
                       (testing "QoS 2: forwarded on the PUBREL, and the handshake is completed"
                         (client/send-message (:client pub) (publish-msg "bridge/t" "two" 2 12))
@@ -1069,7 +1103,8 @@
                           (Thread/sleep 300)
                           (is (= 2 (count (shared))) "two of four to the peer, for its member")
                           (is (every? #(= [[bridge/share-property "g/shared/#"]]
-                                          (mapv vec (get-in % [:properties :user-properties])))
+                                          (into [] (comp (map vec) (remove (comp #{bridge/view-v-property} first)))
+                                                (get-in % [:properties :user-properties])))
                                       (shared)))
                           (is (= 2 (count (:PUBLISH (tu/take-n! (:ch local) 4 700))))
                               "the other two to the member here")
@@ -1404,6 +1439,77 @@
                         (is (tu/wait-until #(false? (cluster/connected? conn "victim-here"))))
                         (finally
                           (tu/close! b victim)))))
+
+                  (testing "a copy from another broker is judged by the view it was planned from"
+                    ;; The sender says which version of its view it planned
+                    ;; the copy at, and the view comes down the same link:
+                    ;; this broker delivers to whom that view had here, and
+                    ;; queues for whom it had here and is not.
+                    (let [b       (tu/connect-v5! "bridge" :id (str bridge/client-id-prefix "peer-j"))
+                          me      cluster/broker-id
+                          here-id (tu/client-id "judged-here")
+                          gone-id (tu/client-id "judged-gone")
+                          here    (tu/connect! "judged-here" :id here-id :clean-session? false)
+                          gone    (tu/connect! "judged-gone" :id gone-id :clean-session? false)
+                          k       #(str (System/currentTimeMillis) "-" %)
+                          ids     (atom 900)
+                          view!   (fn [m] (client/send-message (:client b) (publish-msg bridge/view-topic (pr-str m) 0 nil)))
+                          copy!   (fn [payload v key & {:keys [not-served]}]
+                                    (client/send-message
+                                     (:client b)
+                                     (publish-msg "judge/t" payload 1 (swap! ids inc)
+                                                  :properties {:user-properties
+                                                               (cond-> [[bridge/msg-key-property key]
+                                                                        [bridge/view-v-property (str v)]]
+                                                                 not-served (conj [bridge/not-property not-served]))}))
+                                    (tu/expect-eventually! (:ch b) :PUBACK))
+                          keys-of #(set (map first (cluster/queued conn %)))
+                          [k1 k2 k3 k4] (map k ["one" "two" "three" "four"])]
+                      (try
+                        (doseq [c [here gone]]
+                          (client/send-message (:client c) (subscribe-msg "judge/#" 1 1))
+                          (tu/expect! (:ch c) :SUBACK))
+                        (tu/close! gone)
+                        (is (tu/wait-until #(false? (cluster/connected? conn gone-id))))
+                        (view! {:v 1 :snapshot? true :clients {here-id {"judge/#" [1 "peer-elsewhere"]}
+                                                               gone-id {"judge/#" [1 me]}}})
+                        (testing "meant for a client elsewhere: not delivered here, nor queued"
+                          (copy! "elsewhere" 1 k1)
+                          (is (nil? (tu/take! (:ch here) 300)))
+                          (is (empty? (cluster/queued conn here-id))))
+                        (testing "meant for a client here that is not: queued for it, under the message's key"
+                          (is (tu/wait-until #(= #{k1} (keys-of gone-id)))))
+                        (view! {:v 2 :clients {here-id {"judge/#" [1 me]}}})
+                        (testing "meant for it here, by the next version: delivered"
+                          (copy! "here" 2 k2)
+                          (let [got (tu/expect-eventually! (:ch here) :PUBLISH)]
+                            (is (= "here" (tu/payload-str got)))
+                            (client/send-message (:client here) {:packet-type :PUBACK
+                                                                 :packet-identifier (:packet-identifier got)})))
+                        (testing "a copy planned before that still goes by the version it was planned at"
+                          (copy! "planned before" 1 k3)
+                          (is (nil? (tu/take! (:ch here) 300))))
+                        (testing "one its sender served the client itself: neither delivered nor queued"
+                          (copy! "served there" 2 k4 :not-served here-id)
+                          (is (nil? (tu/take! (:ch here) 300)))
+                          (is (empty? (cluster/queued conn here-id))))
+                        (testing "at QoS 0 alike: at most once, so only where its sender had the client"
+                          (let [zero! (fn [payload v]
+                                        (client/send-message
+                                         (:client b)
+                                         (publish-msg "judge/t" payload 0 nil
+                                                      :properties {:user-properties
+                                                                   [[bridge/view-v-property (str v)]]})))]
+                            (zero! "zero, elsewhere" 1)
+                            (zero! "zero, here" 2)
+                            (is (= "zero, here" (tu/payload-str (tu/expect-eventually! (:ch here) :PUBLISH))))))
+                        (is (tu/wait-until #(= #{k1 k2 k3 k4} (keys-of gone-id)))
+                            "and every one queued for the client the view had here and away")
+                        (testing "without a version, or from before the view: as before, delivered"
+                          (client/send-message (:client b) (publish-msg "judge/t" "unversioned" 0 nil))
+                          (is (= "unversioned" (tu/payload-str (tu/expect-eventually! (:ch here) :PUBLISH)))))
+                        (finally
+                          (tu/close! b here)))))
 
                   (testing "redirecting connections"
                     ;; This broker announces itself, and a second broker that is in
@@ -1965,9 +2071,14 @@
           (record! conn {:event :broker-up :broker-id "quiet" :incarnation "q1" :host "h" :port 1 :at now})
           (record! conn (assoc (report "quiet" [(point now 1)] "q1") :broker-id "quiet"))
           (is (some? (cluster/broker-detail conn "quiet")))
+          ;; Silent while another is heard from: by the reports the
+          ;; registry has taken, not by the tick alone.
+          (record! conn {:event :broker-up :broker-id "loud" :incarnation "l1" :host "h" :port 1
+                         :at (+ now module/broker-forgotten-after-millis 60000)})
           @(r/foreign-append-async! expiry {:now (+ now module/broker-forgotten-after-millis 60000)} :ack)
           (is (tu/wait-until #(nil? (cluster/broker-detail conn "quiet"))))
-          (is (empty? (cluster/broker-history conn "quiet" nil))))
+          (is (empty? (cluster/broker-history conn "quiet" nil)))
+          (record! conn {:event :broker-down :broker-id "loud" :at now}))
         (finally
           (reset! cluster/*connection* nil)
           (web-cluster/forget!)
@@ -1981,3 +2092,165 @@
     (is (cluster/listed? conn "quiet")
         "reports late under load: still listed, still waited on")
     (is (not (cluster/listed? conn "unknown")) "dropped from the registry: given up on")))
+
+(deftest a-session-event-is-appended-until-it-lands
+  ;; The other brokers trust the record of where a client is: one connect
+  ;; lost to a timeout under load had a client away for the rest of a run,
+  ;; and left out of every copy. No Rama here: record! is stood in for.
+  (let [conn  {:stand-in true}
+        calls (atom [])
+        fails (atom 0)
+        live  (atom nil)
+        run   (fn [rec]
+                (reset! calls [])
+                (cluster/record-until-landed! conn rec nil))]
+    (with-redefs [cluster/*connection*      (atom conn)
+                  cluster/record-retry-millis [10 20]
+                  cluster/record-retries    3
+                  cluster/record!           (fn [_ rec _]
+                                              (swap! calls conj rec)
+                                              (if (neg? (swap! fails dec))
+                                                (java.util.concurrent.CompletableFuture/completedFuture nil)
+                                                (java.util.concurrent.CompletableFuture/failedFuture
+                                                 (ex-info "ack-timeout" {}))))
+                  h/live-client             (fn [_] @live)]
+      (testing "a connect, while its connection is the one here; then what it subscribed to meanwhile"
+        (reset! live {:connect-id "c1" :subscribed-topics #{{:filter "a/#" :topic-filter "a/#" :qos 1}}})
+        (reset! fails 2)
+        (run {:event :connect :client-id "x" :connect-id "c1"})
+        (is (tu/wait-until #(= [:connect :connect :connect :subscribe] (map :event @calls))))
+        (is (= "c1" (:connect-id (last @calls))))
+        (is (= "a/#" (:filter (last @calls)))))
+      (testing "not for a connection that has gone"
+        (reset! live nil)
+        (reset! fails 1)
+        (run {:event :connect :client-id "x" :connect-id "c1"})
+        (Thread/sleep 200)
+        (is (= [:connect] (map :event @calls))))
+      (testing "nor for one that has been replaced here"
+        (reset! live {:connect-id "c2"})
+        (reset! fails 1)
+        (run {:event :subscribe :client-id "x" :connect-id "c1" :filter "a/#"})
+        (Thread/sleep 200)
+        (is (= 1 (count @calls))))
+      (testing "a connect that lands after its connection ended is followed by its disconnect"
+        ;; Here when it failed, gone by the time it was sent again and landed.
+        (let [asked (atom 0)]
+          (with-redefs [h/live-client (fn [_] (when (= 1 (swap! asked inc)) {:connect-id "c3"}))]
+            (reset! fails 1)
+            (run {:event :connect :client-id "x" :connect-id "c3"})
+            (is (tu/wait-until #(= [:connect :connect :disconnect] (map :event @calls))))
+            (is (= "c3" (:connect-id (last @calls)))))))
+      (testing "a disconnect, which this broker cannot check, a few times and no more"
+        (reset! live nil)
+        (reset! fails 100)
+        (run {:event :disconnect :client-id "x" :connect-id "c1"})
+        (is (tu/wait-until #(= 4 (count @calls))))
+        (Thread/sleep 200)
+        (is (= 4 (count @calls))))
+      (testing "and not again once its client is back here on a newer connection"
+        (reset! live {:connect-id "c2"})
+        (reset! fails 100)
+        (run {:event :disconnect :client-id "x" :connect-id "c1"})
+        (Thread/sleep 200)
+        (is (= 1 (count @calls)))))))
+
+(deftest a-session-event-tried-again-waits-for-a-permit
+  ;; Tried again past the bound on appends in flight, every broker sent each
+  ;; of its clients' disconnects thirty times over to a Rama already behind.
+  (let [conn    {:stand-in true}
+        calls   (atom [])
+        permits (atom 0)]
+    (with-redefs [cluster/*connection*        (atom conn)
+                  cluster/record-retry-millis [10 20]
+                  cluster/record-retries      3
+                  cluster/record!             (fn [_ rec {:keys [if-permitted?]}]
+                                                (if (and if-permitted? (neg? (swap! permits dec)))
+                                                  nil
+                                                  (do (swap! calls conj rec)
+                                                      (java.util.concurrent.CompletableFuture/failedFuture
+                                                       (ex-info "ack-timeout" {})))))
+                  h/live-client               (fn [_] nil)]
+      (testing "none free: nothing appended, and no try counted"
+        (cluster/record-until-landed! conn {:event :disconnect :client-id "x" :connect-id "c1"} nil)
+        (Thread/sleep 300)
+        (is (= 1 (count @calls)) "only the first, which went in the ordinary way"))
+      (testing "then every try it had left, once permits come back"
+        (reset! permits 100)
+        (is (tu/wait-until #(= 4 (count @calls))))
+        (Thread/sleep 200)
+        (is (= 4 (count @calls)))))))
+
+(deftest a-session-event-tried-again-is-done-once-the-depot-has-it
+  ;; Waited on for the topology, each attempt again timed out as the first
+  ;; had, behind a topology more than five seconds behind, and a connect was
+  ;; appended every five seconds for as long as its connection lasted.
+  (let [conn  {:stand-in true}
+        calls (atom [])]
+    (with-redefs [cluster/*connection*        (atom conn)
+                  cluster/record-retry-millis [10 20]
+                  cluster/record!             (fn [_ rec {:keys [ack-level]}]
+                                                (swap! calls conj [(:event rec) (or ack-level :ack)])
+                                                (if (= :append-ack ack-level)
+                                                  (java.util.concurrent.CompletableFuture/completedFuture nil)
+                                                  (java.util.concurrent.CompletableFuture/failedFuture
+                                                   (ex-info "ack-timeout" {}))))
+                  h/live-client               (fn [_] {:connect-id "c1"
+                                                       :subscribed-topics #{{:filter "a/#" :topic-filter "a/#" :qos 1}}})]
+      (cluster/record-until-landed! conn {:event :connect :client-id "x" :connect-id "c1"} nil)
+      (is (tu/wait-until #(= 4 (count @calls))))
+      (Thread/sleep 200)
+      (is (= [[:connect :ack] [:connect :append-ack] [:subscribe :ack] [:subscribe :append-ack]]
+             @calls)
+          "each tried again once, done once in the depot"))))
+
+(deftest a-broker-is-silent-by-the-reports-the-registry-has-taken
+  ;; The sweep's tick is on time whatever the topology is behind on: a load
+  ;; run left it an hour behind, and against the tick alone all three
+  ;; brokers looked silent while they reported every few seconds.
+  (let [ten   module/broker-forgotten-after-millis
+        now   1000000000000
+        entry {:at (- now ten 60000) :stats-at (- now ten 30000)}]
+    (testing "a broker the others have been heard after for ten minutes"
+      (is (module/broker-silent? entry now now))
+      (is (module/broker-silent? entry now nil) "and with no reports taken yet, by the tick"))
+    (testing "not while the topology is behind on every broker's reports"
+      (is (not (module/broker-silent? entry now (- now ten)))))
+    (testing "nor while it reported within ten minutes of the tick"
+      (is (not (module/broker-silent? {:at (- now 1000)} now now)))
+      (is (not (module/broker-silent? {:at 0 :stats-at (- now 1000)} now now))))))
+
+(deftest a-queue-batch-tried-again-is-done-once-the-depot-has-it
+  ;; As for session events: waited on for the topology, a batch behind a
+  ;; topology five seconds behind failed every time, and was added again.
+  (let [levels (atom [])
+        conn   {:events :stand-in :queue-writer (cluster/queue-writer)}]
+    (with-redefs [cluster/queue-retry-millis [10 20]
+                  r/foreign-append-async!    (fn [_ _ ack-level]
+                                               (swap! levels conj ack-level)
+                                               (if (= :append-ack ack-level)
+                                                 (java.util.concurrent.CompletableFuture/completedFuture nil)
+                                                 (java.util.concurrent.CompletableFuture/failedFuture
+                                                  (ex-info "ack-timeout" {}))))]
+      (is (nil? (deref (cluster/enqueue! conn "x" {:topic "t" :payload (.getBytes "p") :qos 1} nil)
+                       5000 ::timeout)))
+      (is (= [:ack :append-ack] @levels)))))
+
+(deftest a-queue-record-carries-at-most-so-many
+  ;; One record of thousands of messages took the sessions topology past its
+  ;; five seconds: Rama tried it again for ever, and a load run's
+  ;; acknowledgements stopped behind it.
+  (with-redefs [cluster/queue-record-max 3]
+    (let [records #'cluster/queue-records
+          ops     (concat (for [i (range 7)] [:enqueue (str "k" i) "m" false])
+                          [[:dequeue ["a" "b"]] [:dequeue ["c" "d" "e" "f"]]]
+                          [[:enqueue "k7" "m" true]])
+          rs      (records "x" ops)]
+      (is (= [:enqueue :enqueue :enqueue :dequeue :dequeue :dequeue :enqueue] (map :event rs)))
+      (is (= [3 3 1] (map (comp count :messages) (take 3 rs))))
+      (is (= [["a" "b"] ["c" "d" "e"] ["f"]]
+             (map :keys (filter #(= :dequeue (:event %)) rs)))
+          "in order, split where one would hold more")
+      (is (= (map #(str "k" %) (range 8)) (mapcat #(map first (:messages %)) (filter :messages rs)))
+          "every message, in order")
+      (is (:if-kept? (last rs))))))
