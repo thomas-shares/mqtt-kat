@@ -4,6 +4,18 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261005
 
+### Trying again without adding to the backlog
+
+Making a session event land (20261004) sent each retry past the bound on
+appends in flight, and a disconnect up to thirty times whatever had
+happened since. When Rama fell behind at the end of a run, every broker
+then appended each of its clients' disconnects over and over, to a
+cluster that already could not keep up: seven thousand failures per
+broker. A retry now goes only when one of the permits is free, and waits
+for one otherwise without counting as a try; and a disconnect is not
+tried again once its client is back on this broker on a newer
+connection, whose connect replaces whatever the record has.
+
 ### A client that went round the brokers for the whole run
 
 With the links probing their sockets, the next run still lost a million

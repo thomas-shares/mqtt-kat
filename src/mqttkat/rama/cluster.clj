@@ -422,6 +422,23 @@
                                         "ms - sending this one past the bound")
                               false))))
 
+(defn- append-record!
+  "record!'s append, `permit?` saying whether it holds a permit to give back."
+  [events ^Semaphore append-permits permit? {:keys [event client-id broker-id] :as record}]
+  (let [^CompletableFuture fut
+        (try
+          (r/foreign-append-async! events record :ack)
+          (catch Throwable t
+            (when permit? (.release append-permits))
+            (throw t)))]
+    (doto fut
+      (.whenComplete (reify BiConsumer
+                       (accept [_ _ e]
+                         (when permit? (.release append-permits))
+                         (when e
+                           (log/warn e "could not record the" (name event) "of"
+                                     (or client-id broker-id (:topic record))))))))))
+
 (defn record!
   "Append `event` — a map as one of the `->` functions builds — and return
    a future that completes once the session record reflects it.
@@ -431,6 +448,10 @@
    threads, which goes ahead without waiting, nor with `:wait? false` in
    `opts`.
 
+   With `:if-permitted? true` as well, nothing is appended when no permit
+   is free, and this returns nil: for an append that is only being tried
+   again, which can wait for one to come back rather than add to a backlog.
+
    Asynchronous, because this is called on the connection's own thread, and
    a network round trip to Rama is not something a CONNACK or a close should
    wait for: the broker has the session the moment add-client! returns, and
@@ -438,22 +459,10 @@
    client can see. A failure is logged rather than thrown for the same reason
    — the session exists whether or not the record of it made it."
   ([conn record] (record! conn record nil))
-  ([{:keys [events ^Semaphore append-permits]} {:keys [event client-id broker-id] :as record}
-    {:keys [wait?] :or {wait? true}}]
-   (let [permit? (take-permit! append-permits wait?)
-         ^CompletableFuture fut
-         (try
-           (r/foreign-append-async! events record :ack)
-           (catch Throwable t
-             (when permit? (.release append-permits))
-             (throw t)))]
-     (doto fut
-       (.whenComplete (reify BiConsumer
-                        (accept [_ _ e]
-                          (when permit? (.release append-permits))
-                          (when e
-                            (log/warn e "could not record the" (name event) "of"
-                                      (or client-id broker-id (:topic record)))))))))))
+  ([{:keys [events ^Semaphore append-permits]} record {:keys [wait? if-permitted?] :or {wait? true}}]
+   (let [permit? (take-permit! append-permits wait?)]
+     (when (or permit? (not if-permitted?))
+       (append-record! events append-permits permit? record)))))
 
 ;; ── the queues, written in order and until they land ─────────────────────
 
@@ -544,39 +553,65 @@
                                                  :filter (:filter e) :entry e})
                               {:wait? false})))))
 
+(defn- superseded?
+  "Whether disconnect or redirect `rec` no longer matters: its client is
+   connected here again on a newer connection, whose connect replaces
+   whatever the record has."
+  [{:keys [event client-id connect-id]}]
+  (and (= :disconnect event)
+       (when-let [c (handlers/live-client client-id)]
+         (not= connect-id (:connect-id c)))))
+
 (defn record-until-landed!
   "record!, for an event about a client's session, appended again after a
    failure: a connect, subscribe or unsubscribe while it still says what
    this broker has (still-true?), a disconnect or redirect up to
-   record-retries times. Returns the first attempt's future."
-  [conn rec opts]
-  (letfn [(attempt [opts tries delay-ms]
-            (let [^CompletableFuture f (record! conn rec opts)]
-              (.whenComplete
-               f (reify BiConsumer
-                   (accept [_ _ e]
-                     (cond
-                       (and e
-                            (identical? conn @*connection*)
-                            (if (#{:disconnect :redirected} (:event rec))
-                              (< (long tries) (long record-retries))
-                              (still-true? rec)))
-                       (let [again (min (* 2 (long delay-ms)) (long (second record-retry-millis)))]
-                         (.schedule ^java.util.concurrent.ScheduledExecutorService @retry-timer
-                                    ^Runnable #(.execute ^java.util.concurrent.Executor @queue-executor
-                                                         ^Runnable (fn [] (attempt {:wait? false} (inc (long tries)) again)))
-                                    (long delay-ms) TimeUnit/MILLISECONDS))
+   record-retries times, unless its client is back here on a newer
+   connection. Returns the first attempt's future.
 
-                       ;; Landed late: what its connection subscribed to in
-                       ;; the meantime landed before it, and counted for
-                       ;; nothing; and if the connection has ended since,
-                       ;; its disconnect did too.
-                       (and (nil? e) (pos? (long tries)) (= :connect (:event rec)))
-                       (if (still-true? rec)
-                         (restate-subscriptions! conn (:client-id rec) (:connect-id rec))
-                         (record-until-landed! conn (->disconnect rec) {:wait? false}))))))
-              f))]
-    (attempt opts 0 (first record-retry-millis))))
+   An attempt again goes only when one of record!'s permits is free, and
+   waits for one otherwise without counting as a try. Sent past the bound,
+   as they were, a run whose Rama fell behind at the end had every broker
+   append each of its clients' disconnects thirty times over, to a Rama
+   that already could not keep up."
+  [conn rec opts]
+  (letfn [(again! [tries delay-ms waited?]
+            (let [next-delay (min (* 2 (long delay-ms)) (long (second record-retry-millis)))]
+              (.schedule ^java.util.concurrent.ScheduledExecutorService @retry-timer
+                         ^Runnable #(.execute ^java.util.concurrent.Executor @queue-executor
+                                              ^Runnable (fn [] (retry tries next-delay waited?)))
+                         (long delay-ms) TimeUnit/MILLISECONDS)))
+          (wanted? [tries]
+            (and (identical? conn @*connection*)
+                 (if (#{:disconnect :redirected} (:event rec))
+                   (and (< (long tries) (long record-retries)) (not (superseded? rec)))
+                   (still-true? rec))))
+          ;; Asked again only after waiting for a permit: the failure
+          ;; that scheduled it asked already.
+          (retry [tries delay-ms waited?]
+            (when (or (not waited?) (wanted? tries))
+              (if-let [f (record! conn rec {:wait? false :if-permitted? true})]
+                (follow f (inc (long tries)) delay-ms)
+                ;; No permit: Rama is behind. Not a try.
+                (again! tries delay-ms true))))
+          (follow [^CompletableFuture f tries delay-ms]
+            (.whenComplete
+             f (reify BiConsumer
+                 (accept [_ _ e]
+                   (cond
+                     (and e (wanted? tries))
+                     (again! tries delay-ms false)
+
+                     ;; Landed late: what its connection subscribed to in
+                     ;; the meantime landed before it, and counted for
+                     ;; nothing; and if the connection has ended since,
+                     ;; its disconnect did too.
+                     (and (nil? e) (pos? (long tries)) (= :connect (:event rec)))
+                     (if (still-true? rec)
+                       (restate-subscriptions! conn (:client-id rec) (:connect-id rec))
+                       (record-until-landed! conn (->disconnect rec) {:wait? false}))))))
+            f)]
+    (follow (record! conn rec opts) 0 (first record-retry-millis))))
 
 (defn queue-writer
   "What `enqueue!` and `dequeue!` write through: one lane per client, which

@@ -2130,8 +2130,41 @@
             (is (tu/wait-until #(= [:connect :connect :disconnect] (map :event @calls))))
             (is (= "c3" (:connect-id (last @calls)))))))
       (testing "a disconnect, which this broker cannot check, a few times and no more"
+        (reset! live nil)
         (reset! fails 100)
         (run {:event :disconnect :client-id "x" :connect-id "c1"})
+        (is (tu/wait-until #(= 4 (count @calls))))
+        (Thread/sleep 200)
+        (is (= 4 (count @calls))))
+      (testing "and not again once its client is back here on a newer connection"
+        (reset! live {:connect-id "c2"})
+        (reset! fails 100)
+        (run {:event :disconnect :client-id "x" :connect-id "c1"})
+        (Thread/sleep 200)
+        (is (= 1 (count @calls)))))))
+
+(deftest a-session-event-tried-again-waits-for-a-permit
+  ;; Tried again past the bound on appends in flight, every broker sent each
+  ;; of its clients' disconnects thirty times over to a Rama already behind.
+  (let [conn    {:stand-in true}
+        calls   (atom [])
+        permits (atom 0)]
+    (with-redefs [cluster/*connection*        (atom conn)
+                  cluster/record-retry-millis [10 20]
+                  cluster/record-retries      3
+                  cluster/record!             (fn [_ rec {:keys [if-permitted?]}]
+                                                (if (and if-permitted? (neg? (swap! permits dec)))
+                                                  nil
+                                                  (do (swap! calls conj rec)
+                                                      (java.util.concurrent.CompletableFuture/failedFuture
+                                                       (ex-info "ack-timeout" {})))))
+                  h/live-client               (fn [_] nil)]
+      (testing "none free: nothing appended, and no try counted"
+        (cluster/record-until-landed! conn {:event :disconnect :client-id "x" :connect-id "c1"} nil)
+        (Thread/sleep 300)
+        (is (= 1 (count @calls)) "only the first, which went in the ordinary way"))
+      (testing "then every try it had left, once permits come back"
+        (reset! permits 100)
         (is (tu/wait-until #(= 4 (count @calls))))
         (Thread/sleep 200)
         (is (= 4 (count @calls)))))))
