@@ -265,7 +265,13 @@
   [{:keys [clients ^AtomicBoolean running rng] :as state}]
   (while (.get running)
     (doseq [cl clients]
-      (c/check-connection! cl 10000)
+      ;; Longer than a broker may hold a CONNACK: one resuming a session
+      ;; another broker still has on record waits up to ten seconds for it
+      ;; to go (handlers/hand-over-wait-millis). Ten seconds here gave up
+      ;; just before every such CONNACK, so a client sent between brokers
+      ;; by a redirect went round them for the rest of a load run, never
+      ;; reading what it was owed.
+      (c/check-connection! cl (get-in state [:cfg :check :connect-timeout-ms] 30000))
       (when (c/wants-connection? cl)
         (if-let [b (broker-for state cl)]
           (when-not (c/connect! cl b)

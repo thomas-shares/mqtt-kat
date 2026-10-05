@@ -4,6 +4,25 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261005
 
+### A client that went round the brokers for the whole run
+
+With the links probing their sockets, the next run still lost a million
+deliveries, but to about thirty kept subscribers, each losing nearly all
+it was owed from half a minute in. One of them, in the brokers' logs: sent
+on by a redirect, it reached a broker that found its session still on
+record elsewhere (the disconnect that should have cleared it was among the
+twenty thousand Rama did not take), waited the full ten seconds for a
+hand-over that never came, and resumed it. The chaos client gives up on a
+CONNACK after ten seconds too, so it had always just left. It came back to
+the first broker, was redirected, and went round again, every fifteen
+seconds, to the end.
+
+The runner now waits as long for a CONNACK as it does for anything else
+on connecting, thirty seconds. That a broker holds a CONNACK for ten
+seconds on a stale record is the real cost; the record goes stale because
+Rama is refusing appends, and the takeover that would end the wait sits
+behind a full window on the bridge, which stage 3 moves to the front.
+
 ### A link that waited on a socket nobody had
 
 A 3,000-client run with nothing killed lost 1.4 million deliveries, all of
