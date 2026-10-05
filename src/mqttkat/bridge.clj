@@ -29,7 +29,7 @@
             [mqttkat.client :as client])
   (:import [java.io IOException]
            [java.util Set]
-           [java.util.concurrent ConcurrentHashMap LinkedBlockingQueue Semaphore TimeUnit]
+           [java.util.concurrent ConcurrentHashMap LinkedBlockingDeque Semaphore TimeUnit]
            [java.util.concurrent.atomic AtomicBoolean AtomicInteger LongAdder]
            [org.mqttkat MqttHandler MqttStat]
            [org.mqttkat.server Connection]))
@@ -212,7 +212,7 @@
   "Send `payload`, a change to the view, down every running link. The
    caller holds view-lock."
   [^bytes payload]
-  (doseq [[_ {:keys [running ^LinkedBlockingQueue queue]}] @connections
+  (doseq [[_ {:keys [running ^LinkedBlockingDeque queue]}] @connections
           :when (some-> ^AtomicBoolean running .get)]
     (.put queue (view-item payload))))
 
@@ -545,7 +545,7 @@
    subscriber holds settled on (Connection.pauseUntilDrained), so a release
    landing in between cannot miss it. A publisher the link already holds
    is one hold, not two — its pause count is given back at once."
-  [{:keys [^Set held ^AtomicBoolean running ^LinkedBlockingQueue queue] :as link} ^Connection publisher]
+  [{:keys [^Set held ^AtomicBoolean running ^LinkedBlockingDeque queue] :as link} ^Connection publisher]
   (.pauseReading publisher)
   (when-not (.add held publisher)
     (.resumeReading publisher))
@@ -624,7 +624,7 @@
    peer had not taken — still queued, or written and not acknowledged — is
    handed back through its on-lost and counted, and every publisher the
    link held is let go."
-  [my-id peer-id peer {:keys [^LinkedBlockingQueue queue ^AtomicBoolean running client
+  [my-id peer-id peer {:keys [^LinkedBlockingDeque queue ^AtomicBoolean running client
                               ^ConcurrentHashMap inflight] :as link}]
   (let [opened  (atom nil)
         lost-at (atom nil)]
@@ -692,7 +692,7 @@
    peer has accepted the connection."
   [my-id peer-id peer]
   (let [link {:peer-id  peer-id
-              :queue    (LinkedBlockingQueue.)
+              :queue    (LinkedBlockingDeque.)
               :inflight (ConcurrentHashMap.)
               :held    (ConcurrentHashMap/newKeySet)
               :running (AtomicBoolean. true)
@@ -729,7 +729,7 @@
               :else
               (let [link (start-link! my-id peer-id peer)]
                 (when-let [snapshot @view-source]
-                  (.put ^LinkedBlockingQueue (:queue link) (view-item (snapshot))))
+                  (.put ^LinkedBlockingDeque (:queue link) (view-item (snapshot))))
                 (swap! connections assoc peer-id link)
                 (.start ^Thread (:thread link))
                 link))))))))
@@ -738,16 +738,19 @@
   "Queue `packet` for `peer-id`, holding `publisher` if the queue has grown
    past queue-pause-at. Not sent at all — the peer was unreachable a moment
    ago, or its link is queue-limit behind — it is handed straight back
-   through `on-lost`."
+   through `on-lost`. At the front of the queue rather than the back when
+   `front?`."
   ([my-id peer-id peer qos packet publisher on-lost]
-   (enqueue! my-id peer-id peer qos packet publisher on-lost nil))
+   (enqueue! my-id peer-id peer qos packet publisher on-lost nil false))
   ([my-id peer-id peer qos packet publisher on-lost hold]
-   (if-let [{:keys [^LinkedBlockingQueue queue] :as link} (link! my-id peer-id peer)]
+   (enqueue! my-id peer-id peer qos packet publisher on-lost hold false))
+  ([my-id peer-id peer qos packet publisher on-lost hold front?]
+   (if-let [{:keys [^LinkedBlockingDeque queue] :as link} (link! my-id peer-id peer)]
      (if (>= (.size queue) (long queue-limit))
        (do (.increment ^LongAdder MqttStat/droppedMessages)
            (lost! peer-id on-lost :queue-full))
        (let [item {:qos qos :packet packet :on-lost on-lost :hold hold}]
-         (.put queue item)
+         (if front? (.putFirst queue item) (.put queue item))
          ;; The link may have ended between being looked up and this put —
          ;; a peer refusing the connection ends it within a millisecond —
          ;; and its thread has then emptied the queue for the last time.
@@ -833,8 +836,15 @@
   "Tell `peer-id` that `client-id` has connected here, so the connection it
    holds for it — named by its connect-id, so a newer one is left alone —
    is to end (§3.1.4). QoS 0: if the peer is not there to hear it, the
-   connection it held is not there either. Down the same queue as the
-   publishes, so it is not overtaken by, and does not overtake, them."
+   connection it held is not there either.
+
+   At the front of the link's queue, ahead of the publishes waiting there.
+   Behind them, as it once went, it waited as long as they did: a load run
+   with its bridges a minute behind had the new broker give up on the old
+   one's hand-over (handlers/hand-over-wait-millis) and resume without it.
+   What it overtakes for the client reaches the old broker after the client
+   has gone from there, and is queued for it on the cluster as for any
+   client the sender had there and that did not get it live."
   [my-id peer-id peer client-id connect-id]
   (enqueue! my-id peer-id peer 0
             {:packet-type      :PUBLISH
@@ -846,7 +856,7 @@
              :duplicate?       false
              :properties       {:user-properties [["client-id" client-id]
                                                   ["connect-id" (str connect-id)]]}}
-            nil nil))
+            nil nil nil true))
 
 (defn settled!
   "Tell `peer-id` that the messages named `msg-keys`, which it forwarded

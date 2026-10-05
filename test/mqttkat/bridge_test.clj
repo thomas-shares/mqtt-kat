@@ -378,3 +378,24 @@
         (Thread/sleep (+ 500 bridge/awaiting-grace-ms))
         (is (empty? @undelivered))
         (finally (bridge/drop! "peer-15") (.stop ^MqttServer (:server p) 100))))))
+
+(deftest a-takeover-goes-ahead-of-the-publishes-waiting
+  ;; Behind them, it waited as long as they did: with the bridges a minute
+  ;; behind, the new broker gave up on the old one's hand-over and resumed
+  ;; the session without it.
+  (let [p     (peer connack-2)
+        topic (str bridge/control-prefix "takeover")]
+    (try
+      (dotimes [i 6]
+        (bridge/send-to! "me" "peer-30" {:host "127.0.0.1" :port (:port p)} [] (str "t/" i)
+                         {:qos 1 :payload (.getBytes "x") :properties {}}))
+      (is (tu/wait-until #(= 2 (count (publishes p)))))
+      (bridge/takeover! "me" "peer-30" {:host "127.0.0.1" :port (:port p)} "moved" "c-1")
+      (doseq [{:keys [packet-identifier]} (publishes p)] (puback! p packet-identifier))
+      (is (tu/wait-until #(some (fn [m] (= topic (:topic m))) (publishes p))))
+      (let [order (mapv :topic (publishes p))
+            at    (.indexOf ^java.util.List order topic)]
+        ;; The link may have taken the third off the queue already, and be
+        ;; waiting on the window with it.
+        (is (<= 2 at 3) (str "ahead of what was still queued: " order)))
+      (finally (bridge/drop! "peer-30") (.stop ^MqttServer (:server p) 100)))))
