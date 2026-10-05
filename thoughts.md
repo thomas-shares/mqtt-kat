@@ -4,6 +4,29 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261005
 
+### Waiting for the depot, not the topology, when trying again
+
+With that fixed, the next run lost publishes from a minute in, and every
+bridge link stopped being acknowledged near the end. Rama's own page said
+why: its sessions topology had been handed 48,374 connects for some 4,700
+connections, and 88,183 subscribes for 1,600 subscriptions, and a quarter
+of an hour after the run it was still working through them at 755 a
+second.
+
+That was the retry again. An append waits for the topology to have
+processed the event (`:ack`), and gives up after five seconds. Once the
+topology is five seconds behind, every append times out, with its event
+in the depot all the same. Tried again at `:ack`, a connect timed out the
+same way, and was appended again five seconds later, for as long as its
+connection lasted, each copy adding to what the topology was behind on.
+The queue writer did the same with whole batches.
+
+A retry now waits only for the depot (`:append-ack`). In the depot, the
+topology gets to it in turn, and a connect, a subscribe or a queue batch
+that lands twice ends where it did once. The first attempt still waits for
+the topology, as what reads the record next expects. So a backlog costs
+at most one copy more of each event, not one every five seconds.
+
 ### One record too big for Rama's five seconds
 
 The run after that stopped acknowledging publishes 47 seconds in and

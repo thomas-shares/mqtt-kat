@@ -2176,6 +2176,45 @@
         (Thread/sleep 200)
         (is (= 4 (count @calls)))))))
 
+(deftest a-session-event-tried-again-is-done-once-the-depot-has-it
+  ;; Waited on for the topology, each attempt again timed out as the first
+  ;; had, behind a topology more than five seconds behind, and a connect was
+  ;; appended every five seconds for as long as its connection lasted.
+  (let [conn  {:stand-in true}
+        calls (atom [])]
+    (with-redefs [cluster/*connection*        (atom conn)
+                  cluster/record-retry-millis [10 20]
+                  cluster/record!             (fn [_ rec {:keys [ack-level]}]
+                                                (swap! calls conj [(:event rec) (or ack-level :ack)])
+                                                (if (= :append-ack ack-level)
+                                                  (java.util.concurrent.CompletableFuture/completedFuture nil)
+                                                  (java.util.concurrent.CompletableFuture/failedFuture
+                                                   (ex-info "ack-timeout" {}))))
+                  h/live-client               (fn [_] {:connect-id "c1"
+                                                       :subscribed-topics #{{:filter "a/#" :topic-filter "a/#" :qos 1}}})]
+      (cluster/record-until-landed! conn {:event :connect :client-id "x" :connect-id "c1"} nil)
+      (is (tu/wait-until #(= 4 (count @calls))))
+      (Thread/sleep 200)
+      (is (= [[:connect :ack] [:connect :append-ack] [:subscribe :ack] [:subscribe :append-ack]]
+             @calls)
+          "each tried again once, done once in the depot"))))
+
+(deftest a-queue-batch-tried-again-is-done-once-the-depot-has-it
+  ;; As for session events: waited on for the topology, a batch behind a
+  ;; topology five seconds behind failed every time, and was added again.
+  (let [levels (atom [])
+        conn   {:events :stand-in :queue-writer (cluster/queue-writer)}]
+    (with-redefs [cluster/queue-retry-millis [10 20]
+                  r/foreign-append-async!    (fn [_ _ ack-level]
+                                               (swap! levels conj ack-level)
+                                               (if (= :append-ack ack-level)
+                                                 (java.util.concurrent.CompletableFuture/completedFuture nil)
+                                                 (java.util.concurrent.CompletableFuture/failedFuture
+                                                  (ex-info "ack-timeout" {}))))]
+      (is (nil? (deref (cluster/enqueue! conn "x" {:topic "t" :payload (.getBytes "p") :qos 1} nil)
+                       5000 ::timeout)))
+      (is (= [:ack :append-ack] @levels)))))
+
 (deftest a-queue-record-carries-at-most-so-many
   ;; One record of thousands of messages took the sessions topology past its
   ;; five seconds: Rama tried it again for ever, and a load run's

@@ -424,10 +424,10 @@
 
 (defn- append-record!
   "record!'s append, `permit?` saying whether it holds a permit to give back."
-  [events ^Semaphore append-permits permit? {:keys [event client-id broker-id] :as record}]
+  [events ^Semaphore append-permits permit? ack-level {:keys [event client-id broker-id] :as record}]
   (let [^CompletableFuture fut
         (try
-          (r/foreign-append-async! events record :ack)
+          (r/foreign-append-async! events record ack-level)
           (catch Throwable t
             (when permit? (.release append-permits))
             (throw t)))]
@@ -451,6 +451,8 @@
    With `:if-permitted? true` as well, nothing is appended when no permit
    is free, and this returns nil: for an append that is only being tried
    again, which can wait for one to come back rather than add to a backlog.
+   `:ack-level`, :ack unless given, is what the future waits for: :ack for
+   the topology to have it, :append-ack for the depot to.
 
    Asynchronous, because this is called on the connection's own thread, and
    a network round trip to Rama is not something a CONNACK or a close should
@@ -459,10 +461,11 @@
    client can see. A failure is logged rather than thrown for the same reason
    — the session exists whether or not the record of it made it."
   ([conn record] (record! conn record nil))
-  ([{:keys [events ^Semaphore append-permits]} record {:keys [wait? if-permitted?] :or {wait? true}}]
+  ([{:keys [events ^Semaphore append-permits]} record
+    {:keys [wait? if-permitted? ack-level] :or {wait? true ack-level :ack}}]
    (let [permit? (take-permit! append-permits wait?)]
      (when (or permit? (not if-permitted?))
-       (append-record! events append-permits permit? record)))))
+       (append-record! events append-permits permit? ack-level record)))))
 
 ;; ── the queues, written in order and until they land ─────────────────────
 
@@ -573,7 +576,18 @@
    waits for one otherwise without counting as a try. Sent past the bound,
    as they were, a run whose Rama fell behind at the end had every broker
    append each of its clients' disconnects thirty times over, to a Rama
-   that already could not keep up."
+   that already could not keep up.
+
+   And it is done once the depot has it (:append-ack), not once the
+   topology has processed it. The first attempt's failure is mostly that:
+   a timeout waiting on a topology more than five seconds behind, with the
+   event already in its depot. Waited on at :ack, every attempt again timed
+   out the same way, and a connect or subscribe was appended every five
+   seconds for as long as its connection lasted: a load run's Rama was
+   handed 48,374 connects for some 4,700, and 88,183 subscribes for 1,600,
+   and was still working through them a quarter of an hour later. In the
+   depot, the topology processes it in its turn, after the attempt before
+   it if that got there too: each is safe twice."
   [conn rec opts]
   (letfn [(again! [tries delay-ms waited?]
             (let [next-delay (min (* 2 (long delay-ms)) (long (second record-retry-millis)))]
@@ -590,7 +604,7 @@
           ;; that scheduled it asked already.
           (retry [tries delay-ms waited?]
             (when (or (not waited?) (wanted? tries))
-              (if-let [f (record! conn rec {:wait? false :if-permitted? true})]
+              (if-let [f (record! conn rec {:wait? false :if-permitted? true :ack-level :append-ack})]
                 (follow f (inc (long tries)) delay-ms)
                 ;; No permit: Rama is behind. Not a try.
                 (again! tries delay-ms true))))
@@ -695,7 +709,15 @@
 
 (declare start-lane!)
 
-(defn- send-batch! [w conn client-id lane records futs delay-ms]
+(defn- send-batch!
+  "Append `records` for `client-id`'s lane, and once they land complete
+   `futs` and start what the lane gathered meanwhile; on a failure, the same
+   records again after `delay-ms`. Tried again, a batch is done once the
+   depot has it (:append-ack): what failed was mostly a wait on a topology
+   more than five seconds behind, with the batch in its depot already, and
+   waited on that way every attempt again failed the same way and added
+   the same batch to what the topology was behind on."
+  [w conn client-id lane records futs delay-ms ack-level]
   (with-permit! w
     (fn []
       (let [done (fn [_ e]
@@ -712,14 +734,14 @@
                      :else
                      (do (note-queue-failure! w client-id e)
                          (let [again (min (* 2 (long delay-ms)) (long (second queue-retry-millis)))
-                               retry ^Runnable #(send-batch! w conn client-id lane records futs again)]
+                               retry ^Runnable #(send-batch! w conn client-id lane records futs again :append-ack)]
                            (.schedule ^java.util.concurrent.ScheduledExecutorService @retry-timer
                                       ^Runnable #(.execute ^java.util.concurrent.Executor @queue-executor retry)
                                       (long delay-ms) java.util.concurrent.TimeUnit/MILLISECONDS)))))]
         (try
           (.whenCompleteAsync (CompletableFuture/allOf
                                (into-array java.util.concurrent.CompletableFuture
-                                           (mapv #(r/foreign-append-async! (:events conn) % :ack) records)))
+                                           (mapv #(r/foreign-append-async! (:events conn) % ack-level) records)))
                               (reify BiConsumer (accept [_ v e] (done v e)))
                               ^java.util.concurrent.Executor @queue-executor)
           (catch Throwable e (done nil e)))))))
@@ -733,7 +755,7 @@
                                               (assoc s :busy? false :gone? true))))]
     (if (seq (:ops before))
       (send-batch! w conn client-id lane (queue-records client-id (:ops before)) (:futs before)
-                   (first queue-retry-millis))
+                   (first queue-retry-millis) :ack)
       (.remove ^java.util.concurrent.ConcurrentHashMap (:lanes w) client-id lane))))
 
 (defn- queue-op!
