@@ -7,6 +7,7 @@
    filling and emptying."
   (:require [clojure.test :refer [deftest is testing]]
             [mqttkat.bridge :as bridge]
+            [mqttkat.client :as client]
             [mqttkat.test-util :as tu])
   (:import [java.nio.channels Selector SocketChannel]
            [org.mqttkat MqttHandler]
@@ -255,7 +256,27 @@
           (finally
             (reset! bridge/peer-alive? nil)
             (bridge/drop! "peer-21")
-            (.stop ^MqttServer (:server p) 100)))))))
+            (.stop ^MqttServer (:server p) 100)))))
+
+    (testing "one still listed whose socket is gone, while the channel still says open: dropped, not waited on"
+      ;; A 3,000-client run lost 1.4 million deliveries this way: every link
+      ;; between the brokers lost its socket at once, the channels went on
+      ;; saying open, and each link waited on its full window for the rest
+      ;; of the run with everything queued behind it.
+      (let [p    (peer connack-2)
+            lost (atom 0)]
+        (try
+          (reset! bridge/peer-alive? (constantly true))
+          (with-redefs [client/connected? (constantly true)]
+            (dotimes [i 3]
+              (bridge/send-to! "me" "peer-22" {:host "127.0.0.1" :port (:port p)} [] (str "t/" i)
+                               {:qos 1 :payload (.getBytes "x") :properties {} :on-lost #(swap! lost inc)}))
+            (is (tu/wait-until #(= 2 (count (publishes p)))))
+            (.stop ^MqttServer (:server p) 100)
+            (is (tu/wait-until #(= 3 @lost) 5000) "the two in flight and the one waiting for a slot"))
+          (finally
+            (reset! bridge/peer-alive? nil)
+            (bridge/drop! "peer-22")))))))
 
 (deftest a-peer-that-refuses-is-left-alone-for-a-while
   (testing "one failed connect marks it down; what follows is handed back without trying again"

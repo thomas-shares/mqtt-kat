@@ -577,6 +577,18 @@
               (do (when (zero? (mod waited (* 6 (long window-wait-ms))))
                     (log/info "bridge to" (:peer-id link) ": nothing acknowledged for" waited
                               "ms; it is still listed, so waiting for it"))
+                  ;; Written to, not only asked whether it is open: a load
+                  ;; run's links waited eleven minutes on sockets the kernel
+                  ;; had already let go, whose channels still said open, and
+                  ;; whose readers never woke. A write to one fails, and the
+                  ;; link ends as any other lost one does. A peer that has
+                  ;; only stopped reading takes the two bytes, or holds the
+                  ;; write as it holds the window.
+                  (try
+                    (client/send-message client {:packet-type :PINGREQ})
+                    (catch IOException e
+                      (lost! (:peer-id link) on-lost :link-dropped)
+                      (throw e)))
                   (recur waited))
               (do (lost! (:peer-id link) on-lost :not-acknowledged)
                   (throw (IOException. (str "nothing acknowledged for " waited " ms")))))))))
@@ -635,6 +647,9 @@
             (let [now (System/currentTimeMillis)]
               (if (> (- now swept) (long awaiting-sweep-ms))
                 (do (expire-awaiting! peer-id (- now (long awaiting-limit-ms)))
+                    ;; An idle link is written to as well, for the reason
+                    ;; write! gives: an open channel is no proof of a peer.
+                    (client/send-message c {:packet-type :PINGREQ})
                     (recur now))
                 (recur swept))))))
       (catch IOException e
@@ -643,7 +658,7 @@
           (do (log/warn "bridge to" peer-id "at" (:host peer) (:port peer) "could not connect:" (.getMessage e))
               (forget-link! peer-id link {:down-until (+ (System/currentTimeMillis) (long retry-after-ms))}))
           (.get running)
-          (do (log/warn "bridge to" peer-id "lost:" (.getMessage e))
+          (do (log/warn "bridge to" peer-id "lost:" (or (.getMessage e) (.getName (class e))))
               (reset! lost-at (System/currentTimeMillis)))))
       (catch InterruptedException _ nil)
       (finally

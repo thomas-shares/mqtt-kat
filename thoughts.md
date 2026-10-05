@@ -2,6 +2,29 @@
 
 In this file will go my thoughts and ramblings about this project and what I have done and what I might do next.
 
+## 20261005
+
+### A link that waited on a socket nobody had
+
+A 3,000-client run with nothing killed lost 1.4 million deliveries, all of
+them between brokers. Every bridge stopped being acknowledged at the same
+moment, the one where publishing stopped and the subscribers all came back
+at once, and stayed that way for the rest of the run. The brokers held no
+socket for any of them any more; yet the channels said they were open and
+their readers sat in a read that never returned. A link waiting on a full
+window asked only whether its channel was open and whether the cluster
+still listed the peer, and both said yes for eleven minutes, so everything
+queued behind it, minutes of traffic, went nowhere.
+
+Asking is not enough; a link now writes. While it waits on its window it
+sends the peer a PINGREQ each time it gives up waiting, and when idle it
+sends one at every sweep. A write to a socket that is gone fails, and the
+link ends as any lost one does: what it held is handed back, and the next
+message opens a new one. A peer that has merely stopped reading takes the
+two bytes, or holds the write as it holds the window, and is waited for as
+before. Who let go of those sockets is still open: the server's close
+paths say nothing above debug.
+
 ## 20261004
 
 ### A record that never landed
