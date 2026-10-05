@@ -4,6 +4,27 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261005
 
+### Brokers forgotten by a topology that was behind
+
+The next run's Rama page said "Pushed by Rama 17:25:59" at 18:24, and a
+minute later 17:27:20: the sessions topology was an hour behind its
+session events, and catching up at about a third of real time. Behind like
+that, it also showed no broker registered, with three announcements and no
+withdrawals. The sweep had forgotten all three.
+
+The sweep runs off a tick depot of its own, so it is on time whatever the
+session events are behind on, and it forgot a broker whose latest report
+was stamped more than ten minutes before the tick. With the topology more
+than ten minutes behind, every report it had taken was that old, from
+brokers reporting every few seconds. A forgotten broker's clients are let
+go, and copies for a client let go are queued on Rama instead of sent:
+more for a topology that was already behind.
+
+A broker is now silent only by the reports the registry has taken: ten
+minutes behind the tick and behind the newest report from any broker. A
+topology behind on all of them forgets none, and a killed broker is still
+forgotten once the others are heard from ten minutes past it.
+
 ### Waiting for the depot, not the topology, when trying again
 
 With that fixed, the next run lost publishes from a minute in, and every

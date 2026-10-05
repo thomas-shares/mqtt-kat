@@ -2071,9 +2071,14 @@
           (record! conn {:event :broker-up :broker-id "quiet" :incarnation "q1" :host "h" :port 1 :at now})
           (record! conn (assoc (report "quiet" [(point now 1)] "q1") :broker-id "quiet"))
           (is (some? (cluster/broker-detail conn "quiet")))
+          ;; Silent while another is heard from: by the reports the
+          ;; registry has taken, not by the tick alone.
+          (record! conn {:event :broker-up :broker-id "loud" :incarnation "l1" :host "h" :port 1
+                         :at (+ now module/broker-forgotten-after-millis 60000)})
           @(r/foreign-append-async! expiry {:now (+ now module/broker-forgotten-after-millis 60000)} :ack)
           (is (tu/wait-until #(nil? (cluster/broker-detail conn "quiet"))))
-          (is (empty? (cluster/broker-history conn "quiet" nil))))
+          (is (empty? (cluster/broker-history conn "quiet" nil)))
+          (record! conn {:event :broker-down :broker-id "loud" :at now}))
         (finally
           (reset! cluster/*connection* nil)
           (web-cluster/forget!)
@@ -2198,6 +2203,22 @@
       (is (= [[:connect :ack] [:connect :append-ack] [:subscribe :ack] [:subscribe :append-ack]]
              @calls)
           "each tried again once, done once in the depot"))))
+
+(deftest a-broker-is-silent-by-the-reports-the-registry-has-taken
+  ;; The sweep's tick is on time whatever the topology is behind on: a load
+  ;; run left it an hour behind, and against the tick alone all three
+  ;; brokers looked silent while they reported every few seconds.
+  (let [ten   module/broker-forgotten-after-millis
+        now   1000000000000
+        entry {:at (- now ten 60000) :stats-at (- now ten 30000)}]
+    (testing "a broker the others have been heard after for ten minutes"
+      (is (module/broker-silent? entry now now))
+      (is (module/broker-silent? entry now nil) "and with no reports taken yet, by the tick"))
+    (testing "not while the topology is behind on every broker's reports"
+      (is (not (module/broker-silent? entry now (- now ten)))))
+    (testing "nor while it reported within ten minutes of the tick"
+      (is (not (module/broker-silent? {:at (- now 1000)} now now)))
+      (is (not (module/broker-silent? {:at 0 :stats-at (- now 1000)} now now))))))
 
 (deftest a-queue-batch-tried-again-is-done-once-the-depot-has-it
   ;; As for session events: waited on for the topology, a batch behind a
