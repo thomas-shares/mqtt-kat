@@ -780,16 +780,21 @@
         (case> :dequeue)
         (get *record :at :> *at)
         (taken-off-at *at :> *when)
+        ;; First forget what was taken off long enough ago, a few at a time:
+        ;; once a record, not once a key. A range read for each of a record's
+        ;; 256 keys tripled what a take-off cost, and at 3,000 messages a
+        ;; second Rama's batches of them no longer finished in their five
+        ;; seconds, and were tried again for ever.
+        (taken-off-before *at :> *before)
+        (<<atomic
+          (local-select> [(keypath *client-id) (sorted-map-range-to *before 16) MAP-KEYS]
+                         $$taken-off :> *old)
+          (local-transform> [(keypath *client-id *old) NONE>] $$taken-off))
         (ops/explode (get *record :keys) :> *key)
         (local-select> [(keypath *client-id *key)] $$queued :> *had)
         (local-transform> [(keypath *client-id *key) NONE>] $$queued)
         (local-transform> [(keypath *client-id *key) (termval *when)] $$taken-off)
         (count> (presence-delta "queued" *had nil))
-        ;; And forget what was taken off long enough ago, a few at a time.
-        (taken-off-before *at :> *before)
-        (local-select> [(keypath *client-id) (sorted-map-range-to *before 16) ALL]
-                       $$taken-off :> [*old *old-at])
-        (local-transform> [(keypath *client-id *old) NONE>] $$taken-off)
 
         ;; ── the sessions ───────────────────────────────────────────────
         (default>)

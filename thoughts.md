@@ -22,8 +22,12 @@ take-off, and the client got the message again.
 A key names one message for one client, so once it is taken off it has
 been had. The topology now remembers the keys taken off a session's
 queue, for an hour by the time in the key, and an enqueue of one of
-them is counted as "queue-taken-off" and dropped. Each take-off forgets
-a few of those older than that. The broker's second take-off
+them is counted as "queue-taken-off" and dropped. Each take-off record
+forgets a few of those older than that, once for the record. The first
+version did it once for every key, a range read each, which tripled what
+a take-off cost: the next run's Rama batches no longer finished in their
+five seconds and were tried again for ever, from forty seconds in, so
+nothing was queued at all and 1.87 million messages were lost. The broker's second take-off
 (redequeue-after-millis) did this for one case, a word from another
 broker arriving late, and is left in place.
 
