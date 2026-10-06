@@ -4,6 +4,37 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261006
 
+### A minute on the bridges
+
+The trace of the next 3,000 a second run, on ten topics, had every copy
+that crossed a bridge reach the other broker, and the kept clients it
+followed lost no QoS 2 message before the final reconnect. What they did
+lose, some 180 each, were copies that reached the broker they had left
+after they had gone: it queued them on the cluster, and the drain ended
+before the new broker read them back.
+
+They were that late because every bridge was a minute behind. From the
+publish's arrival at one broker to its copy's at the next took ten
+seconds in the first ten seconds of load, forty by the first minute, and
+40 to 75 seconds from then to the end, on all six links. Each link moved
+about 450 messages a second. A broker stops reading a bridge while a
+subscriber it feeds is behind, and with 135 wildcard subscribers at
+3,000 a second one of them always is. That sets the rate, and it is not
+wrong: it is the back-pressure that keeps the subscriber from losing
+messages. What made it a minute was the bridge's Receive Maximum,
+16,384: a link held its publishers once its own queue reached 2,048, and
+only filled that once the peer's window was full, so a copy waited
+behind some 18,000 others. 18,000 at 450 a second is 40 seconds.
+
+The window is 1024 now. The publishers are held as soon, behind a pipe a
+sixteenth as long, and a peer that keeps up still has the window for
+10,000 messages a second at a 100 ms round trip. Trace lines now carry
+the QoS too: a QoS 0 delivery is not followed, and without it a message
+a client was not sent could not be told from one it was sent at QoS 0.
+
+The clients that lost most were not among those followed: the top ten
+were kept wildcard subscribers, some 40,000 each, from 54 seconds in.
+
 ### Following a message through the brokers
 
 After #53, a 3,000 a second run still lost 1.4 million messages, all for

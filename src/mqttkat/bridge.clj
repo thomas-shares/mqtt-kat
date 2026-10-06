@@ -248,10 +248,21 @@
    in place of the one it gives clients. A client's window is kept small
    because the broker holds that many of its messages; a bridge carries
    every publish from one broker to another, and at a client's 128 its
-   throughput was 128 per round trip, whatever the brokers could do. A
-   quarter of the identifier space, not all of it: identifiers wrap at
-   65,535, and a window as wide as that would reuse one still in flight."
-  16384)
+   throughput was 128 per round trip, whatever the brokers could do.
+
+   It was 16,384, and that was a minute of lag. A peer stops reading a
+   bridge while a subscriber it feeds is behind (handlers/pause-threshold),
+   and at 3,000 publishes a second its wildcard subscribers kept each link
+   to some 450 messages a second. The window filled anyway, and the link
+   held its publishers only once its queue did behind it, so a copy waited
+   behind 18,000 others: 40 to 75 seconds from one broker to the next, the
+   whole run. At the final reconnect a kept session had a minute of copies
+   still on the way to the broker it left, which queued them on the
+   cluster after the client had read its queue elsewhere. With 1024 the
+   publishers are held as soon, through a queue a sixteenth as deep, and a
+   peer that is keeping up still has the window for 10,000 a second at a
+   100 ms round trip."
+  1024)
 
 (def queue-pause-at
   "Queue depth at which a link holds the publisher of the message that

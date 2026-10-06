@@ -14,10 +14,14 @@
    With topics given, a publish on one of them is followed at the broker it
    enters too: where it was planned to go, whichever clients it was for.
 
-   A line reads `trace <client> <message> <what> <detail>`, or for a
-   publish where it entered `trace - <message> on <topic> <what> <detail>`,
-   the message named by its payload up to the first `|` — a chaos client's
-   `<publisher>:<seq>` — or else by its key in the cluster."
+   A line reads `trace <client> <message> q<qos> <what> <detail>`, or for
+   a publish where it entered `trace - <message> q<qos> on <topic> <what>
+   <detail>`, the message named by its payload up to the first `|` — a
+   chaos client's `<publisher>:<seq>` — or else by its key in the cluster.
+   The QoS is the message's as it stands there: a publish's where it
+   entered, a delivery's to the client. QoS 0 deliveries are not followed,
+   so without it a message a client was not sent could not be told from
+   one sent at QoS 0."
   (:require [clojure.string :as str]
             [clojure.tools.logging :as log])
   (:import [java.nio.charset StandardCharsets]))
@@ -69,11 +73,12 @@
   "Log `what` was done with `msg` for `client-id`, if it is followed."
   [client-id msg what & detail]
   (when (on? client-id (:topic msg))
-    (log/info "trace" client-id (label msg) what (str/join " " detail))))
+    (log/info "trace" client-id (label msg) (str "q" (:qos msg)) what (str/join " " detail))))
 
 (defn publish!
   "Log `what` was done with a publish of `msg` where it entered, if its
    topic is followed."
   [msg what & detail]
   (when (topic? (:topic msg))
-    (log/info "trace -" (label msg) (str "on " (:topic msg)) what (str/join " " detail))))
+    (log/info "trace -" (label msg) (str "q" (:qos msg)) (str "on " (:topic msg)) what
+              (str/join " " detail))))
