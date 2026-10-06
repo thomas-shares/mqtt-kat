@@ -389,17 +389,22 @@
       (let [open   (requiring-resolve 'com.rpl.rama/open-cluster-manager)
             mname  (requiring-resolve 'com.rpl.rama/get-module-name)
             pstate (requiring-resolve 'com.rpl.rama/foreign-pstate)
-            select (requiring-resolve 'com.rpl.rama/foreign-select-one)
-            kp     (requiring-resolve 'com.rpl.rama.path/keypath)
+            ;; A macro, so compiled here rather than resolved.
+            select (eval '(fn [ps k] (com.rpl.rama/foreign-select-one (com.rpl.rama.path/keypath k) ps)))
             module @(requiring-resolve 'mqttkat.rama.module/MqttKatModule)
             key    @(requiring-resolve 'mqttkat.rama.module/stats-key)
             c      (open {"conductor.host" (or (get-in cfg [:setup :brokers :conductor]) "localhost")})
-            ps     (pstate c (mname module) "$$rama-stats")]
+            ps     (pstate c (mname module) "$$rama-stats")
+            said?  (atom false)]
+        (println "  the drain watches Rama's" (pr-str rama-queue-counts) "as well")
         (fn []
           (try
-            (-> (apply merge-with + (map #(dissoc % "at") (vals (select (kp key) ps))))
+            (-> (apply merge-with + (map #(dissoc % "at") (vals (select ps key))))
                 (select-keys rama-queue-counts))
-            (catch Throwable _ nil))))
+            (catch Throwable t
+              (when (compare-and-set! said? false true)
+                (println "  the drain could not read Rama's counts:" (or (ex-message t) (str t))))
+              nil))))
       (catch Throwable t
         (println "  the drain cannot read Rama's counts, and ends on the clients alone:" (ex-message t))
         nil))))
