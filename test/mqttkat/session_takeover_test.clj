@@ -16,6 +16,7 @@
             [mqttkat.trie :as trie]
             [mqttkat.test-util :as tu])
   (:import [java.nio.channels SelectionKey]
+           [java.util.concurrent CompletableFuture]
            [org.mqttkat MqttStat]))
 
 (use-fixtures :once tu/broker-fixture)
@@ -287,3 +288,47 @@
         (reset! h/session-source nil)
         (swap! @#'h/catching-up dissoc id)
         (swap! h/*clients* dissoc id)))))
+
+(deftest a-message-taken-off-is-not-sent-again-while-the-cluster-still-has-it
+  ;; Not portable: the cluster, stood in for, behind. A take-off tried again
+  ;; is done once Rama's depot has it, and the queue a read finds can still
+  ;; have the message for a long while after: let go then, it was sent again
+  ;; on every read, and a load run delivered QoS 2 messages ten times.
+  (let [id    (tu/client-id "stale-read")
+        queue (atom (sorted-map "k1" {:topic "stale/t" :payload (.getBytes "m1") :qos 2}))]
+    (reset! h/session-source
+            {:my-broker-id "here"
+             :resume       (fn [_] {:session       {:clean-session? false :connected? false}
+                                    :subscriptions {}
+                                    :queued        (vec @queue)})
+             :queued       (fn [_ limit] (vec (take limit @queue)))
+             :enqueue!     (fn [_ _ _] nil)
+             ;; In the depot at once, and taken off the queue only when the
+             ;; test says the topology has caught up.
+             :dequeue!     (fn [_ _] (CompletableFuture/completedFuture nil))
+             :takeover!    (fn [_ _ _] nil)})
+    (let [c (tu/connect! nil :id id :clean-session? false)]
+      (try
+        (let [msg (tu/expect! (:ch c) :PUBLISH 3000)]
+          (is (= "m1" (tu/payload-str msg)) "the queued message is sent on the resume")
+          (client/pubrec (:client c) (:packet-identifier msg))
+          (client/pubcomp (:client c) (:packet-identifier (tu/expect! (:ch c) :PUBREL 3000))))
+        (Thread/sleep 50)
+        (h/nudged! id)
+        (is (empty? (:PUBLISH (tu/take-n! (:ch c) 1 (+ 500 (first h/catch-up-reads-millis)))))
+            "and not again while the cluster's queue still has it")
+        (is (contains? (get-in @@#'h/catching-up [id :had]) "k1") "which is still counted as had")
+        (swap! queue dissoc "k1")
+        (h/nudged! id)
+        (is (tu/wait-until #(not (contains? (get-in @@#'h/catching-up [id :had]) "k1")))
+            "until a read no longer finds it")
+        (swap! queue assoc "k2" {:topic "stale/t" :payload (.getBytes "m2") :qos 1})
+        (h/nudged! id)
+        (is (= "m2" (some-> (tu/expect! (:ch c) :PUBLISH 3000) tu/payload-str))
+            "and what is queued next is still sent")
+        (finally
+          (tu/close! c)
+          (reset! h/session-source nil)
+          (swap! @#'h/catching-up dissoc id)
+          (swap! h/*clients* dissoc id)
+          (h/cancel-session-expiry! id))))))

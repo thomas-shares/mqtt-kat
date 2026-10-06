@@ -1401,9 +1401,9 @@
   ;; says something new is on it (nudged!) — and every key it has had from
   ;; there or live under a message key while reconciled, which a read
   ;; leaves out. Each with when its take-off from the queue landed, nil
-  ;; until it has: a read begun after that cannot find it, and the key is
-  ;; let go when the next one begins. Let go sooner, a read that was under
-  ;; way found it and sent it again.
+  ;; until it has: the key is let go by the first read begun after that
+  ;; which does not find it (end-read!). Let go sooner, a read that was
+  ;; under way found it and sent it again.
   (atom {}))
 
 (defn- had
@@ -1619,10 +1619,10 @@
   2000)
 
 (defn- begin-read!
-  "Whether a read of `client-id`'s queue may begin now for `connect-id`: one
-   at a time, so that what a read leaves out is what no read under way can
-   still find. One asked for while another is on is made once that one is
-   done. Lets go of the keys whose take-off landed before now."
+  "When a read of `client-id`'s queue may begin now for `connect-id`, the
+   moment it began; nil when it may not. One at a time, so that what a read
+   leaves out is what no read under way can still find. One asked for while
+   another is on is made once that one is done."
   [client-id connect-id]
   (let [now (System/currentTimeMillis)
         [before after]
@@ -1634,22 +1634,34 @@
                           reading?            (update m client-id assoc :again? true :scheduled? false)
                           :else
                           (assoc m client-id
-                                 (assoc e :reading? true :again? false :scheduled? false
-                                        :had (into {}
-                                                   (remove (fn [[_ landed]] (and landed (< (long landed) now))))
-                                                   (:had e))))))))]
-    (boolean (and (get-in after [client-id :reading?])
-                  (not (get-in before [client-id :reading?]))))))
+                                 (assoc e :reading? true :again? false :scheduled? false))))))]
+    (when (and (get-in after [client-id :reading?])
+               (not (get-in before [client-id :reading?])))
+      now)))
 
 (defn- end-read!
-  "A read for `connect-id` is done, having sent the keys `took`. Whether
-   another was asked for meanwhile."
-  [client-id connect-id took]
+  "A read for `connect-id`, begun at `began`, is done, having sent the keys
+   `took`. Lets go of the keys whose take-off landed before it began and
+   that it did not find, `gone?`: the cluster has taken them off. Landed
+   alone is not enough. A take-off tried again is done once Rama's depot
+   has it (see mqttkat.rama.cluster/send-batch!), and the queue a read
+   finds is the topology's, which can be far behind that: let go when it
+   landed, a key was found on the queue still, and sent again, on every
+   read until the topology caught up. A load run delivered QoS 2 messages
+   to one client ten times. Whether another read was asked for meanwhile."
+  [client-id connect-id began took gone?]
   (let [[before _] (swap-vals! catching-up
                                (fn [m] (if (= connect-id (get-in m [client-id :connect-id]))
                                          (update m client-id
                                                  #(-> %
                                                       (assoc :reading? false :again? false)
+                                                      (update :had (fn [h]
+                                                                     (into {}
+                                                                           (remove (fn [[k landed]]
+                                                                                     (and landed
+                                                                                          (< (long landed) (long began))
+                                                                                          (gone? k))))
+                                                                           h)))
                                                       (update :had (fn [h] (apply had h took)))))
                                          m)))]
     (and (= connect-id (get-in before [client-id :connect-id]))
@@ -1663,20 +1675,27 @@
    reading again. False when another read is under way, which reads again
    once it is done."
   [client-id connect-id]
-  (if-not (and (:queued @session-source) (begin-read! client-id connect-id))
-    false
+  (if-let [began (when (:queued @session-source) (begin-read! client-id connect-id))]
     (let [took    (volatile! #{})
+          gone?   (volatile! (constantly false))
           landed? (= :landed (some-> (existing-outbound client-id) deref :gate))]
       (try
         (let [{:keys [queued]} @session-source
               ;; The head of it: what was had and is still there, and as
               ;; much again as the broker's own queue holds.
-              entries (queued client-id (+ (count (get-in @catching-up [client-id :had])) pending-limit))
+              limit   (+ (count (get-in @catching-up [client-id :had])) pending-limit)
+              entries (queued client-id limit)
               ;; What it has had by now, not when the read began: a live
               ;; delivery noted during a slow read is on the queue still,
               ;; and went out twice.
               had     (get-in @catching-up [client-id :had])
-              fresh   (remove #(contains? had (first %)) entries)]
+              fresh   (remove #(contains? had (first %)) entries)
+              found   (set (map first entries))
+              ;; The queue comes in key order, so one cut off at `limit`
+              ;; says nothing of the keys after its last.
+              upto    (when (>= (count entries) (long limit)) (first (last entries)))]
+          (vreset! gone? (fn [k] (and (not (contains? found k))
+                                      (or (nil? upto) (neg? (compare k upto))))))
           (vreset! took (deliver-queued! client-id connect-id fresh (keys had)))
           ;; Begun once the hand-over had landed: it has taken its
           ;; identifiers, and the rest may have theirs. See gate-identifiers!.
@@ -1686,8 +1705,9 @@
           (log/warn t "could not read the queue of" client-id "again")
           false)
         (finally
-          (when (end-read! client-id connect-id @took)
-            (read-soon! client-id connect-id 0)))))))
+          (when (end-read! client-id connect-id began @took @gone?)
+            (read-soon! client-id connect-id 0)))))
+    false))
 
 (defn- read-soon!
   "Read `client-id`'s queue again after `ms`, and then for as long as a

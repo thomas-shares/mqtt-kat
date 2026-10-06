@@ -2,6 +2,33 @@
 
 In this file will go my thoughts and ramblings about this project and what I have done and what I might do next.
 
+## 20261006
+
+### QoS 2 sent again from a queue Rama had not caught up with
+
+At 3,000 messages a second the chaos run delivered tens of thousands of
+QoS 2 messages twice, one of them about ten times, all from the broker
+the client was on. A persistent session's queue on the cluster is read
+again and again while the client is connected (catch-up!), and what a
+read sends is noted as had, so the next read leaves it out. The note was
+let go once the take-off from the queue had landed. Landed was meant to
+be when the topology had taken it off. Since the retries wait for the
+depot only, not the topology (20261005, below), a take-off tried again
+lands as soon as the depot has it. With Rama minutes behind, the next
+read found the message still on the queue, no longer had, and sent it
+again under a new packet identifier, and so on every read until the
+topology caught up. The client, rightly, took each one as a new message.
+
+A key is now let go only by a read begun after its take-off landed that
+does not find it on the queue: what the topology says, not what the
+depot has. A queue cut off at the read's limit says nothing of the keys
+after its last one, which are kept.
+
+The chaos ledger kept the detail of only the first ten thousand repeats,
+and QoS 1 repeats, which MQTT allows, used it up in seconds, so all but
+three of the QoS 2 duplicates came without where they were delivered.
+Each QoS has its own ten thousand now.
+
 ## 20261005
 
 ### What a moving session was in the middle of, kept
