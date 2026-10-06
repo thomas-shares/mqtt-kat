@@ -602,15 +602,37 @@
                     msg  (fn [p] {:topic "away/t" :payload (.getBytes ^String p) :qos 1})
                     futs (-> (mapv #(cluster/enqueue! conn "lane-1" (msg "x") %) ks)
                              (conj (cluster/dequeue! conn "lane-1" (take 10 ks)))
-                             ;; Taken off, then put back: in any other order
-                             ;; it would be gone.
-                             (conj (cluster/enqueue! conn "lane-1" (msg "again") (first ks))))]
+                             ;; Queued again: in any other order it would
+                             ;; still say "x".
+                             (conj (cluster/enqueue! conn "lane-1" (msg "again") (last ks))))]
                 (is (every? #(nil? (deref % 10000 ::timeout)) futs) "each one landed")
                 (let [q (cluster/queued conn "lane-1")]
-                  (is (= (set (cons (first ks) (drop 10 ks))) (set (map first q))))
-                  (is (= "again" (String. ^bytes (:payload (get (into {} q) (first ks)))))))
+                  (is (= (set (drop 10 ks)) (set (map first q))))
+                  (is (= "again" (String. ^bytes (:payload (get (into {} q) (last ks)))))))
                 @(cluster/dequeue! conn "lane-1" (map first (cluster/queued conn "lane-1")))
                 (is (empty? (cluster/queued conn "lane-1")))))
+            (testing "a message taken off stays off when it is queued again under its key"
+              ;; A write tried again after a timeout reaches the depot twice,
+              ;; and one from another broker can land late: put back, a chaos
+              ;; run sent QoS 2 messages again to a client that had them.
+              (let [k     (h/new-message-key)
+                    other (h/new-message-key)
+                    msg   {:topic "away/t" :payload (.getBytes "taken") :qos 2}]
+                (record! conn (cluster/->enqueue "away-1" msg k))
+                (record! conn (cluster/->dequeue "away-1" [k]))
+                (record! conn (cluster/->enqueue "away-1" msg k))
+                (record! conn (cluster/->enqueue "away-1" msg other))
+                (is (= [other] (map first (cluster/queued conn "away-1"))) "only the one never taken off")
+                (record! conn (cluster/->dequeue "away-1" [other]))
+                (is (empty? (cluster/queued conn "away-1")))))
+            (testing "and what was taken off long enough ago is forgotten"
+              (let [old  (format "%013d-old" (- (System/currentTimeMillis) module/taken-off-kept-millis 60000))
+                    msg  {:topic "away/t" :payload (.getBytes "old") :qos 1}]
+                (record! conn (cluster/->dequeue "away-1" [old]))
+                (record! conn (cluster/->dequeue "away-1" [(h/new-message-key)]))
+                (record! conn (cluster/->enqueue "away-1" msg old))
+                (is (= [old] (map first (cluster/queued conn "away-1"))))
+                (record! conn (cluster/->dequeue "away-1" [old]))))
             (is (= {:queue [{:client-id "away-1" :qos 1}] :leaving [] :moved []}
                    (cluster/plan conn "away/t" {:away-only? true}))
                 "a copy from another broker: queued for a client last here, and nothing else planned")

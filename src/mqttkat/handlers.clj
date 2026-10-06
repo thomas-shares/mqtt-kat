@@ -945,7 +945,10 @@
   ([state msg from-pending? window]
    (let [inflight (:inflight state {})]
      (if (or (>= (count inflight) (long window))
-             (and (not from-pending?) (seq (:pending state))))
+             (and (not from-pending?) (seq (:pending state)))
+             ;; No identifier while another broker may still hold some of
+             ;; this session's: see gate-identifiers!.
+             (:gate state))
        state
        (if-let [id (next-identifier state)]
          (assoc state :next-id id :inflight (assoc inflight id msg))
@@ -1338,7 +1341,8 @@
   "Put a message from the cluster's queue on `client-id`'s outbound state: in
    flight under the identifier it was sent with, when hand-over-unacknowledged!
    recorded one and it is free here, so the resume's redelivery sends it again
-   as the same message (§4.4); otherwise on the queue, for a new identifier."
+   as the same message (§4.4); otherwise on the queue, for a new identifier.
+   False when it stays on the cluster's queue for a later read instead."
   [client-id msg]
   (if (:released? msg)
     (restore-release! client-id msg)
@@ -1355,14 +1359,17 @@
                                            state
                                            (assoc-in state [:inflight identifier] msg))))]
                        (not (identical? before after))))]
-    (when-not placed?
-      (queue-pending! client-id msg))))
+    (or placed? (queue-pending! client-id msg))))
 
 (defn- restore-release!
   "A PUBREL a hand-over left on the cluster's queue: in flight here under its
    identifier, released, so that the resume sends the PUBREL (see
-   redeliver-inflight!) and the PUBCOMP takes it off the queue. Taken off at
-   once when the identifier is in use here already: that exchange is over."
+   redeliver-inflight!) and the PUBCOMP takes it off the queue. False, and
+   left on the cluster's queue, when the identifier is in use here already:
+   a later read sends it once the identifier is free (resend-handed-over!).
+   Taken off instead, as it once was, the client went on holding the
+   identifier for a PUBREL that never came, and took the next message sent
+   under it for one it had."
   [client-id {:keys [packet-identifier] :as msg}]
   (let [k (::cluster-key msg)
         [before after]
@@ -1372,10 +1379,7 @@
                         state
                         (assoc-in state [:inflight packet-identifier]
                                   {:topic (:topic msg) :qos 2 ::released? true ::release-key k}))))]
-    (when (identical? before after)
-      (when-let [{:keys [dequeue!]} @session-source]
-        (when k (dequeue! client-id [k]))))
-    true))
+    (not (identical? before after))))
 
 (def catch-up-reads-millis
   "When, after a persistent session resumes here, its queue on the cluster
@@ -1397,9 +1401,9 @@
   ;; says something new is on it (nudged!) — and every key it has had from
   ;; there or live under a message key while reconciled, which a read
   ;; leaves out. Each with when its take-off from the queue landed, nil
-  ;; until it has: a read begun after that cannot find it, and the key is
-  ;; let go when the next one begins. Let go sooner, a read that was under
-  ;; way found it and sent it again.
+  ;; until it has: the key is let go by the first read begun after that
+  ;; which does not find it (end-read!). Let go sooner, a read that was
+  ;; under way found it and sent it again.
   (atom {}))
 
 (defn- had
@@ -1476,9 +1480,74 @@
           (not (alive? (:broker-id s)))           resumed
           (> (System/currentTimeMillis) deadline)
           (do (log/warn "session" client-id "is still recorded on" (:broker-id s)
-                        "after" hand-over-wait-millis "ms - resuming it without its hand-over")
-              resumed)
+                        "after" hand-over-wait-millis "ms - resuming it without its hand-over,"
+                        "and giving out no identifiers until it lands")
+              (assoc resumed ::waited-out? true))
           :else (do (Thread/sleep 100) (recur)))))))
+
+(def identifier-gate-millis
+  "How long a session resumed without its hand-over (see once-gone) gives
+   out no packet identifiers while the broker it left still has it, at
+   most. Past that, the broker is taken to have nothing to hand over."
+  60000)
+
+(defn- open-gate!
+  "Give out identifiers for `client-id` again, and send what waited."
+  [client-id]
+  (let [[before _] (swap-vals! (outbound-atom client-id) dissoc :gate)]
+    (when (:gate before)
+      (when-let [key (live-connection client-id)]
+        (flush-pending! key client-id)))))
+
+(declare read-soon!)
+
+(defn- gate-identifiers!
+  "`client-id` resumed here while `session` still had it on another broker,
+   whose hand-over had not landed: give out no identifiers until it has, or
+   the other broker has left the cluster, or identifier-gate-millis has
+   gone by. The hand-over carries the identifiers the client holds messages
+   under; given out here first, they went to new messages, and the client
+   took a new QoS 2 message under an identifier it still held for the old
+   one as that one, and never had it. What would have taken one waits on
+   the pending queue.
+
+   Once the record moves on, the queue is read first, so the hand-over
+   takes its identifiers, and that read opens the gate (read-again!)."
+  [resume client-id session my-broker-id]
+  (swap! (outbound-atom client-id) assoc :gate :closed)
+  (future
+    (try
+      (let [deadline (+ (System/currentTimeMillis) (long identifier-gate-millis))
+            alive?   (or @bridge/peer-alive? (constantly true))
+            same?    (fn [s] (and (connected-elsewhere? s my-broker-id)
+                                  (= (:connect-id s) (:connect-id session))))]
+        (loop []
+          (let [gate (:gate @(outbound-atom client-id))]
+            (cond
+              (nil? gate) nil
+
+              (> (System/currentTimeMillis) deadline)
+              (do (log/warn "session" client-id "still has no hand-over from" (:broker-id session)
+                            "after" identifier-gate-millis "ms more - giving out identifiers again")
+                  (open-gate! client-id))
+
+              ;; Landed, and the read that opens the gate asked for: waited
+              ;; on here only in case that read never comes.
+              (= :landed gate) (do (Thread/sleep 250) (recur))
+
+              :else
+              (let [s (:session (resume client-id))]
+                (if (or (not (same? s)) (not (alive? (:broker-id s))))
+                  (let [cid (get-in @catching-up [client-id :connect-id])]
+                    (swap! (outbound-atom client-id) #(if (:gate %) (assoc % :gate :landed) %))
+                    (if cid
+                      (read-soon! client-id cid 0)
+                      (open-gate! client-id))
+                    (recur))
+                  (do (Thread/sleep 250) (recur))))))))
+      (catch Throwable t
+        (log/warn t "could not follow the hand-over of" client-id "- giving out identifiers again")
+        (open-gate! client-id)))))
 
 (defn adopt-session!
   "Take over `client-id`'s session from the cluster, on its CONNECT.
@@ -1503,7 +1572,7 @@
   ;; with two peers looks like one client connected in two places, and the
   ;; takeover below had its bridges knock each other off in turn.
   (when-let [{:keys [resume takeover! my-broker-id]} (when-not (bridge/bridge? client-id) @session-source)]
-    (when-let [{:keys [session subscriptions queued]}
+    (when-let [{:keys [session subscriptions queued] ::keys [waited-out?] :as adopted}
                (let [{:keys [session] :as resumed} (resume client-id)]
                  (if (connected-elsewhere? session my-broker-id)
                    (do (log/info "session" client-id "is connected on" (:broker-id session) "- taking it over")
@@ -1526,11 +1595,18 @@
                                             :subscribed-topics entries})
           (log/info "session" client-id "taken over from the cluster:"
                     (count entries) "subscriptions," (count queued) "queued"))
-        (swap! catching-up assoc client-id {:had (zipmap (map first queued) (repeat nil))})
-        (doseq [[k msg] queued]
-          (restore-queued! client-id (assoc msg
-                                            ::queued-at (:queued-at msg)
-                                            ::cluster-key k))))
+        ;; Had: what was restored here. What stays on the cluster's queue
+        ;; is left for the reads that follow.
+        (let [restored (into [] (keep (fn [[k msg]]
+                                        (when (restore-queued! client-id (assoc msg
+                                                                                ::queued-at (:queued-at msg)
+                                                                                ::cluster-key k))
+                                          k)))
+                             queued)]
+          (swap! catching-up assoc client-id {:had (zipmap restored (repeat nil))}))
+        (if waited-out?
+          (gate-identifiers! resume client-id (:session adopted) my-broker-id)
+          (swap! (outbound-atom client-id) dissoc :gate)))
       true)))
 
 (declare deliver-queued!)
@@ -1543,10 +1619,10 @@
   2000)
 
 (defn- begin-read!
-  "Whether a read of `client-id`'s queue may begin now for `connect-id`: one
-   at a time, so that what a read leaves out is what no read under way can
-   still find. One asked for while another is on is made once that one is
-   done. Lets go of the keys whose take-off landed before now."
+  "When a read of `client-id`'s queue may begin now for `connect-id`, the
+   moment it began; nil when it may not. One at a time, so that what a read
+   leaves out is what no read under way can still find. One asked for while
+   another is on is made once that one is done."
   [client-id connect-id]
   (let [now (System/currentTimeMillis)
         [before after]
@@ -1558,28 +1634,39 @@
                           reading?            (update m client-id assoc :again? true :scheduled? false)
                           :else
                           (assoc m client-id
-                                 (assoc e :reading? true :again? false :scheduled? false
-                                        :had (into {}
-                                                   (remove (fn [[_ landed]] (and landed (< (long landed) now))))
-                                                   (:had e))))))))]
-    (boolean (and (get-in after [client-id :reading?])
-                  (not (get-in before [client-id :reading?]))))))
+                                 (assoc e :reading? true :again? false :scheduled? false))))))]
+    (when (and (get-in after [client-id :reading?])
+               (not (get-in before [client-id :reading?])))
+      now)))
 
 (defn- end-read!
-  "A read for `connect-id` is done, having sent the keys `took`. Whether
-   another was asked for meanwhile."
-  [client-id connect-id took]
+  "A read for `connect-id`, begun at `began`, is done, having sent the keys
+   `took`. Lets go of the keys whose take-off landed before it began and
+   that it did not find, `gone?`: the cluster has taken them off. Landed
+   alone is not enough. A take-off tried again is done once Rama's depot
+   has it (see mqttkat.rama.cluster/send-batch!), and the queue a read
+   finds is the topology's, which can be far behind that: let go when it
+   landed, a key was found on the queue still, and sent again, on every
+   read until the topology caught up. A load run delivered QoS 2 messages
+   to one client ten times. Whether another read was asked for meanwhile."
+  [client-id connect-id began took gone?]
   (let [[before _] (swap-vals! catching-up
                                (fn [m] (if (= connect-id (get-in m [client-id :connect-id]))
                                          (update m client-id
                                                  #(-> %
                                                       (assoc :reading? false :again? false)
+                                                      (update :had (fn [h]
+                                                                     (into {}
+                                                                           (remove (fn [[k landed]]
+                                                                                     (and landed
+                                                                                          (< (long landed) (long began))
+                                                                                          (gone? k))))
+                                                                           h)))
                                                       (update :had (fn [h] (apply had h took)))))
                                          m)))]
     (and (= connect-id (get-in before [client-id :connect-id]))
          (boolean (get-in before [client-id :again?])))))
 
-(declare read-soon!)
 
 (defn- read-again!
   "Deliver what is on `client-id`'s queue on the cluster and not yet had,
@@ -1588,27 +1675,39 @@
    reading again. False when another read is under way, which reads again
    once it is done."
   [client-id connect-id]
-  (if-not (and (:queued @session-source) (begin-read! client-id connect-id))
-    false
-    (let [took (volatile! #{})]
+  (if-let [began (when (:queued @session-source) (begin-read! client-id connect-id))]
+    (let [took    (volatile! #{})
+          gone?   (volatile! (constantly false))
+          landed? (= :landed (some-> (existing-outbound client-id) deref :gate))]
       (try
         (let [{:keys [queued]} @session-source
               ;; The head of it: what was had and is still there, and as
               ;; much again as the broker's own queue holds.
-              entries (queued client-id (+ (count (get-in @catching-up [client-id :had])) pending-limit))
+              limit   (+ (count (get-in @catching-up [client-id :had])) pending-limit)
+              entries (queued client-id limit)
               ;; What it has had by now, not when the read began: a live
               ;; delivery noted during a slow read is on the queue still,
               ;; and went out twice.
               had     (get-in @catching-up [client-id :had])
-              fresh   (remove #(contains? had (first %)) entries)]
+              fresh   (remove #(contains? had (first %)) entries)
+              found   (set (map first entries))
+              ;; The queue comes in key order, so one cut off at `limit`
+              ;; says nothing of the keys after its last.
+              upto    (when (>= (count entries) (long limit)) (first (last entries)))]
+          (vreset! gone? (fn [k] (and (not (contains? found k))
+                                      (or (nil? upto) (neg? (compare k upto))))))
           (vreset! took (deliver-queued! client-id connect-id fresh (keys had)))
+          ;; Begun once the hand-over had landed: it has taken its
+          ;; identifiers, and the rest may have theirs. See gate-identifiers!.
+          (when landed? (open-gate! client-id))
           (< (count @took) (count fresh)))
         (catch Throwable t
           (log/warn t "could not read the queue of" client-id "again")
           false)
         (finally
-          (when (end-read! client-id connect-id @took)
-            (read-soon! client-id connect-id 0)))))))
+          (when (end-read! client-id connect-id began @took @gone?)
+            (read-soon! client-id connect-id 0)))))
+    false))
 
 (defn- read-soon!
   "Read `client-id`'s queue again after `ms`, and then for as long as a
@@ -1763,7 +1862,8 @@
           (swap! catching-up (fn [m] (if (= connect-id (get-in m [client-id :connect-id]))
                                        (update-in m [client-id :had] #(apply had % took))
                                        m)))
-          (log/info "delivering" (count took) "messages queued for" client-id "while it was taken for away"))
+          (log/info "delivering" (count took) "messages queued for" client-id "while it was taken for away"
+                    (str "- from " (first (sort took)))))
         (when @queued?
           (flush-pending! key client-id))
         took)))))
@@ -3521,6 +3621,12 @@
   #_(log/debug "received (PUBREL:" packet-identifier)
   (let [client-id (:client-id (get @*clients* client-key))
         {:keys [topic msg]} (get @*inflight* [client-id packet-identifier])
+        ;; From the connection the PUBREL came on, not the one the PUBLISH
+        ;; did: a client that reconnected in between, its session kept, is
+        ;; this connection now. Another broker's bridge does that when its
+        ;; link drops, and the publish, taken for a client's, went on to
+        ;; every other broker.
+        msg       (some-> msg (assoc :client-key client-key))
         held      (java.util.ArrayList.)]
     (when topic
       ;; §4.3.3 publishes on the PUBREL, so the subscribers are whoever matches

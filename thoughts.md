@@ -2,7 +2,102 @@
 
 In this file will go my thoughts and ramblings about this project and what I have done and what I might do next.
 
+## 20261006
+
+### A message taken off a queue stays off
+
+With reads fixed, the next 3,000 a second run still had 1,634 QoS 2
+duplicates, each sent some ten to forty times, every ten to fifty seconds
+through the drain, by the broker the client had moved to at the end. Its
+log had it finding the one message on the client's queue each time. A
+read only sends what it has not had, and lets a key go once its take-off
+has landed and a read no longer finds it, so the message was gone from
+the queue in between and came back. A take-off removes the key, and an
+enqueue of the same key puts it back, in whatever order the depot has
+them; and a queue write that times out has often reached the depot, so
+trying it again puts it there twice. With Rama minutes behind, an
+enqueue tried again, or another broker's landing late, came after the
+take-off, and the client got the message again.
+
+A key names one message for one client, so once it is taken off it has
+been had. The topology now remembers the keys taken off a session's
+queue, for an hour by the time in the key, and an enqueue of one of
+them is counted as "queue-taken-off" and dropped. Each take-off record
+forgets a few of those older than that, once for the record. The first
+version did it once for every key, a range read each, which tripled what
+a take-off cost: the next run's Rama batches no longer finished in their
+five seconds and were tried again for ever, from forty seconds in, so
+nothing was queued at all and 1.87 million messages were lost. The broker's second take-off
+(redequeue-after-millis) did this for one case, a word from another
+broker arriving late, and is left in place.
+
+### QoS 2 sent again from a queue Rama had not caught up with
+
+At 3,000 messages a second the chaos run delivered tens of thousands of
+QoS 2 messages twice, one of them about ten times, all from the broker
+the client was on. A persistent session's queue on the cluster is read
+again and again while the client is connected (catch-up!), and what a
+read sends is noted as had, so the next read leaves it out. The note was
+let go once the take-off from the queue had landed. Landed was meant to
+be when the topology had taken it off. Since the retries wait for the
+depot only, not the topology (20261005, below), a take-off tried again
+lands as soon as the depot has it. With Rama minutes behind, the next
+read found the message still on the queue, no longer had, and sent it
+again under a new packet identifier, and so on every read until the
+topology caught up. The client, rightly, took each one as a new message.
+
+A key is now let go only by a read begun after its take-off landed that
+does not find it on the queue: what the topology says, not what the
+depot has. A queue cut off at the read's limit says nothing of the keys
+after its last one, which are kept.
+
+The chaos ledger kept the detail of only the first ten thousand repeats,
+and QoS 1 repeats, which MQTT allows, used it up in seconds, so all but
+three of the QoS 2 duplicates came without where they were delivered.
+Each QoS has its own ten thousand now.
+
 ## 20261005
+
+### What a moving session was in the middle of, kept
+
+Stage 3, the last of the three. Four things a session or a link was in
+the middle of when it moved or dropped, each lost before.
+
+A bridge link that dropped handed back everything in flight, and the
+sender queued it on the cluster for the clients it was for. What the
+peer already had went out twice, and a QoS 2 message it had taken and
+not yet been released went nowhere: this broker publishes on the PUBREL
+(§4.3.3), and the PUBREL never came. A link now keeps an MQTT session on
+the peer, and when its connection drops while the peer is still listed,
+the next link takes up its queue and what it had in flight, connects
+again to that session, and sends the PUBRELs and the unacknowledged
+publishes again, as DUP. A peer that comes back without the session has
+none of them, and they are handed back as before. The first link of a
+run starts a fresh session. On the peer's side, a PUBREL publishes from
+the connection it came on: from the one the PUBLISH came on, gone after a
+reconnect, a bridged message was taken for a client's and forwarded on
+to every other broker.
+
+A takeover went down the bridge behind every publish queued there, and
+with the bridges a minute behind, the new broker gave up waiting for the
+old one's hand-over. It now goes at the front of the queue. What it
+overtakes reaches the old broker after the client has left, and is
+queued there for it on the cluster, as for any client the sender had
+there and that did not get it live.
+
+A session the new broker resumed without its hand-over, after that wait
+ran out, gave out packet identifiers at once. The hand-over carries the
+identifiers the client still holds messages under on the old broker, and
+a new QoS 2 message under one the client held for an old one was taken
+for that one. Now such a session gives out none until the old broker's
+record moves on, and the queue has been read once more so the hand-over
+takes its identifiers first; or until the old broker leaves the cluster,
+or a minute has gone by. What would have gone out waits on the pending
+queue.
+
+And a PUBREL from a hand-over whose identifier was in use here was taken
+off the cluster's queue at the resume and never sent. It now stays
+there, and a later read sends it once the identifier is free.
 
 ### Brokers forgotten by a topology that was behind
 

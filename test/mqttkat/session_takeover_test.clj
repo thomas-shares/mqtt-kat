@@ -16,6 +16,7 @@
             [mqttkat.trie :as trie]
             [mqttkat.test-util :as tu])
   (:import [java.nio.channels SelectionKey]
+           [java.util.concurrent CompletableFuture]
            [org.mqttkat MqttStat]))
 
 (use-fixtures :once tu/broker-fixture)
@@ -204,3 +205,130 @@
           ;; Not bound like the rest: if one was scheduled it would fire on
           ;; the shared broker's state, so it goes either way.
           (finally (h/cancel-session-expiry! id)))))))
+
+(deftest a-handed-over-release-whose-identifier-is-in-use-stays-queued
+  ;; Not portable: a session resumed from the cluster, stood in for here. A
+  ;; PUBREL a hand-over left on the queue under an identifier already in
+  ;; flight here was taken off the queue and never sent, and the client went
+  ;; on holding the identifier for it.
+  (let [id       (tu/client-id "release-in-use")
+        dequeued (atom [])
+        queued   [["k-msg" {:topic "rel/t" :payload (.getBytes "m") :qos 2 :packet-identifier 7}]
+                  ["k-rel" {:topic "rel/t" :qos 2 :packet-identifier 7 :released? true}]]]
+    (reset! h/session-source
+            {:my-broker-id "here"
+             :resume       (fn [_] {:session       {:clean-session? false :connected? false}
+                                    :subscriptions {}
+                                    :queued        queued})
+             :enqueue!     (fn [_ _ _] nil)
+             :dequeue!     (fn [_ ks] (swap! dequeued into ks))
+             :takeover!    (fn [_ _ _] nil)})
+    (try
+      (is (true? (h/adopt-session! id)))
+      (is (= #{7} (set (keys (:inflight @(#'h/existing-outbound id)))))
+          "the message is in flight under its identifier")
+      (is (not (::h/released? (get-in @(#'h/existing-outbound id) [:inflight 7])))
+          "the release did not replace it")
+      (is (= [] @dequeued) "and is not taken off the cluster's queue")
+      (is (= #{"k-msg"} (set (keys (get-in @@#'h/catching-up [id :had]))))
+          "nor counted as had, so a later read finds it")
+      (finally
+        (reset! h/session-source nil)
+        (swap! @#'h/catching-up dissoc id)
+        (swap! h/*clients* dissoc id)))))
+
+(deftest no-identifiers-until-the-hand-over-lands
+  ;; Not portable: another broker, stood in for. Resumed without the old
+  ;; broker's hand-over, the session gave out identifiers the client still
+  ;; held messages under there, and lost a QoS 2 message to one of them.
+  (let [id     (tu/client-id "gated")
+        moved? (atom false)
+        record (fn [] (if @moved?
+                        {:clean-session? false :connected? false :broker-id "there" :connect-id "old"}
+                        {:clean-session? false :connected? true :broker-id "there" :connect-id "old"}))
+        msg    {:topic "gate/t" :payload (.getBytes "m") :qos 1}]
+    (reset! h/session-source
+            {:my-broker-id "here"
+             :resume       (fn [_] {:session (record) :subscriptions {} :queued []})
+             :enqueue!     (fn [_ _ _] nil)
+             :dequeue!     (fn [_ _] nil)
+             :takeover!    (fn [_ _ _] nil)})
+    (try
+      (with-redefs [h/hand-over-wait-millis 200]
+        (is (true? (h/adopt-session! id)) "resumed once the wait ran out"))
+      (is (nil? (h/acquire-packet-identifier! id msg)) "and gives out no identifier while it is still there")
+      (Thread/sleep 400)
+      (is (nil? (h/acquire-packet-identifier! id msg)) "nor a moment later")
+      (reset! moved? true)
+      (is (tu/wait-until #(some? (h/acquire-packet-identifier! id msg)))
+          "once its record moves on, it does")
+      (finally
+        (reset! h/session-source nil)
+        (swap! @#'h/catching-up dissoc id)
+        (swap! h/*clients* dissoc id)))))
+
+(deftest identifiers-are-given-out-again-if-the-hand-over-never-lands
+  (let [id  (tu/client-id "gated-for-good")
+        msg {:topic "gate/t" :payload (.getBytes "m") :qos 1}]
+    (reset! h/session-source
+            {:my-broker-id "here"
+             :resume       (fn [_] {:session {:clean-session? false :connected? true
+                                              :broker-id "there" :connect-id "old"}
+                                    :subscriptions {} :queued []})
+             :enqueue!     (fn [_ _ _] nil)
+             :dequeue!     (fn [_ _] nil)
+             :takeover!    (fn [_ _ _] nil)})
+    (try
+      (with-redefs [h/hand-over-wait-millis  200
+                    h/identifier-gate-millis 500]
+        (is (true? (h/adopt-session! id)))
+        (is (nil? (h/acquire-packet-identifier! id msg)))
+        (is (tu/wait-until #(some? (h/acquire-packet-identifier! id msg)))))
+      (finally
+        (reset! h/session-source nil)
+        (swap! @#'h/catching-up dissoc id)
+        (swap! h/*clients* dissoc id)))))
+
+(deftest a-message-taken-off-is-not-sent-again-while-the-cluster-still-has-it
+  ;; Not portable: the cluster, stood in for, behind. A take-off tried again
+  ;; is done once Rama's depot has it, and the queue a read finds can still
+  ;; have the message for a long while after: let go then, it was sent again
+  ;; on every read, and a load run delivered QoS 2 messages ten times.
+  (let [id    (tu/client-id "stale-read")
+        queue (atom (sorted-map "k1" {:topic "stale/t" :payload (.getBytes "m1") :qos 2}))]
+    (reset! h/session-source
+            {:my-broker-id "here"
+             :resume       (fn [_] {:session       {:clean-session? false :connected? false}
+                                    :subscriptions {}
+                                    :queued        (vec @queue)})
+             :queued       (fn [_ limit] (vec (take limit @queue)))
+             :enqueue!     (fn [_ _ _] nil)
+             ;; In the depot at once, and taken off the queue only when the
+             ;; test says the topology has caught up.
+             :dequeue!     (fn [_ _] (CompletableFuture/completedFuture nil))
+             :takeover!    (fn [_ _ _] nil)})
+    (let [c (tu/connect! nil :id id :clean-session? false)]
+      (try
+        (let [msg (tu/expect! (:ch c) :PUBLISH 3000)]
+          (is (= "m1" (tu/payload-str msg)) "the queued message is sent on the resume")
+          (client/pubrec (:client c) (:packet-identifier msg))
+          (client/pubcomp (:client c) (:packet-identifier (tu/expect! (:ch c) :PUBREL 3000))))
+        (Thread/sleep 50)
+        (h/nudged! id)
+        (is (empty? (:PUBLISH (tu/take-n! (:ch c) 1 (+ 500 (first h/catch-up-reads-millis)))))
+            "and not again while the cluster's queue still has it")
+        (is (contains? (get-in @@#'h/catching-up [id :had]) "k1") "which is still counted as had")
+        (swap! queue dissoc "k1")
+        (h/nudged! id)
+        (is (tu/wait-until #(not (contains? (get-in @@#'h/catching-up [id :had]) "k1")))
+            "until a read no longer finds it")
+        (swap! queue assoc "k2" {:topic "stale/t" :payload (.getBytes "m2") :qos 1})
+        (h/nudged! id)
+        (is (= "m2" (some-> (tu/expect! (:ch c) :PUBLISH 3000) tu/payload-str))
+            "and what is queued next is still sent")
+        (finally
+          (tu/close! c)
+          (reset! h/session-source nil)
+          (swap! @#'h/catching-up dissoc id)
+          (swap! h/*clients* dissoc id)
+          (h/cancel-session-expiry! id))))))

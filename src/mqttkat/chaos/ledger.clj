@@ -14,7 +14,7 @@
   (:require [mqttkat.chaos.check :as check])
   (:import [java.util BitSet HashMap]
            [java.util.concurrent ConcurrentHashMap]
-           [java.util.concurrent.atomic AtomicLong]))
+           [java.util.concurrent.atomic AtomicLong AtomicLongArray]))
 
 (set! *warn-on-reflection* true)
 
@@ -28,8 +28,13 @@
    :deliveries    (ConcurrentHashMap.)
    ;; [client-id msg-id] -> [{:at :qos :broker}], for the second and later
    ;; deliveries of a message only, and only the first `repeats-kept` of
-   ;; those: the detail a :duplicate is reported with.
+   ;; those at each QoS: the detail a :duplicate is reported with.
    :repeats       (ConcurrentHashMap.)
+   ;; How many messages :repeats holds, by the QoS of their first repeat.
+   ;; One budget for all, and QoS 1 repeats, which MQTT allows, took the
+   ;; lot in the first seconds of a load run, leaving its QoS 2 duplicates
+   ;; with nothing to say where they came from.
+   :repeats-kept  (AtomicLongArray. 3)
    :delivered     (AtomicLong.)
    :acked         (AtomicLong.)
    :clients       (atom {})
@@ -140,7 +145,9 @@
     (when repeat?
       (let [^ConcurrentHashMap repeats (:repeats ledger)
             k [client id]]
-        (when (or (.containsKey repeats k) (< (.size repeats) (int repeats-kept)))
+        (when (or (.containsKey repeats k)
+                  (<= (.incrementAndGet ^AtomicLongArray (:repeats-kept ledger) (int (min qos 2)))
+                      (long repeats-kept)))
           (.merge repeats k [{:at (now ledger) :qos qos :broker broker}]
                   (reify java.util.function.BiFunction
                     (apply [_ a b] (into a b)))))))))

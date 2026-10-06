@@ -378,3 +378,106 @@
         (Thread/sleep (+ 500 bridge/awaiting-grace-ms))
         (is (empty? @undelivered))
         (finally (bridge/drop! "peer-15") (.stop ^MqttServer (:server p) 100))))))
+
+(deftest a-takeover-goes-ahead-of-the-publishes-waiting
+  ;; Behind them, it waited as long as they did: with the bridges a minute
+  ;; behind, the new broker gave up on the old one's hand-over and resumed
+  ;; the session without it.
+  (let [p     (peer connack-2)
+        topic (str bridge/control-prefix "takeover")]
+    (try
+      (dotimes [i 6]
+        (bridge/send-to! "me" "peer-30" {:host "127.0.0.1" :port (:port p)} [] (str "t/" i)
+                         {:qos 1 :payload (.getBytes "x") :properties {}}))
+      (is (tu/wait-until #(= 2 (count (publishes p)))))
+      (bridge/takeover! "me" "peer-30" {:host "127.0.0.1" :port (:port p)} "moved" "c-1")
+      (doseq [{:keys [packet-identifier]} (publishes p)] (puback! p packet-identifier))
+      (is (tu/wait-until #(some (fn [m] (= topic (:topic m))) (publishes p))))
+      (let [order (mapv :topic (publishes p))
+            at    (.indexOf ^java.util.List order topic)]
+        ;; The link may have taken the third off the queue already, and be
+        ;; waiting on the window with it.
+        (is (<= 2 at 3) (str "ahead of what was still queued: " order)))
+      (finally (bridge/drop! "peer-30") (.stop ^MqttServer (:server p) 100)))))
+
+(def connack-kept
+  (assoc connack-2 :session-present? true))
+
+(defn- drop-connection! [{:keys [server key]}]
+  (.closeConnection ^MqttServer server @key))
+
+(deftest a-link-that-drops-comes-back-to-the-peers-session
+  ;; Handed back on every drop, what the peer already had went out a second
+  ;; time from the cluster's queue, and a QoS 2 message it had taken and not
+  ;; yet been released went nowhere: §4.3.3 publishes it on the PUBREL.
+  (with-redefs [bridge/reconnect-after-ms 100]
+    (testing "a peer that kept the session: what was in flight goes again, nothing handed back"
+      (let [p    (peer connack-kept)
+            lost (atom 0)
+            at   {:host "127.0.0.1" :port (:port p)}]
+        (try
+          (reset! bridge/peer-alive? (constantly true))
+          (bridge/send-to! "me" "peer-40" at [] "t/1" {:qos 1 :payload (.getBytes "x") :properties {}
+                                                       :on-lost #(swap! lost inc)})
+          (bridge/send-to! "me" "peer-40" at [] "t/2" {:qos 2 :payload (.getBytes "x") :properties {}
+                                                       :on-lost #(swap! lost inc)})
+          (is (tu/wait-until #(= 2 (count (publishes p)))))
+          (let [[q1 q2] (publishes p)]
+            (answer! p (MqttPubRec/encode {:packet-type :PUBREC :protocol-version 5
+                                           :packet-identifier (:packet-identifier q2) :reason-code 0}))
+            (is (tu/wait-until #(= 1 (count (of-type p :PUBREL)))))
+            (drop-connection! p)
+            (is (tu/wait-until #(= 2 (count (of-type p :CONNECT)))) "connected again")
+            (is (false? (:clean-session? (second (of-type p :CONNECT)))) "to the session it had")
+            (is (true? (:clean-session? (first (of-type p :CONNECT)))) "which the first link started afresh")
+            (is (tu/wait-until #(= 3 (count (publishes p)))))
+            (let [again (nth (publishes p) 2)]
+              (is (= (:packet-identifier q1) (:packet-identifier again)) "the QoS 1 message, under its identifier")
+              (is (true? (:duplicate? again)) "as a redelivery"))
+            (is (tu/wait-until #(= 2 (count (of-type p :PUBREL)))) "and the QoS 2 one's PUBREL")
+            (is (= (:packet-identifier q2) (:packet-identifier (second (of-type p :PUBREL)))))
+            (Thread/sleep 300)
+            (is (zero? @lost) "nothing handed back"))
+          (finally
+            (reset! bridge/peer-alive? nil)
+            (bridge/drop! "peer-40")
+            (.stop ^MqttServer (:server p) 100)))))
+
+    (testing "a peer that lost it: what was in flight is handed back"
+      (let [p    (peer connack-2)
+            lost (atom 0)
+            at   {:host "127.0.0.1" :port (:port p)}]
+        (try
+          (reset! bridge/peer-alive? (constantly true))
+          (dotimes [i 2]
+            (bridge/send-to! "me" "peer-41" at [] (str "t/" i) {:qos 1 :payload (.getBytes "x") :properties {}
+                                                                :on-lost #(swap! lost inc)}))
+          (is (tu/wait-until #(= 2 (count (publishes p)))))
+          (drop-connection! p)
+          (is (tu/wait-until #(= 2 (count (of-type p :CONNECT)))))
+          (is (tu/wait-until #(= 2 @lost)) "both, once")
+          (Thread/sleep 300)
+          (is (= 2 @lost))
+          (is (= 2 (count (publishes p))) "and not sent again")
+          (finally
+            (reset! bridge/peer-alive? nil)
+            (bridge/drop! "peer-41")
+            (.stop ^MqttServer (:server p) 100)))))
+
+    (testing "a peer no longer listed: handed back at once, as before"
+      (let [p    (peer connack-kept)
+            lost (atom 0)
+            at   {:host "127.0.0.1" :port (:port p)}]
+        (try
+          (reset! bridge/peer-alive? (constantly false))
+          (bridge/send-to! "me" "peer-42" at [] "t/1" {:qos 1 :payload (.getBytes "x") :properties {}
+                                                       :on-lost #(swap! lost inc)})
+          (is (tu/wait-until #(= 1 (count (publishes p)))))
+          (drop-connection! p)
+          (is (tu/wait-until #(= 1 @lost)))
+          (Thread/sleep 300)
+          (is (= 1 (count (of-type p :CONNECT))) "and no connecting again")
+          (finally
+            (reset! bridge/peer-alive? nil)
+            (bridge/drop! "peer-42")
+            (.stop ^MqttServer (:server p) 100)))))))
