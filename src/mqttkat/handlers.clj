@@ -1822,10 +1822,17 @@
    or in `taken` — the keys an earlier call for the same restatement sent —
    is left out, so reading the queue twice sends nothing twice.
 
+   Nothing before the connection's CONNACK (§3.2.0-1): a restatement can
+   read the queue of a connection whose CONNECT is still waiting on its
+   record, and a handed-over message went out ahead of the CONNACK. It
+   stays on the cluster's queue for the reads catch-up! starts after it.
+
    Returns the keys it took."
   [client-id connect-id queued taken]
   (let [key (live-connection client-id)]
-    (if-not (and key (= connect-id (get-in @*clients* [key :connect-id])))
+    (if-not (and key
+                 (= connect-id (get-in @*clients* [key :connect-id]))
+                 (not (awaiting-connack? key)))
       #{}
       ;; One call at a time per client: two readers of the queue — a
       ;; restatement's and a nudge's — each found the other's messages not

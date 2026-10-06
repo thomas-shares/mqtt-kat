@@ -4,6 +4,18 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261006
 
+### A PUBLISH ahead of its CONNACK
+
+The run after that had one protocol error: a kept subscriber was sent a
+QoS 1 PUBLISH at the final reconnect before its CONNACK. Every live
+delivery waits for the CONNACK, and the flush after it sends what waited.
+A read of the cluster's queue did not: a message the old broker handed
+over in flight goes out at once under its identifier, and a restatement
+reads the queue of every connection the cluster has as here, including
+one whose CONNECT is still waiting on its connect record, which with Rama
+45 seconds behind can take a while. Such a read now takes nothing until
+the CONNACK is out, and leaves the queue to the reads that follow it.
+
 ### A drain that waits for Rama
 
 The next 3,000 a second run, on the 1024 window, lost 350,000 rather than

@@ -1820,8 +1820,15 @@
                           handed  [["k-msg" {:topic (str topic "/a") :payload (.getBytes "handed") :qos 2
                                              :packet-identifier 4321}]
                                    ["k-rel" {:topic (str topic "/a") :qos 2 :packet-identifier 4322 :released? true}]]
+                          key     (h/live-connection id)
+                          _       (swap! h/*clients* assoc-in [key :awaiting-connack?] true)
+                          early   (h/deliver-queued! id cid handed nil)
+                          before  (tu/take-n! (:ch c) 1 300)
+                          _       (h/connack-sent! key)
                           took    (h/deliver-queued! id cid handed nil)
                           got     (tu/take-n! (:ch c) 2 2000)]
+                      (is (= #{} early) "nothing before the connection's CONNACK (§3.2.0-1)")
+                      (is (empty? (mapcat val before)) "and nothing sent")
                       (is (= #{"k-msg" "k-rel"} took))
                       (is (= [4321] (map :packet-identifier (:PUBLISH got))))
                       (is (every? #(true? (:duplicate? %)) (:PUBLISH got)) "as a redelivery")
