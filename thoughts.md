@@ -4,6 +4,25 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261006
 
+### Six left, and a race at the hand-over
+
+With the drain waiting for Rama the 3,000 a second run lost 6 of 15
+million owed: the 333,000 before were late, not lost. The six were all
+QoS 1, for kept wildcard subscribers on broker 1, bridged from the other
+two, sent 20 to 35 seconds before the final reconnect, with Rama's queue
+empty at the end. So they were never put on it.
+
+One way that happens: a delivery asks whether the connection is still
+live, and only then takes a place in the client's window. If the client
+disconnects in between, the hand-over empties the window first, and the
+delivery then puts its message in flight to a socket that is gone. It is
+neither handed over nor queued, and nothing sends it again. The two now
+take the same lock, the one a read of the cluster's queue already took,
+and the delivery asks again under it: a connection gone by then refuses
+the message, and the caller queues it as for any client that is away.
+It could not be timed from outside, so the run will say whether this was
+the six.
+
 ### A PUBLISH ahead of its CONNACK
 
 The run after that had one protocol error: a kept subscriber was sent a

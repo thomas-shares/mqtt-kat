@@ -263,6 +263,32 @@
           (unpark-offline! id topic 1)
           (tu/close! sub))))))
 
+;; Not portable: it calls the broker's delivery step directly, as no client
+;; can time a publish into the moment between the two.
+(deftest a-delivery-that-reaches-the-window-after-its-connection-left-is-not-sent
+  (testing "found live, then gone by the time it is sent: refused, for the caller to queue"
+    ;; The check qos-1-send makes is a moment before the window is touched,
+    ;; and remove-client! can hand the window over in between. The message
+    ;; then went in flight to a socket that was gone, and nothing sent it
+    ;; again: the 3,000 a second chaos run lost a handful at its final
+    ;; reconnect.
+    (let [id    (tu/client-id "left-before-window")
+          topic (tu/topic "left-before-window")
+          sub   (tu/connect! nil :id id :clean-session? false)
+          key   (h/live-connection id)]
+      (client/send-message (:client sub) (subscribe-msg topic 1 1))
+      (tu/expect! (:ch sub) :SUBACK)
+      (h/forget-live! id key)
+      (try
+        (is (false? (#'h/deliver-or-queue! key id {:topic topic :payload (.getBytes "late") :qos 1} nil))
+            "not delivered, so queued where the session is kept")
+        (is (nil? (tu/take! (:ch sub) 300)) "nothing written to it")
+        (is (zero? (h/pending-count id)) "nor held here")
+        (is (empty? (:inflight @(#'h/outbound-atom id))) "nor in flight")
+        (finally
+          (swap! h/*live-clients* assoc id key)
+          (tu/close! sub))))))
+
 (deftest nothing-is-sent-before-the-connack
   (testing "a delivery to a connection whose CONNACK is not out yet waits for it"
     ;; §3.2.0-1. add-client! puts a resumed session in the live trie before

@@ -1260,6 +1260,11 @@
   [client-id]
   (when-let [{:keys [enqueue! dequeue!]} @session-source]
     (when-let [a (existing-outbound client-id)]
+      ;; Under the lock deliver-or-queue! sends under, which asks there
+      ;; whether the connection is still live: one that had found it so
+      ;; either is in the window before it is emptied, and handed over with
+      ;; it, or finds it gone and leaves the message to be queued.
+      (locking a
       (let [handed (volatile! #{})
             writes (java.util.ArrayList.)
             enqueue! (fn [& args]
@@ -1327,7 +1332,7 @@
           (release-origin-hold! origin (::msg-key msg) client-id))
         (when-not (.isEmpty writes)
           (swap! handing-over assoc client-id
-                 (CompletableFuture/allOf (into-array CompletableFuture writes))))))))
+                 (CompletableFuture/allOf (into-array CompletableFuture writes)))))))))
 
 (defn handed-over
   "Once what hand-over-unacknowledged! last put on the cluster's queue for
@@ -1829,15 +1834,16 @@
 
    Returns the keys it took."
   [client-id connect-id queued taken]
+  ;; One call at a time per client: two readers of the queue — a
+  ;; restatement's and a nudge's — each found the other's messages not yet
+  ;; here, and both sent them. And the connection asked after under it, as
+  ;; deliver-or-queue! does, so a hand-over cannot empty the window between.
+  (locking (outbound-atom client-id)
   (let [key (live-connection client-id)]
     (if-not (and key
                  (= connect-id (get-in @*clients* [key :connect-id]))
                  (not (awaiting-connack? key)))
       #{}
-      ;; One call at a time per client: two readers of the queue — a
-      ;; restatement's and a nudge's — each found the other's messages not
-      ;; yet here, and both sent them.
-      (locking (outbound-atom client-id)
       (let [{:keys [pending inflight]} (some-> (existing-outbound client-id) deref)
             ;; And one delivered here live under the same message key: the
             ;; broker that queued it had the client away, and it was not.
@@ -2532,9 +2538,21 @@
    memory, and under back-pressure it should never fire.
 
    Returns false when it fired: the client was not delivered to, and the
-   cluster queues it for a session that is kept as for one that is away."
+   cluster queues it for a session that is kept as for one that is away.
+   False too for a connection no longer live here, which the caller found
+   live a moment ago: see hand-over-unacknowledged!."
   [key client-id msg publisher-key]
+  ;; Under the lock the hand-over empties this client's window under, and
+  ;; asked again there. A delivery that found the connection live, and
+  ;; reached the window after its hand-over had emptied it, went in flight
+  ;; to a socket that was gone, and nothing sent it again: the 3,000 a
+  ;; second run lost a handful that way at its final reconnect.
+  (locking (outbound-atom client-id)
   (cond
+    (not (live-key? key))
+    (do (trace/trace! client-id msg "not sent: its connection has left")
+        false)
+
     ;; Before its CONNACK: held, and sent by the flush that follows the
     ;; CONNACK. Unless that flush has been and gone while this was queued,
     ;; which the second look catches.
@@ -2550,7 +2568,7 @@
       held?)
 
     :else
-    (deliver-now-or-queue! key client-id msg publisher-key)))
+    (deliver-now-or-queue! key client-id msg publisher-key))))
 
 (defn- deliver-now-or-queue!
   [key client-id msg publisher-key]
