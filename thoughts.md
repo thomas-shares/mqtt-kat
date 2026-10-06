@@ -4,6 +4,25 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261006
 
+### A drain that waits for Rama
+
+The next 3,000 a second run, on the 1024 window, lost 350,000 rather than
+1.17 million, all in the last minute before the final reconnect. A trace
+of every client on one topic found each of its lost messages in the
+same place: a copy that reached the broker its client had just left,
+which queued it on the cluster, while the broker the client had moved
+to read that queue at 2, 5, 10, 20, 40 and 60 seconds and whenever Rama
+nudged it. With Rama 45 seconds behind, those writes landed after the
+reads, and the drain, which ended on ten seconds without a delivery,
+ended before the nudges came. The probe afterwards still had them on
+the queues, 1,000 to 2,000 for each client that lost most.
+
+Late is not lost, but the check cannot tell them apart. The drain now
+also watches Rama's queue counts, when the brokers use an external Rama,
+and ends only once those have not moved for :drain-ms either. Whatever
+is still queued then, with every client connected, is printed: that is
+a message nothing read back.
+
 ### A minute on the bridges
 
 The trace of the next 3,000 a second run, on ten topics, had every copy

@@ -374,22 +374,60 @@
 
 ;; ── the run ───────────────────────────────────────────────────────────
 
+(def ^:private rama-queue-counts
+  "The module's counts the drain watches: what is on the queues, and how
+   many writes to them it has processed."
+  ["queued" "event/enqueue" "event/dequeue"])
+
+(defn- rama-counts
+  "A function returning the cluster's queue counts (rama-queue-counts) when
+   the brokers use an external Rama, or nil. Resolved here rather than
+   required, so a run without Rama never loads it."
+  [cfg]
+  (when (= "external" (some-> (get-in cfg [:setup :brokers :rama]) name))
+    (try
+      (let [open   (requiring-resolve 'com.rpl.rama/open-cluster-manager)
+            mname  (requiring-resolve 'com.rpl.rama/get-module-name)
+            pstate (requiring-resolve 'com.rpl.rama/foreign-pstate)
+            select (requiring-resolve 'com.rpl.rama/foreign-select-one)
+            kp     (requiring-resolve 'com.rpl.rama.path/keypath)
+            module @(requiring-resolve 'mqttkat.rama.module/MqttKatModule)
+            key    @(requiring-resolve 'mqttkat.rama.module/stats-key)
+            c      (open {"conductor.host" (or (get-in cfg [:setup :brokers :conductor]) "localhost")})
+            ps     (pstate c (mname module) "$$rama-stats")]
+        (fn []
+          (try
+            (-> (apply merge-with + (map #(dissoc % "at") (vals (select (kp key) ps))))
+                (select-keys rama-queue-counts))
+            (catch Throwable _ nil))))
+      (catch Throwable t
+        (println "  the drain cannot read Rama's counts, and ends on the clients alone:" (ex-message t))
+        nil))))
+
 (defn- drain!
   "Wait until nothing new has been acknowledged or delivered for :drain-ms,
-   or :max-drain-ms has gone by."
+   or :max-drain-ms has gone by. On an external Rama, until its queue
+   counts have not moved for as long either: a broker that queued a copy
+   on the cluster for a client that had moved on, while Rama was a minute
+   behind, has it delivered only once Rama gets to it, and a drain that
+   went by the clients alone ended first and counted it lost. Returns how
+   it ended and, with Rama, the counts it ended on."
   [state]
   (let [{:keys [drain-ms max-drain-ms]} (get-in state [:cfg :check])
         lg       (:ledger state)
+        rama     (rama-counts (:cfg state))
         observe  #(vector (ledger/delivery-count lg)
-                          (ledger/acked-count lg))
+                          (ledger/acked-count lg)
+                          (when rama (rama)))
         deadline (+ (System/currentTimeMillis) (long max-drain-ms))]
     (loop [last (observe) quiet-since (System/currentTimeMillis)]
       (Thread/sleep 250)
-      (let [now (System/currentTimeMillis) seen (observe)]
+      (let [now (System/currentTimeMillis) seen (observe)
+            how #(cond-> {:how %} rama (assoc :rama (peek seen)))]
         (cond
           (not= seen last)                          (recur seen now)
-          (>= (- now quiet-since) (long drain-ms))  :drained
-          (> now deadline)                          :gave-up
+          (>= (- now quiet-since) (long drain-ms))  (how :drained)
+          (> now deadline)                          (how :gave-up)
           :else                                     (recur last quiet-since))))))
 
 (defn- summarise [result max-violations]
@@ -477,8 +515,11 @@
           (c/kill! cl 0 true))
         (wait-until #(every? c/connected? (:clients state)) 30000))
       (println "draining")
-      (let [how (drain! state)]
-        (println " " (pr-str (assoc (progress state) :drain how)))
+      (let [{:keys [how rama]} (drain! state)]
+        (println " " (pr-str (cond-> (assoc (progress state) :drain how) rama (assoc :rama rama))))
+        (when (pos? (long (get rama "queued" 0)))
+          (println "  Rama still has" (get rama "queued") "messages queued, with every client connected:"
+                   "nothing read them back"))
         (when (= :gave-up how)
           ;; What was still on its way counts as lost below, and a broker
           ;; this far behind may yet have delivered it.
