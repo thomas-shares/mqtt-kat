@@ -1063,15 +1063,14 @@
    publishers as well as subscribers, Rama's depot buffer filled."
   1000)
 
-(declare landed! once-done!)
+(declare taken-off!)
 
 (defn- flush-dequeues! []
   (let [[batch _] (reset-vals! dequeue-batch {})]
     (when-let [{:keys [dequeue!]} @session-source]
       (doseq [[client-id ks] batch]
-        (once-done! (dequeue! client-id (keys ks))
-                    #(doseq [[k last?] ks :when last?]
-                       (landed! client-id k)))))))
+        (taken-off! client-id (dequeue! client-id (keys ks))
+                    (keep (fn [[k last?]] (when last? k)) ks))))))
 
 (defn- dequeue-soon!
   "Take `k` off `client-id`'s queue in the cluster with the next batch;
@@ -1229,9 +1228,8 @@
     (release-origin-hold! origin (::msg-key msg) client-id))
   (when-let [{:keys [dequeue!]} @session-source]
     (when-let [k (::cluster-key msg)]
-      (cond-> (dequeue! client-id [k])
-        ;; One reconciled is let go after its second take-off, below.
-        (not (::reconcile? msg)) (once-done! #(landed! client-id k))))
+      ;; One reconciled is let go after its second take-off, below.
+      (taken-off! client-id (dequeue! client-id [k]) (when-not (::reconcile? msg) [k])))
     (when (::reconcile? msg)
       (when-let [k (::msg-key msg)]
         (when-not (= k (::cluster-key msg))
@@ -1399,7 +1397,8 @@
   ;; leaves out. Each with when its take-off from the queue landed, nil
   ;; until it has: a read begun after that cannot find it, and the key is
   ;; let go when the next one begins. Let go sooner, a read that was under
-  ;; way found it and sent it again.
+  ;; way found it and sent it again. ::in-depot while only Rama's depot is
+  ;; known to have the take-off (see taken-off!).
   (atom {}))
 
 (defn- had
@@ -1414,16 +1413,42 @@
                                  (update-in m [client-id :had] had k)
                                  m)))))
 
-(defn- landed!
-  "`k`'s take-off from `client-id`'s queue on the cluster has landed: see
-   catching-up."
-  [client-id k]
-  (when (contains? @catching-up client-id)
-    (let [now (System/currentTimeMillis)]
-      ;; Whether or not it is noted yet: the note can come after.
-      (swap! catching-up (fn [m] (if (contains? m client-id)
-                                   (assoc-in m [client-id :had k] now)
-                                   m))))))
+(defn- taken-off!
+  "`fut`, a take-off from `client-id`'s queue on the cluster, of `ks` among
+   other keys: once it lands, `ks` may be let go from what catching-up has
+   had. Only once the topology has it: a take-off tried again is done once
+   the depot has it, and with the topology minutes behind, a read begun
+   after that still found the message, and sent it again — after the
+   client had completed it, so as a new one. A QoS 2 message went to a
+   client that never reconnected ten times in thirteen minutes, each time
+   it was nudged, until the topology caught up. Such a key stays had, and
+   is let go once a later take-off for the client lands in the topology,
+   which takes a client's events in order: those before it have landed
+   too."
+  [client-id fut ks]
+  (once-done! fut
+              (fn []
+                (when (contains? @catching-up client-id)
+                  (let [now       (System/currentTimeMillis)
+                        topology? (or (not (instance? CompletableFuture fut))
+                                      (and (not (.isCompletedExceptionally ^CompletableFuture fut))
+                                           (nil? (.getNow ^CompletableFuture fut nil))))]
+                    ;; Whether or not it is noted yet: the note can come after.
+                    (swap! catching-up
+                           (fn [m]
+                             (if-not (contains? m client-id)
+                               m
+                               (update-in m [client-id :had]
+                                          (fn [h]
+                                            (let [h (if topology?
+                                                      (reduce-kv (fn [h k v] (if (= ::in-depot v) (assoc h k now) h))
+                                                                 h h)
+                                                      h)]
+                                              (reduce (fn [h k]
+                                                        (if (and (not topology?) (number? (get h k)))
+                                                          h
+                                                          (assoc h k (if topology? now ::in-depot))))
+                                                      h ks))))))))))))
 
 (defn- forget-catching-up!
   "The connection `connect-id` has gone: nothing more is read for it."
@@ -1560,7 +1585,7 @@
                           (assoc m client-id
                                  (assoc e :reading? true :again? false :scheduled? false
                                         :had (into {}
-                                                   (remove (fn [[_ landed]] (and landed (< (long landed) now))))
+                                                   (remove (fn [[_ landed]] (and (number? landed) (< (long landed) now))))
                                                    (:had e))))))))]
     (boolean (and (get-in after [client-id :reading?])
                   (not (get-in before [client-id :reading?]))))))

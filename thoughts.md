@@ -2,6 +2,32 @@
 
 In this file will go my thoughts and ramblings about this project and what I have done and what I might do next.
 
+## 20261006
+
+### A take-off the depot had, but the topology did not yet
+
+The next run delivered a QoS 2 message to one persistent subscriber ten
+and eleven times, on one connection to one broker that it kept for the
+last thirteen minutes of the run, three messages each time, at the same
+moments. Each copy was completed, PUBREL and all, before the next came,
+so the client could only take it for a new one.
+
+That was the retry at `:append-ack` again (20261005). A connected
+session's queue on Rama is read again whenever Rama says something new
+is on it, leaving out the keys the broker has had from it; a key is let
+go once its take-off has landed, as a read begun after that cannot find
+it. Landed meant the topology had it, until a take-off tried again was
+done once the depot had it. With the topology minutes behind, the next
+read still found the message, the key had been let go, and out it went
+again; the client completed it, the take-off was tried again, landed in
+the depot, and so on, with every nudge, until the topology caught up.
+
+A lane's future now says which it was. A key whose take-off only the
+depot has stays had, and is let go once a later take-off for the same
+client lands in the topology: a client's events go to one partition, one
+batch at a time, and are taken in order, so the one before it has been
+taken too.
+
 ## 20261005
 
 ### Brokers forgotten by a topology that was behind

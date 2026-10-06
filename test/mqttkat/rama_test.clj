@@ -2232,9 +2232,38 @@
                                                  (java.util.concurrent.CompletableFuture/completedFuture nil)
                                                  (java.util.concurrent.CompletableFuture/failedFuture
                                                   (ex-info "ack-timeout" {}))))]
-      (is (nil? (deref (cluster/enqueue! conn "x" {:topic "t" :payload (.getBytes "p") :qos 1} nil)
-                       5000 ::timeout)))
+      (is (= :append-ack (deref (cluster/enqueue! conn "x" {:topic "t" :payload (.getBytes "p") :qos 1} nil)
+                                5000 ::timeout))
+          "and says so: the topology may not have it yet")
       (is (= [:ack :append-ack] @levels)))))
+
+(deftest a-take-off-only-in-the-depot-is-still-had
+  ;; Let go when it landed in the depot, a take-off the topology was minutes
+  ;; behind on left the message on the queue for every read after: a QoS 2
+  ;; message went to a client that stayed connected ten times over.
+  (let [catching-up @#'h/catching-up
+        saved       @catching-up
+        taken-off!  #'h/taken-off!
+        begin-read! #'h/begin-read!
+        end-read!   #'h/end-read!
+        done        #(java.util.concurrent.CompletableFuture/completedFuture %)
+        had         #(get-in @catching-up ["c" :had])
+        read!       #(do (Thread/sleep 2)
+                         (begin-read! "c" "x")
+                         (end-read! "c" "x" #{})
+                         (set (keys (had))))]
+    (try
+      (reset! catching-up {"c" {:connect-id "x" :had {"k1" nil "k2" nil "k3" nil}}})
+      (taken-off! "c" (done :append-ack) ["k1"])
+      (is (= #{"k1" "k2" "k3"} (read!)) "only in the depot: still had")
+      (taken-off! "c" (done nil) ["k2"])
+      (is (= #{"k3"} (read!))
+          "a later take-off the topology has: so has it the one before")
+      (taken-off! "c" (done :append-ack) ["k3"])
+      (taken-off! "c" (done :append-ack) ["k3"])
+      (is (= #{"k3"} (read!)))
+      (finally
+        (reset! catching-up saved)))))
 
 (deftest a-queue-record-carries-at-most-so-many
   ;; One record of thousands of messages took the sessions topology past its

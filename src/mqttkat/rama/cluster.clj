@@ -716,7 +716,9 @@
    depot has it (:append-ack): what failed was mostly a wait on a topology
    more than five seconds behind, with the batch in its depot already, and
    waited on that way every attempt again failed the same way and added
-   the same batch to what the topology was behind on."
+   the same batch to what the topology was behind on. So `futs` complete
+   with nil when the topology has the batch, and with :append-ack when
+   only the depot is known to: see dequeue!."
   [w conn client-id lane records futs delay-ms ack-level]
   (with-permit! w
     (fn []
@@ -725,7 +727,8 @@
                    (run-waiting! w)
                    (cond
                      (nil? e)
-                     (do (run! #(.complete ^CompletableFuture % nil) futs)
+                     (do (run! #(.complete ^CompletableFuture % (when (= :append-ack ack-level) :append-ack))
+                               futs)
                          (start-lane! w conn client-id lane))
 
                      (.get ^java.util.concurrent.atomic.AtomicBoolean (:stopped? w))
@@ -789,7 +792,12 @@
      (queue-op! conn client-id [:enqueue key message if-kept?]))))
 
 (defn dequeue!
-  "Take `keys` off `client-id`'s queue. A future, as enqueue! returns."
+  "Take `keys` off `client-id`'s queue. A future, as enqueue! returns: nil
+   once the sessions topology has taken them off, :append-ack once only
+   its depot is known to have the take-off, which a read of the queue does
+   not see until the topology gets to it. A client's writes go one batch
+   at a time, and its events all to one partition, taken in order: one
+   that completes with nil says every earlier one has been taken too."
   [conn client-id keys]
   (queue-op! conn client-id [:dequeue (vec keys)]))
 
