@@ -4,6 +4,21 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261006
 
+### Following a message through the brokers
+
+After #53, a 3,000 a second run still lost 1.4 million messages, all for
+kept sessions, and none of it showed up anywhere I could look. The lost
+messages were not on Rama's queues. Nothing was withheld from the clients
+that lost them while the run went on, nothing was handed over at the end,
+and every connect and subscribe that failed to record did so at the final
+move. Counts and warnings only say how many, so the broker now has a
+trace: -Dmqttkat.trace (or MQTTKAT_TRACE) names the clients to follow by a
+regex, -Dmqttkat.traceTopics (MQTTKAT_TRACE_TOPICS) the topics. One log
+line follows each thing done with their messages: sent, pending, refused,
+withheld, left out, queued on the cluster, handed over, taken from the
+queue, settled. A publish on a followed topic is also logged where it
+enters, with the brokers its plan sends copies to.
+
 ### A message taken off a queue stays off
 
 With reads fixed, the next 3,000 a second run still had 1,634 QoS 2

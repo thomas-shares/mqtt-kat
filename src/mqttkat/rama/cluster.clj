@@ -47,6 +47,7 @@
             [mqttkat.intent :as intent]
             [mqttkat.rama.module :as module]
             [mqttkat.retained :as retained]
+            [mqttkat.trace :as trace]
             [mqttkat.trie :as trie])
   (:import [com.rpl.rama ProxyState ProxyState$Status]
            [java.net InetAddress]
@@ -1259,6 +1260,7 @@
    announcement, which the next publish will find."
   [{:keys [brokers] :as conn} plan topic {:keys [qos payload properties msg-key] :as msg}]
   (let [qos       (long (or qos 0))
+        traced    (assoc msg :topic topic)
         queue-for (fn [clients if-kept?]
                     ;; §4.1 keeps QoS 1 and 2 for a session that is away;
                     ;; at-most-once means a message for a client that is not
@@ -1267,6 +1269,7 @@
                     ;; the subscription, as it would be on delivery.
                     (doseq [{:keys [client-id] sub-qos :qos} clients
                             :when (pos? (long sub-qos))]
+                      (trace/trace! client-id traced "queued on the cluster by the broker it entered")
                       ;; Under the message's key, so that a client queued
                       ;; for by more than one broker has it once. Noted as a
                       ;; hand-off, so the publisher's acknowledgement waits
@@ -1322,6 +1325,7 @@
               ;; shared groups served elsewhere.
               on-lost (when (and (pos? qos) (or (seq holders) (seq group-keys)))
                         (fn []
+                          (trace/publish! traced "copy lost on its way to" peer-id)
                           (queue-for holders true)
                           (reroute! group-keys #{peer-id})))
               ;; And if it gets there but that broker dies before its
@@ -1329,7 +1333,10 @@
               ;; message's key, which is the one that broker would have
               ;; queued it under had it handed their sessions over.
               on-undelivered (when (and (pos? qos) msg-key (seq holders))
-                               #(queue-for holders true))]
+                               #(do (trace/publish! traced "copy not delivered by" peer-id)
+                                    (queue-for holders true)))]
+          (doseq [{:keys [client-id]} holders]
+            (trace/trace! client-id traced "copy sent to" peer-id))
           (if-let [peer (get @brokers peer-id)]
             (bridge/send-to! broker-id peer-id peer group-keys topic
                              (assoc msg :on-lost on-lost :on-undelivered on-undelivered
