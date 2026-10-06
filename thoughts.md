@@ -23,6 +23,19 @@ the message, and the caller queues it as for any client that is away.
 It could not be timed from outside, so the run will say whether this was
 the six.
 
+It said something else first: every delivery stopped 44 seconds in and
+stayed stopped until the final reconnect. The deliveries run on each
+connection's virtual thread, and on Java 21 a virtual thread waiting on
+a monitor keeps its carrier thread. Four hundred publishers delivering to
+the same wildcard subscribers waited on its lock until no carrier was
+left, and the connections' writers had none to run on. So no lock: the
+delivery puts the message in the window as before, then asks whether the
+connection is still live. If it has gone, the delivery takes the message
+out again, and the caller queues it. If the hand-over took it first, the
+cluster's queue has it already. And since the connection stops being live
+before the hand-over starts, a hand-over that runs after the check sees
+the message.
+
 ### A PUBLISH ahead of its CONNACK
 
 The run after that had one protocol error: a kept subscriber was sent a

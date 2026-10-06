@@ -1260,11 +1260,6 @@
   [client-id]
   (when-let [{:keys [enqueue! dequeue!]} @session-source]
     (when-let [a (existing-outbound client-id)]
-      ;; Under the lock deliver-or-queue! sends under, which asks there
-      ;; whether the connection is still live: one that had found it so
-      ;; either is in the window before it is emptied, and handed over with
-      ;; it, or finds it gone and leaves the message to be queued.
-      (locking a
       (let [handed (volatile! #{})
             writes (java.util.ArrayList.)
             enqueue! (fn [& args]
@@ -1332,7 +1327,7 @@
           (release-origin-hold! origin (::msg-key msg) client-id))
         (when-not (.isEmpty writes)
           (swap! handing-over assoc client-id
-                 (CompletableFuture/allOf (into-array CompletableFuture writes)))))))))
+                 (CompletableFuture/allOf (into-array CompletableFuture writes))))))))
 
 (defn handed-over
   "Once what hand-over-unacknowledged! last put on the cluster's queue for
@@ -1834,16 +1829,15 @@
 
    Returns the keys it took."
   [client-id connect-id queued taken]
-  ;; One call at a time per client: two readers of the queue — a
-  ;; restatement's and a nudge's — each found the other's messages not yet
-  ;; here, and both sent them. And the connection asked after under it, as
-  ;; deliver-or-queue! does, so a hand-over cannot empty the window between.
-  (locking (outbound-atom client-id)
   (let [key (live-connection client-id)]
     (if-not (and key
                  (= connect-id (get-in @*clients* [key :connect-id]))
                  (not (awaiting-connack? key)))
       #{}
+      ;; One call at a time per client: two readers of the queue — a
+      ;; restatement's and a nudge's — each found the other's messages not
+      ;; yet here, and both sent them.
+      (locking (outbound-atom client-id)
       (let [{:keys [pending inflight]} (some-> (existing-outbound client-id) deref)
             ;; And one delivered here live under the same message key: the
             ;; broker that queued it had the client away, and it was not.
@@ -2538,21 +2532,9 @@
    memory, and under back-pressure it should never fire.
 
    Returns false when it fired: the client was not delivered to, and the
-   cluster queues it for a session that is kept as for one that is away.
-   False too for a connection no longer live here, which the caller found
-   live a moment ago: see hand-over-unacknowledged!."
+   cluster queues it for a session that is kept as for one that is away."
   [key client-id msg publisher-key]
-  ;; Under the lock the hand-over empties this client's window under, and
-  ;; asked again there. A delivery that found the connection live, and
-  ;; reached the window after its hand-over had emptied it, went in flight
-  ;; to a socket that was gone, and nothing sent it again: the 3,000 a
-  ;; second run lost a handful that way at its final reconnect.
-  (locking (outbound-atom client-id)
   (cond
-    (not (live-key? key))
-    (do (trace/trace! client-id msg "not sent: its connection has left")
-        false)
-
     ;; Before its CONNACK: held, and sent by the flush that follows the
     ;; CONNACK. Unless that flush has been and gone while this was queued,
     ;; which the second look catches.
@@ -2568,32 +2550,85 @@
       held?)
 
     :else
-    (deliver-now-or-queue! key client-id msg publisher-key))))
+    (deliver-now-or-queue! key client-id msg publisher-key)))
+
+(defn- taken-back!
+  "Take `msg` out of `client-id`'s window again, in flight under
+   `packet-identifier` or, with none, waiting: whether it was still there.
+   Not there, a hand-over has it, and the cluster's queue with it."
+  [client-id packet-identifier msg]
+  (let [[before after]
+        (swap-vals! (outbound-atom client-id)
+                    (fn [state]
+                      (if packet-identifier
+                        (if (identical? msg (get-in state [:inflight packet-identifier]))
+                          (update state :inflight dissoc packet-identifier)
+                          state)
+                        ;; Waiting, it is a copy stamped on the way in: the
+                        ;; same payload is what says it is this one. The last
+                        ;; such, since it went in last: a client with two
+                        ;; matching subscriptions is sent the publish twice.
+                        (let [pending (vec (:pending state))
+                              i       (last (keep-indexed
+                                             (fn [i m] (when (identical? (:payload m) (:payload msg)) i))
+                                             pending))]
+                          (if i
+                            (assoc state :pending (into clojure.lang.PersistentQueue/EMPTY
+                                                        (concat (subvec pending 0 i)
+                                                                (subvec pending (inc i)))))
+                            state)))))]
+    (not (identical? before after))))
+
+(defn- left-meanwhile?
+  "The connection `key` has left since the caller found it live, and the
+   message it put in the window is out of it again, so that the caller
+   queues it as for a session that is away. The caller asks a moment before
+   the window is touched, and remove-client! can hand the window over in
+   between: the message then went in flight to a socket that was gone,
+   neither handed over nor queued, and nothing sent it again. The 3,000 a
+   second chaos run lost a handful at its final reconnect.
+
+   Asked after the message is in the window rather than under a lock with
+   the hand-over: the delivery runs on a connection's virtual thread, and
+   one waiting on a monitor holds its carrier, so contended ones stopped
+   every connection on the broker. A hand-over after this sees the
+   message, since the connection stops being live before the hand-over
+   begins."
+  [key client-id packet-identifier msg]
+  (and (not (live-key? key))
+       (taken-back! client-id packet-identifier msg)))
 
 (defn- deliver-now-or-queue!
   [key client-id msg publisher-key]
   (if-let [packet-identifier (acquire-packet-identifier! client-id msg
                                                          (receive-maximum-of key))]
-    ;; A refused send has to give the identifier back, or the window fills with
-    ;; messages that were discarded rather than sent and the subscriber
-    ;; eventually stops being delivered to entirely.
-    ;; Discarded as expired or too large counts as delivered: nobody will be.
-    (let [sent? (send-publish! key msg packet-identifier)]
-      (trace/trace! client-id msg (if sent? "sent" "not sent: expired or too large") packet-identifier)
-      (if sent?
-        (note-delivered! client-id msg)
-        (release-packet-identifier! client-id packet-identifier))
-      true)
+    (if (left-meanwhile? key client-id packet-identifier msg)
+      (do (trace/trace! client-id msg "not sent: its connection has left")
+          false)
+      ;; A refused send has to give the identifier back, or the window fills with
+      ;; messages that were discarded rather than sent and the subscriber
+      ;; eventually stops being delivered to entirely.
+      ;; Discarded as expired or too large counts as delivered: nobody will be.
+      (let [sent? (send-publish! key msg packet-identifier)]
+        (trace/trace! client-id msg (if sent? "sent" "not sent: expired or too large") packet-identifier)
+        (if sent?
+          (note-delivered! client-id msg)
+          (release-packet-identifier! client-id packet-identifier))
+        true))
     (let [held? (queue-pending! client-id msg)]
-      (trace/trace! client-id msg (if held? "pending: window full" "refused: pending queue full")
-                    (pending-count client-id))
-      (if held?
-        (note-delivered! client-id msg)
-        (do (.increment ^LongAdder MqttStat/droppedMessages)
-            (note-refused! client-id publisher-key)))
-      (when (>= (pending-count client-id) pause-threshold)
-        (throttle-publisher! key publisher-key client-id))
-      held?)))
+      (if (and held? (left-meanwhile? key client-id nil msg))
+        (do (trace/trace! client-id msg "not held: its connection has left")
+            false)
+        (do
+          (trace/trace! client-id msg (if held? "pending: window full" "refused: pending queue full")
+                        (pending-count client-id))
+          (if held?
+            (note-delivered! client-id msg)
+            (do (.increment ^LongAdder MqttStat/droppedMessages)
+                (note-refused! client-id publisher-key)))
+          (when (>= (pending-count client-id) pause-threshold)
+            (throttle-publisher! key publisher-key client-id))
+          held?)))))
 
 (declare flush-pending!)
 
