@@ -1862,7 +1862,8 @@
           (swap! catching-up (fn [m] (if (= connect-id (get-in m [client-id :connect-id]))
                                        (update-in m [client-id :had] #(apply had % took))
                                        m)))
-          (log/info "delivering" (count took) "messages queued for" client-id "while it was taken for away"))
+          (log/info "delivering" (count took) "messages queued for" client-id "while it was taken for away"
+                    (str "- from " (first (sort took)))))
         (when @queued?
           (flush-pending! key client-id))
         took)))))

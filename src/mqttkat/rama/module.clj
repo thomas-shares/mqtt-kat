@@ -372,6 +372,31 @@
    limit. The bridge's own backstop, then, mqttkat.bridge/queue-limit."
   65536)
 
+(def taken-off-kept-millis
+  "How long a key taken off a session's queue is remembered, so that the
+   same message queued again under it after that is not (see :dequeue in
+   the topology). Counted from when the take-off was made, against the
+   time in the key, so it does not depend on how far behind the topology
+   is. A late write to the queue is a retry, minutes after the first at
+   most; an hour leaves room."
+  3600000)
+
+(defn taken-off-at
+  "When a take-off made `at` is remembered as made: 0 if the record did not
+   say."
+  ^long [at]
+  (long (or at 0)))
+
+(defn taken-off-before
+  "The first key not to forget yet, for a take-off made `at`: keys are
+   named by their time first (mqttkat.handlers/new-message-key), so those
+   before it name messages from longer ago than taken-off-kept-millis.
+   None, \"\", when `at` is not known."
+  [at]
+  (if at
+    (format "%013d" (max 0 (- (long at) (long taken-off-kept-millis))))
+    ""))
+
 (def session-schema
   "What `$$sessions` holds per client id: the last CONNECT, minus the id that
    is the key, whether it is still connected, how many times it has been,
@@ -487,6 +512,9 @@
     ;; message — its time and a random suffix — so they come back in the
     ;; order they were queued, and the same message queued twice is once.
     (declare-pstate s $$queued {String (map-schema String Object {:subindex? true})})
+    ;; client-id -> key -> when it was taken off its queue: for
+    ;; taken-off-kept-millis, a key queued again stays off.
+    (declare-pstate s $$taken-off {String (map-schema String Long {:subindex? true})})
     ;; nudge-key -> client-id -> the last key queued for it while it was
     ;; connected there. Not subindexed: a proxy watches each one whole.
     (declare-pstate s $$nudges {String (map-schema String String)})
@@ -590,6 +618,7 @@
         (get *current :subscriptions {} :> *subs)
         (local-select> [(keypath *client-id) (view count)] $$queued :> *dropped)
         (local-transform> [(keypath *client-id) NONE>] $$queued)
+        (local-transform> [(keypath *client-id) NONE>] $$taken-off)
         (local-transform> [(keypath *client-id) NONE>] $$sessions)
         (count> (merge (session-deltas *current nil)
                        {"queued" (- *dropped) "expired" 1}))
@@ -724,10 +753,21 @@
             (ops/explode (enqueued *record) :> [*key *message])
             (local-select> [(keypath *client-id) (view count)] $$queued :> *n)
             (local-select> [(keypath *client-id *key)] $$queued :> *had)
-            (<<if (or> *had (< *n queue-limit))
+            (local-select> [(keypath *client-id *key)] $$taken-off :> *taken)
+            (<<cond
+              ;; The client has it: a write that reached the depot more than
+              ;; once — tried again after a timeout — or late, or another
+              ;; broker's, landing after the take-off. Put back, a chaos run
+              ;; sent QoS 2 messages again to a client that had completed
+              ;; them, some forty times each.
+              (case> (some? *taken))
+              (count> {"queue-taken-off" 1})
+
+              (case> (or> *had (< *n queue-limit)))
               (local-transform> [(keypath *client-id *key) (termval *message)] $$queued)
               (count> (presence-delta "queued" *had true))
-              (else>)
+
+              (default>)
               (count> {"queue-refused" 1})))
           ;; Then, once, the broker it is connected on is told: it has
           ;; read its queue already, on the CONNECT, and this came after.
@@ -738,10 +778,18 @@
             (local-transform> [(keypath *nudge *client-id) (termval *last-key)] $$nudges)))
 
         (case> :dequeue)
+        (get *record :at :> *at)
+        (taken-off-at *at :> *when)
         (ops/explode (get *record :keys) :> *key)
         (local-select> [(keypath *client-id *key)] $$queued :> *had)
         (local-transform> [(keypath *client-id *key) NONE>] $$queued)
+        (local-transform> [(keypath *client-id *key) (termval *when)] $$taken-off)
         (count> (presence-delta "queued" *had nil))
+        ;; And forget what was taken off long enough ago, a few at a time.
+        (taken-off-before *at :> *before)
+        (local-select> [(keypath *client-id) (sorted-map-range-to *before 16) ALL]
+                       $$taken-off :> [*old *old-at])
+        (local-transform> [(keypath *client-id *old) NONE>] $$taken-off)
 
         ;; ── the sessions ───────────────────────────────────────────────
         (default>)

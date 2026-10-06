@@ -4,6 +4,29 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261006
 
+### A message taken off a queue stays off
+
+With reads fixed, the next 3,000 a second run still had 1,634 QoS 2
+duplicates, each sent some ten to forty times, every ten to fifty seconds
+through the drain, by the broker the client had moved to at the end. Its
+log had it finding the one message on the client's queue each time. A
+read only sends what it has not had, and lets a key go once its take-off
+has landed and a read no longer finds it, so the message was gone from
+the queue in between and came back. A take-off removes the key, and an
+enqueue of the same key puts it back, in whatever order the depot has
+them; and a queue write that times out has often reached the depot, so
+trying it again puts it there twice. With Rama minutes behind, an
+enqueue tried again, or another broker's landing late, came after the
+take-off, and the client got the message again.
+
+A key names one message for one client, so once it is taken off it has
+been had. The topology now remembers the keys taken off a session's
+queue, for an hour by the time in the key, and an enqueue of one of
+them is counted as "queue-taken-off" and dropped. Each take-off forgets
+a few of those older than that. The broker's second take-off
+(redequeue-after-millis) did this for one case, a word from another
+broker arriving late, and is left in place.
+
 ### QoS 2 sent again from a queue Rama had not caught up with
 
 At 3,000 messages a second the chaos run delivered tens of thousands of
