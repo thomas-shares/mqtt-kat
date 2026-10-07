@@ -489,6 +489,17 @@
         (println "  not every subscriber subscribed in time:"
                  (count (remove c/subscribed? (:subscribers state))) "missing"))
       (Thread/sleep (long (:subscribe-settle-ms chk)))
+      ;; Every client goes to the first broker to be sent on. None sent on
+      ;; means the brokers did not have the policy, or each other, yet: a
+      ;; Rama that was not reset, or brokers left up across a reset, is
+      ;; minutes behind. The load would then test one broker for minutes,
+      ;; and show nothing of what moves between them.
+      (when (and (redirecting? cfg) (next bs)
+                 (zero? (long (reduce + (map #(get (c/counters %) :redirected 0) (:clients state))))))
+        (throw (ex-info (str "every client stayed on broker " (:n (first bs)) ": none was redirected."
+                             " Stop the brokers, reset Rama, wait a minute and run again:"
+                             " bb scripts/brokers.bb stop; bb scripts/rama.bb reset && sleep 60")
+                        {:per-broker (frequencies (keep #(when (c/connected? %) (c/broker-of %)) (:clients state)))})))
       (println "load" (pr-str (select-keys (:load cfg) [:publishers :subscribers :topics :rate :duration-s])))
       (let [pubs   (mapv #(start-thread (fn [] (publisher-loop state % cfg))) (:publishers state))
             chaos  (for [[action spec] (:chaos cfg) :when spec]
@@ -560,7 +571,11 @@
   (when (empty? paths)
     (println "usage: clojure -m mqttkat.chaos.runner config.edn [more.edn ...]")
     (System/exit 2))
-  (let [result (run-scenario! (config paths))]
+  (let [result (try (run-scenario! (config paths))
+                    (catch clojure.lang.ExceptionInfo e
+                      (println "chaos:" (ex-message e) (pr-str (ex-data e)))
+                      (shutdown-agents)
+                      (System/exit 2)))]
     (pp/pprint (select-keys result [:ok? :drain :stats :counts :lost-by :lost-route :lost-by-session
                                     :lost-by-client :lost-span :lost-by-sent :duplicate-by :clients :report]))
     (doseq [v (take 10 (:violations result))]
