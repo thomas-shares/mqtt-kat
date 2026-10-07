@@ -4,6 +4,30 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261007
 
+### Broker-2 stopped for two minutes
+
+The traced run 111735 lost 11, and none at the move: each was sent 34 to
+82 s in, and the clients that lost one show no move step for it at all.
+Seven were on broker-2, sent within five seconds of each other, and one
+message was lost by four clients there while three others on the same
+broker had it from the cluster's queue.
+
+The stat lines say why to look at broker-2. From about 11:18:45 it wrote
+nothing at all, not even PINGRESPs, while PINGREQs still came in; brokers 1
+and 3 said their bridges to it had acknowledged nothing for 30, 60, 90 and
+120 s, and with their links full they held every publisher, so the whole
+cluster sat at under one message a second until the final reconnect. Its own
+links timed out the word on 16,000 copies and took them as delivered. A
+broker that stops is a bug before it is a loss, and the losses sit at its
+edge.
+
+A broker that writes nothing while packets come in now dumps every thread,
+virtual ones too (Thread/getAllStackTraces leaves those out, and they are
+the connections), next to its log, at most three times; scripts/threads.bb
+counts the threads by the first frame of ours they are in. The launcher
+also turns on jdk.tracePinnedThreads: the last broker-wide stall was a
+monitor pinning connection threads, and deliver-queued! still takes one.
+
 ### Five left, and a trace of only the moves
 
 With the runs spread again, 5 of 14.7 million were lost, all QoS 1, all

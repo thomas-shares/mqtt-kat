@@ -1,7 +1,10 @@
 (ns mqttkat.util
-  (:require [clojure.tools.logging :as log]
+  (:require [clojure.java.io :as io]
+            [clojure.tools.logging :as log]
             [mqttkat.handlers :as handlers])
   (:import  [org.mqttkat MqttStat]
+            [com.sun.management HotSpotDiagnosticMXBean HotSpotDiagnosticMXBean$ThreadDumpFormat]
+            [java.lang.management ManagementFactory]
             [java.nio.channels SelectionKey]
             [java.util.concurrent.atomic LongAdder]))
 
@@ -94,6 +97,44 @@
                                0.0)}
    :stalls    (:stalls now)})
 
+(defn stalled?
+  "Whether the interval from `before` to `now` looks like a broker that has
+   stopped: clients connected, packets still coming in or waiting to go out,
+   and not one socket write. A broker that is only quiet still answers its
+   clients' PINGREQs. A chaos run at 3,000 publishes a second saw broker-2
+   write nothing for two minutes while it took PINGREQs in, and its bridges
+   held every publisher in the cluster meanwhile."
+  [before now connected]
+  (and (pos? (long connected))
+       (= (:writes now) (:writes before))
+       (or (> (long (:received now)) (long (:received before)))
+           (pos? (long (backlog now))))))
+
+(def ^:private thread-dumps-left
+  ;; One stall can last minutes: a dump at its start says what it waits on,
+  ;; and a few more cover a broker that stalls again.
+  (atom 3))
+
+(defn- dump-threads!
+  "Write every thread, virtual ones included, to a file next to the broker's
+   log, and say where. Thread/getAllStackTraces leaves virtual threads out,
+   and they are the connections' readers and writers."
+  []
+  (when (pos? (long (first (swap-vals! thread-dumps-left dec))))
+    (try
+      (let [dir  (io/file (or (System/getProperty "mqttkat.threadDumps") "logs/brokers"))
+            file (io/file dir (format "%s-threads-%tH%<tM%<tS.txt"
+                                      (or (System/getProperty "mqttkat.brokerId") "broker")
+                                      (java.util.Date.)))]
+        (.mkdirs dir)
+        (.dumpThreads ^HotSpotDiagnosticMXBean (ManagementFactory/getPlatformMXBean HotSpotDiagnosticMXBean)
+                      (.getAbsolutePath file)
+                      HotSpotDiagnosticMXBean$ThreadDumpFormat/TEXT_PLAIN)
+        (log/warn "stalled: nothing written for" interval "s with clients connected - threads dumped to"
+                  (.getAbsolutePath file)))
+      (catch Throwable t
+        (log/warn t "stalled, and the threads could not be dumped")))))
+
 (defn info
   "Log the broker's counters every `interval` seconds, forever.
 
@@ -111,7 +152,10 @@
       ;; A broken stat line must not take the loop down with it — losing
       ;; observability silently is worse than one bad log entry.
       (try
-        (log/info "stats" (stats before now))
+        (let [s (stats before now)]
+          (log/info "stats" s)
+          (when (stalled? before now (get-in s [:clients :connected]))
+            (dump-threads!)))
         (let [growth (- (backlog now) (backlog before))]
           (when (pos? growth)
             (log/warn "falling behind: outbound backlog grew by" growth
