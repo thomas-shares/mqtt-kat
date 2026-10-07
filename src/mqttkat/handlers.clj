@@ -3247,6 +3247,23 @@
   (fn [{:keys [client-key]}]
     (contains? withheld (:client-id (get @*clients* client-key)))))
 
+(defn- unsubscribed-here?
+  "Whether `client-id`, which the sender had here on `t` and which is not
+   among `local` — this broker's subscribers the copy matched in the live
+   trie — is connected here with no subscription to it: it unsubscribed,
+   and the sender had not heard. Asked of the connection's own record, not
+   of the trie. A session moving in is live a moment before its
+   subscriptions are in the live trie, and one being taken over here is in
+   neither for a moment; a copy judged then took the client for one that
+   had unsubscribed, neither delivered it nor queued it, and a chaos run
+   lost the copies that reached two clients 2 and 3 ms after each resumed."
+  [client-id t local]
+  (boolean
+   (when-not (contains? local client-id)
+     (when-let [client (some->> (live-connection client-id) (get @*clients*))]
+       (not-any? #(and (nil? (:share-group %)) (intent/filter-matches? (:topic-filter %) t))
+                 (:subscribed-topics client))))))
+
 (defn- judged-plan
   "For a judged copy on `topic`: whom this broker queues it for, as
    {:leaving [{:client-id :qos}]}, unless it delivered to them live. Its
@@ -3258,8 +3275,7 @@
    does not reach back to the copy."
   [topic {:keys [view me v not-served local withheld] t :topic}]
   (let [served  (keep (fn [[c q]] (when-not (contains? withheld c) {:client-id c :qos q})) local)
-        owed    (remove (fn [{:keys [client-id]}]
-                          (and (live-connection client-id) (not (contains? local client-id))))
+        owed    (remove #(unsubscribed-here? (:client-id %) t local)
                         (intent/owed view me t v not-served))
         ;; A client whose history the view no longer reaches back to is
         ;; judged as copies were before there was a view: see route. Only

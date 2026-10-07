@@ -4,6 +4,21 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261007
 
+### Taken for unsubscribed while it moved in
+
+Run 130526, traced on the last minute only, caught two of the late losses
+in the act. Each copy came over a bridge to broker-1 2 and 3 ms after its
+client had resumed there, and broker-1 matched the client, did not choose
+it, and neither sent the copy nor queued it. Judging a copy asks who the
+sender had here; of those, one connected here with no subscription in the
+live trie is taken to have unsubscribed. A session moving in is live a
+moment before its subscriptions reach the live trie, and one taken over
+here is in neither for a moment, so a copy judged then was dropped for a
+client that had never left the topic. Whether it unsubscribed is now asked
+of the connection's own record, which carries the subscriptions from the
+start: a client that really unsubscribed has none there, and one moving in
+has its copy queued, for the reads that follow its resume.
+
 ### The late five, again
 
 Run 122731, untraced, kept every broker writing all the way and lost 5:

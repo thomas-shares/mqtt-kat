@@ -26,6 +26,7 @@
             [mqttkat.rama.module :as module]
             [mqttkat.retained :as retained]
             [mqttkat.test-util :as tu]
+            [mqttkat.trie :as trie]
             [mqttkat.web.cluster :as web-cluster]
             [mqttkat.web.console :as console]
             [mqttkat.web.state :as state])
@@ -1530,6 +1531,40 @@
                         (testing "without a version, or from before the view: as before, delivered"
                           (client/send-message (:client b) (publish-msg "judge/t" "unversioned" 0 nil))
                           (is (= "unversioned" (tu/payload-str (tu/expect-eventually! (:ch here) :PUBLISH)))))
+                        (let [moving-id (tu/client-id "judged-moving")
+                              moving    (tu/connect! "judged-moving" :id moving-id :clean-session? false)
+                              [k5 k6]   (map k ["five" "six"])]
+                          (try
+                            (client/send-message (:client moving) (subscribe-msg "judge/#" 1 2))
+                            (tu/expect! (:ch moving) :SUBACK)
+                            (view! {:v 3 :clients {moving-id {"judge/#" [1 me]}}})
+                            (testing "meant for a client live here whose subscription is not in the live trie yet: queued for it"
+                              ;; A session moving in is live a moment before
+                              ;; its subscriptions are in the live trie. A
+                              ;; chaos run lost the copies that landed then:
+                              ;; taken for unsubscribed, neither sent nor queued.
+                              (let [key     (h/live-connection moving-id)
+                                    entries (get-in @h/*clients* [key :subscribed-topics])
+                                    trie!   (fn [f] (doseq [e entries]
+                                                      (swap! h/*subscriber-trie* f (:topic-filter e)
+                                                             (assoc e :client-key key))))]
+                                (trie! trie/trie-delete)
+                                (try
+                                  (copy! "moving in" 3 k5)
+                                  (is (tu/wait-until #(contains? (keys-of moving-id) k5)))
+                                  (finally (trie! trie/trie-insert))))
+                              ;; Read from there, as a nudge does: let it come.
+                              (tu/take! (:ch moving) 2000))
+                            (testing "and one live here that unsubscribed, and its sender had not heard: neither"
+                              (client/send-message (:client moving) {:packet-type :UNSUBSCRIBE :packet-identifier 3
+                                                                     :topics ["judge/#"]})
+                              (tu/expect! (:ch moving) :UNSUBACK)
+                              (copy! "unsubscribed" 3 k6)
+                              (is (not-any? #(= "unsubscribed" (tu/payload-str %))
+                                            (keep (fn [_] (tu/take! (:ch moving) 300)) (range 3))))
+                              (is (not (contains? (keys-of moving-id) k6))))
+                            (finally
+                              (tu/close! moving))))
                         (finally
                           (tu/close! b here)))))
 
