@@ -10,6 +10,12 @@
                                       brokers started by scripts/brokers.bb
      -Dmqttkat.traceTopics=<regex>    and only on these topics; every topic
      MQTTKAT_TRACE_TOPICS=<regex>     when not given
+     -Dmqttkat.traceWhat=<regex>      and only these steps, matched against
+     MQTTKAT_TRACE_WHAT=<regex>       what a line says was done; every step
+                                      when not given. Following every
+                                      client through what only happens
+                                      when a session moves leaves out the
+                                      tens of millions of live sends.
 
    With topics given, a publish on one of them is followed at the broker it
    enters too: where it was planned to go, whichever clients it was for.
@@ -34,6 +40,23 @@
 
 (def ^:private clients (delay (setting "mqttkat.trace" "MQTTKAT_TRACE")))
 (def ^:private topics (delay (setting "mqttkat.traceTopics" "MQTTKAT_TRACE_TOPICS")))
+(def ^:private steps (delay (setting "mqttkat.traceWhat" "MQTTKAT_TRACE_WHAT")))
+
+(def ^:private step-followed
+  ;; what -> whether its lines are written. The steps are a handful of
+  ;; literals, asked about once per message per client.
+  (java.util.concurrent.ConcurrentHashMap.))
+
+(defn- step? [what]
+  (let [p @steps]
+    (or (nil? p)
+        (let [^java.util.concurrent.ConcurrentHashMap m step-followed
+              hit (.get m what)]
+          (if (some? hit)
+            hit
+            (let [hit (boolean (re-find p (str what)))]
+              (.put m what hit)
+              hit))))))
 
 (defn topic?
   "Whether publishes on `topic` are followed where they enter."
@@ -72,7 +95,7 @@
 (defn trace!
   "Log `what` was done with `msg` for `client-id`, if it is followed."
   [client-id msg what & detail]
-  (when (on? client-id (:topic msg))
+  (when (and (step? what) (on? client-id (:topic msg)))
     (log/info "trace" client-id (label msg) (str "q" (:qos msg)) what (str/join " " detail))))
 
 (defn publish!

@@ -2,6 +2,22 @@
 
 In this file will go my thoughts and ramblings about this project and what I have done and what I might do next.
 
+## 20261007
+
+### Five left, and a trace of only the moves
+
+With the runs spread again, 5 of 14.7 million were lost, all QoS 1, all
+for kept wildcard subscribers that the final reconnect put back on the
+broker they had been on. One message was lost by two of them, on the
+same broker. So the race at the hand-over was not it, or not all of it.
+
+Reading the code did not find it, so the next run is traced: every
+subscriber, but only the steps a moving session takes: handed over,
+restored or left on the cluster's queue at the resume, read from it,
+resent under its identifier, redelivered, withheld, not sent.
+MQTTKAT_TRACE_WHAT picks the steps, and leaves out the forty million live
+sends a trace of every client would otherwise write.
+
 ## 20261006
 
 ### Six left, and a race at the hand-over

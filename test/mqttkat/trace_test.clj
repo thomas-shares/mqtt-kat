@@ -15,3 +15,16 @@
   (is (false? (trace/on? "anyone" "a/topic")))
   (is (false? (trace/topic? "a/topic")))
   (is (false? (trace/following? "a/topic"))))
+
+(deftest only-the-steps-asked-for-are-traced
+  (with-redefs [trace/steps (delay #"handed over|cluster's queue")]
+    (.clear ^java.util.concurrent.ConcurrentHashMap @#'trace/step-followed)
+    (try
+      (is (true? (#'trace/step? "handed over to the cluster's queue")))
+      (is (true? (#'trace/step? "left on the cluster's queue: had here")))
+      (is (false? (#'trace/step? "sent")) "not a live send")
+      (is (false? (#'trace/step? "sent")) "asked again, from what was found the first time")
+      (finally
+        (.clear ^java.util.concurrent.ConcurrentHashMap @#'trace/step-followed))))
+  (testing "every step when none is named"
+    (is (true? (#'trace/step? "sent")))))

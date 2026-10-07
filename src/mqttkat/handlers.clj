@@ -1239,6 +1239,7 @@
         (not (::reconcile? msg)) (once-done! #(landed! client-id k))))
     (when (::reconcile? msg)
       (when-let [k (::msg-key msg)]
+        (trace/trace! client-id msg "taken off the cluster's queue: had live" k)
         (when-not (= k (::cluster-key msg))
           (dequeue-soon! client-id k false))
         (at/after redequeue-after-millis #(dequeue-soon! client-id k true) my-pool)))))
@@ -1284,6 +1285,9 @@
                     {:topic (:topic msg) :qos 2 :packet-identifier identifier :released? true}
                     (or (::release-key msg)
                         (str (or (::msg-key msg) (::cluster-key msg) (new-message-key)) "-rel"))))
+        (doseq [msg pending
+                :when (::cluster-key msg)]
+          (trace/trace! client-id msg "left on the cluster's queue at the hand-over" (::cluster-key msg)))
         (doseq [[identifier msg] (concat (sort-by first inflight) (map vector (repeat nil) pending))
                 :when (not (::released? msg))
                 ;; And what came from the cluster's queue and is still waiting
@@ -1601,10 +1605,13 @@
         ;; Had: what was restored here. What stays on the cluster's queue
         ;; is left for the reads that follow.
         (let [restored (into [] (keep (fn [[k msg]]
-                                        (when (restore-queued! client-id (assoc msg
-                                                                                ::queued-at (:queued-at msg)
-                                                                                ::cluster-key k))
-                                          k)))
+                                        (if (restore-queued! client-id (assoc msg
+                                                                              ::queued-at (:queued-at msg)
+                                                                              ::cluster-key k))
+                                          (do (trace/trace! client-id msg "restored from the cluster's queue"
+                                                            k (or (:packet-identifier msg) ""))
+                                              k)
+                                          (trace/trace! client-id msg "left on the cluster's queue at the resume" k))))
                              queued)]
           (swap! catching-up assoc client-id {:had (zipmap restored (repeat nil))}))
         (if waited-out?
@@ -1802,6 +1809,7 @@
                         state
                         (assoc-in state [:inflight packet-identifier] entry))))]
     (when-not (identical? before after)
+      (trace/trace! client-id msg "resent under its identifier" k packet-identifier)
       (if released?
         (send-buffer [key] (MqttPubRel/encode {:packet-type       :PUBREL
                                                :packet-identifier packet-identifier}))
@@ -1851,20 +1859,29 @@
             ;; cluster's for the next read or the next resume.
             took  (into #{}
                         (keep (fn [[k msg]]
-                                (when (and (not (contains? here k))
-                                           (if (:packet-identifier msg)
-                                             (resend-handed-over! key client-id k msg)
-                                             ;; Half the queue here at most,
-                                             ;; so live deliveries still find
-                                             ;; room; the rest stays for the
-                                             ;; next read.
-                                             (and (< (long (pending-count client-id))
-                                                     (quot (long pending-limit) 2))
-                                                  (queue-pending! client-id (assoc msg
-                                                                                   ::queued-at (:queued-at msg)
-                                                                                   ::cluster-key k))
-                                                  (vreset! queued? true))))
-                                  k)))
+                                (cond
+                                  (contains? here k)
+                                  (trace/trace! client-id msg "left on the cluster's queue: had here" k)
+
+                                  (:packet-identifier msg)
+                                  (if (resend-handed-over! key client-id k msg)
+                                    k
+                                    (trace/trace! client-id msg "left on the cluster's queue: identifier in use"
+                                                  k (:packet-identifier msg)))
+
+                                  ;; Half the queue here at most, so live
+                                  ;; deliveries still find room; the rest
+                                  ;; stays for the next read.
+                                  (and (< (long (pending-count client-id))
+                                          (quot (long pending-limit) 2))
+                                       (queue-pending! client-id (assoc msg
+                                                                        ::queued-at (:queued-at msg)
+                                                                        ::cluster-key k))
+                                       (vreset! queued? true))
+                                  k
+
+                                  :else
+                                  (trace/trace! client-id msg "left on the cluster's queue: full here" k))))
                         queued)]
         (doseq [[k msg] queued
                 :when (contains? took k)]
@@ -2716,6 +2733,8 @@
   [key client-id]
   (doseq [[identifier msg] (sort-by first (:inflight (some-> (existing-outbound client-id) deref)))]
     (log/trace "redelivering to" client-id "identifier:" identifier)
+    (trace/trace! client-id msg "redelivered on the resume" identifier
+                  (or (::msg-key msg) (::cluster-key msg) (::release-key msg) ""))
     (if (::released? msg)
       ;; The client answered it with a PUBREC: what is owed now is the
       ;; PUBREL, not the message again (§4.4). A client that had the PUBREL
