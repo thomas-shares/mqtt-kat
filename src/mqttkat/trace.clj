@@ -10,6 +10,13 @@
                                       brokers started by scripts/brokers.bb
      -Dmqttkat.traceTopics=<regex>    and only on these topics; every topic
      MQTTKAT_TRACE_TOPICS=<regex>     when not given
+     -Dmqttkat.traceMessages=<regex>  and only the messages whose name, as
+     MQTTKAT_TRACE_MESSAGES=<regex>   below, matches: a chaos client's
+                                      `<publisher>:<seq>` gives the time it
+                                      was sent, so the last minute of a run
+                                      can be followed without the rest.
+                                      With no topics given, a publish is
+                                      then followed where it enters too.
      -Dmqttkat.traceWhat=<regex>      and only these steps, matched against
      MQTTKAT_TRACE_WHAT=<regex>       what a line says was done; every step
                                       when not given. Following every
@@ -41,6 +48,7 @@
 (def ^:private clients (delay (setting "mqttkat.trace" "MQTTKAT_TRACE")))
 (def ^:private topics (delay (setting "mqttkat.traceTopics" "MQTTKAT_TRACE_TOPICS")))
 (def ^:private steps (delay (setting "mqttkat.traceWhat" "MQTTKAT_TRACE_WHAT")))
+(def ^:private messages (delay (setting "mqttkat.traceMessages" "MQTTKAT_TRACE_MESSAGES")))
 
 (def ^:private step-followed
   ;; what -> whether its lines are written. The steps are a handful of
@@ -63,6 +71,12 @@
   [topic]
   (boolean (when-let [p @topics]
              (and topic (re-find p topic)))))
+
+(defn publishes?
+  "Whether publishes on `topic` are followed where they enter: on a topic
+   asked for, or on any, when only messages are."
+  [topic]
+  (or (topic? topic) (boolean (and (nil? @topics) @messages))))
 
 (defn following?
   "Whether any client's messages on `topic` are followed."
@@ -92,16 +106,23 @@
         k
         "?")))
 
+(defn message?
+  "Whether `msg` is one of the messages followed: every one, unless only
+   some are asked for."
+  [msg]
+  (let [p @messages]
+    (or (nil? p) (boolean (re-find p (str (label msg)))))))
+
 (defn trace!
   "Log `what` was done with `msg` for `client-id`, if it is followed."
   [client-id msg what & detail]
-  (when (and (step? what) (on? client-id (:topic msg)))
+  (when (and (step? what) (on? client-id (:topic msg)) (message? msg))
     (log/info "trace" client-id (label msg) (str "q" (:qos msg)) what (str/join " " detail))))
 
 (defn publish!
   "Log `what` was done with a publish of `msg` where it entered, if its
    topic is followed."
   [msg what & detail]
-  (when (topic? (:topic msg))
+  (when (and (publishes? (:topic msg)) (message? msg))
     (log/info "trace -" (label msg) (str "q" (:qos msg)) (str "on " (:topic msg)) what
               (str/join " " detail))))

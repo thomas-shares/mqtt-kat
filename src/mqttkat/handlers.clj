@@ -3363,7 +3363,7 @@
 ;; where it is planned to go, and the followed clients matching it here that
 ;; it is not delivered to. See mqttkat.trace.
 (defn- trace-publish! [topic msg plan chosen]
-  (when (trace/topic? topic)
+  (when (and (trace/publishes? topic) (trace/message? msg))
     (let [followed (fn [cs] (filterv #(trace/on? % topic) (map :client-id cs)))]
       (trace/publish! msg "arrived from" (:client-id (get @*clients* (:client-key msg)))
                       "planned" (pr-str (cond-> {:brokers (vec (keys (:brokers plan)))}

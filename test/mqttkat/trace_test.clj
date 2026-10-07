@@ -28,3 +28,14 @@
         (.clear ^java.util.concurrent.ConcurrentHashMap @#'trace/step-followed))))
   (testing "every step when none is named"
     (is (true? (#'trace/step? "sent")))))
+
+(deftest only-the-messages-asked-for-are-traced
+  ;; The last minute of a 3,000/s chaos run is sequence 450 and on.
+  (with-redefs [trace/messages (delay #":(4[5-9]\d|[5-9]\d\d)$")]
+    (is (true? (trace/message? {:payload (.getBytes "71:493|x")})))
+    (is (false? (trace/message? {:payload (.getBytes "71:93|x")})) "an earlier one")
+    (testing "and with no topics asked for, a publish where it enters"
+      (is (true? (trace/publishes? "chaos/r/t5")))))
+  (testing "every message when none is named"
+    (is (true? (trace/message? {:payload (.getBytes "71:93|x")})))
+    (is (false? (trace/publishes? "chaos/r/t5")) "and no publish unless a topic is")))

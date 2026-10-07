@@ -4,6 +4,19 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261007
 
+### The late five, again
+
+Run 122731, untraced, kept every broker writing all the way and lost 5:
+QoS 1, kept wildcard subscribers, each a different message, each across a
+bridge, sent 149 to 166 s in. That is the shape runs 105435 and 221324 had
+too, and the one the trace of only the moves found nothing for: so it is
+somewhere in the live steps, which that trace left out. Following every
+live step of every message is tens of millions of lines; following them for
+the late messages only is a quarter of that, and a chaos client's payload
+names its sequence, which is its send time. So the trace can now be given
+the messages to follow by name (MQTTKAT_TRACE_MESSAGES), and with no topics
+named it follows those publishes where they enter as well.
+
 ### Broker-2 stopped for two minutes
 
 The traced run 111735 lost 11, and none at the move: each was sent 34 to
