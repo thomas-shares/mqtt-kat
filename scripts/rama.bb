@@ -52,9 +52,9 @@
    :grace    {:default 15 :coerce :long :desc "seconds between SIGTERM and SIGKILL on stop"}
    :timeout  {:default 180 :coerce :long :desc "seconds wait gives the Conductor and the module"}
    :build    {:default true :coerce :boolean :desc "update: run `lein jar` first (--no-build to skip)"}
-   :tasks    {:default 4 :coerce :long :desc "update, first launch only: tasks"}
-   :threads  {:default 2 :coerce :long :desc "update, first launch only: threads"}
-   :workers  {:default 1 :coerce :long :desc "update, first launch only: workers"}})
+   :tasks    {:default 16 :coerce :long :desc "update, first launch only: tasks"}
+   :threads  {:default 16 :coerce :long :desc "update, first launch only: threads"}
+   :workers  {:default 8 :coerce :long :desc "update, first launch only: workers"}})
 
 ;; ── finding Rama ─────────────────────────────────────────────────────────
 

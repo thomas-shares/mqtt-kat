@@ -26,12 +26,12 @@
          :rama     {:start? true :stop? false}
          :redirect {:policy :round-robin :via :disconnect}}
 
- :load {:publishers  40                     ; X = 40 + 160
-        :subscribers 160
-        :duration-s  300                    ; Y
-        :rate        1000                   ; messages a second, all publishers together
-        :size        256
-        :topics      20
+ :load {:publishers  400                     ; X = 40 + 160
+        :subscribers 1600
+        :duration-s  180                    ; Y
+        :rate        3000                   ; messages a second, all publishers together
+        :size        128
+        :topics      200
         :qos         {0 1, 1 2, 2 1}
         :sub-qos     {0 1, 1 2, 2 1}
         :persistent  0.5

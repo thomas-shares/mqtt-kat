@@ -126,7 +126,7 @@
                   status)))
             (finally
               (when-not keep?
-                (sh! "bb" "scripts/brokers.bb" "stop")
+                #_(sh! "bb" "scripts/brokers.bb" "stop")
                 (when (and @started-rama? (:stop? rama))
                   (sh! "bb" "scripts/rama.bb" "stop")))))]
       (System/exit status))))
