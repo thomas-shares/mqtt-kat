@@ -9,6 +9,7 @@
             [mqttkat.bridge :as bridge]
             [mqttkat.intent :as intent]
             [mqttkat.retained :as retained]
+            [mqttkat.trace :as trace]
             [mqttkat.trie :refer [trie-insert trie-delete trie-matching-vals sieve-dollar]])
   (:import [java.util.concurrent CompletableFuture]
            [java.util.concurrent.atomic LongAdder]
@@ -1228,6 +1229,7 @@
    delivery on its next resume. Any other message was never on it. One
    another broker forwarded here is no longer held for it by this client."
   [client-id msg]
+  (trace/trace! client-id msg "settled" (or (::cluster-key msg) ""))
   (when-let [origin (::origin msg)]
     (release-origin-hold! origin (::msg-key msg) client-id))
   (when-let [{:keys [dequeue!]} @session-source]
@@ -1237,6 +1239,7 @@
         (not (::reconcile? msg)) (once-done! #(landed! client-id k))))
     (when (::reconcile? msg)
       (when-let [k (::msg-key msg)]
+        (trace/trace! client-id msg "taken off the cluster's queue: had live" k)
         (when-not (= k (::cluster-key msg))
           (dequeue-soon! client-id k false))
         (at/after redequeue-after-millis #(dequeue-soon! client-id k true) my-pool)))))
@@ -1282,6 +1285,9 @@
                     {:topic (:topic msg) :qos 2 :packet-identifier identifier :released? true}
                     (or (::release-key msg)
                         (str (or (::msg-key msg) (::cluster-key msg) (new-message-key)) "-rel"))))
+        (doseq [msg pending
+                :when (::cluster-key msg)]
+          (trace/trace! client-id msg "left on the cluster's queue at the hand-over" (::cluster-key msg)))
         (doseq [[identifier msg] (concat (sort-by first inflight) (map vector (repeat nil) pending))
                 :when (not (::released? msg))
                 ;; And what came from the cluster's queue and is still waiting
@@ -1296,6 +1302,7 @@
           ;; that took the client for away may have queued it already, and
           ;; this is then the same entry, not a second.
           (let [k (or (::msg-key msg) (::cluster-key msg))]
+            (trace/trace! client-id msg "handed over to the cluster's queue" (or identifier "") k)
             (vswap! handed conj msg)
             ;; The broker that forwarded it lets its copy go only once the
             ;; cluster has this one: the write can take seconds when Rama is
@@ -1598,10 +1605,13 @@
         ;; Had: what was restored here. What stays on the cluster's queue
         ;; is left for the reads that follow.
         (let [restored (into [] (keep (fn [[k msg]]
-                                        (when (restore-queued! client-id (assoc msg
-                                                                                ::queued-at (:queued-at msg)
-                                                                                ::cluster-key k))
-                                          k)))
+                                        (if (restore-queued! client-id (assoc msg
+                                                                              ::queued-at (:queued-at msg)
+                                                                              ::cluster-key k))
+                                          (do (trace/trace! client-id msg "restored from the cluster's queue"
+                                                            k (or (:packet-identifier msg) ""))
+                                              k)
+                                          (trace/trace! client-id msg "left on the cluster's queue at the resume" k))))
                              queued)]
           (swap! catching-up assoc client-id {:had (zipmap restored (repeat nil))}))
         (if waited-out?
@@ -1799,6 +1809,7 @@
                         state
                         (assoc-in state [:inflight packet-identifier] entry))))]
     (when-not (identical? before after)
+      (trace/trace! client-id msg "resent under its identifier" k packet-identifier)
       (if released?
         (send-buffer [key] (MqttPubRel/encode {:packet-type       :PUBREL
                                                :packet-identifier packet-identifier}))
@@ -1819,10 +1830,17 @@
    or in `taken` — the keys an earlier call for the same restatement sent —
    is left out, so reading the queue twice sends nothing twice.
 
+   Nothing before the connection's CONNACK (§3.2.0-1): a restatement can
+   read the queue of a connection whose CONNECT is still waiting on its
+   record, and a handed-over message went out ahead of the CONNACK. It
+   stays on the cluster's queue for the reads catch-up! starts after it.
+
    Returns the keys it took."
   [client-id connect-id queued taken]
   (let [key (live-connection client-id)]
-    (if-not (and key (= connect-id (get-in @*clients* [key :connect-id])))
+    (if-not (and key
+                 (= connect-id (get-in @*clients* [key :connect-id]))
+                 (not (awaiting-connack? key)))
       #{}
       ;; One call at a time per client: two readers of the queue — a
       ;; restatement's and a nudge's — each found the other's messages not
@@ -1841,21 +1859,33 @@
             ;; cluster's for the next read or the next resume.
             took  (into #{}
                         (keep (fn [[k msg]]
-                                (when (and (not (contains? here k))
-                                           (if (:packet-identifier msg)
-                                             (resend-handed-over! key client-id k msg)
-                                             ;; Half the queue here at most,
-                                             ;; so live deliveries still find
-                                             ;; room; the rest stays for the
-                                             ;; next read.
-                                             (and (< (long (pending-count client-id))
-                                                     (quot (long pending-limit) 2))
-                                                  (queue-pending! client-id (assoc msg
-                                                                                   ::queued-at (:queued-at msg)
-                                                                                   ::cluster-key k))
-                                                  (vreset! queued? true))))
-                                  k)))
+                                (cond
+                                  (contains? here k)
+                                  (trace/trace! client-id msg "left on the cluster's queue: had here" k)
+
+                                  (:packet-identifier msg)
+                                  (if (resend-handed-over! key client-id k msg)
+                                    k
+                                    (trace/trace! client-id msg "left on the cluster's queue: identifier in use"
+                                                  k (:packet-identifier msg)))
+
+                                  ;; Half the queue here at most, so live
+                                  ;; deliveries still find room; the rest
+                                  ;; stays for the next read.
+                                  (and (< (long (pending-count client-id))
+                                          (quot (long pending-limit) 2))
+                                       (queue-pending! client-id (assoc msg
+                                                                        ::queued-at (:queued-at msg)
+                                                                        ::cluster-key k))
+                                       (vreset! queued? true))
+                                  k
+
+                                  :else
+                                  (trace/trace! client-id msg "left on the cluster's queue: full here" k))))
                         queued)]
+        (doseq [[k msg] queued
+                :when (contains? took k)]
+          (trace/trace! client-id msg "taken from the cluster's queue" k))
         (when (seq took)
           ;; Had, whoever read them: a read under way could find them
           ;; again once they are acknowledged, before the take-off lands.
@@ -2527,6 +2557,7 @@
     ;; which the second look catches.
     (awaiting-connack? key)
     (let [held? (queue-pending! client-id msg)]
+      (trace/trace! client-id msg (if held? "held for its CONNACK" "refused before its CONNACK: queue full"))
       (if held?
         (note-delivered! client-id msg)
         (do (.increment ^LongAdder MqttStat/droppedMessages)
@@ -2538,26 +2569,83 @@
     :else
     (deliver-now-or-queue! key client-id msg publisher-key)))
 
+(defn- taken-back!
+  "Take `msg` out of `client-id`'s window again, in flight under
+   `packet-identifier` or, with none, waiting: whether it was still there.
+   Not there, a hand-over has it, and the cluster's queue with it."
+  [client-id packet-identifier msg]
+  (let [[before after]
+        (swap-vals! (outbound-atom client-id)
+                    (fn [state]
+                      (if packet-identifier
+                        (if (identical? msg (get-in state [:inflight packet-identifier]))
+                          (update state :inflight dissoc packet-identifier)
+                          state)
+                        ;; Waiting, it is a copy stamped on the way in: the
+                        ;; same payload is what says it is this one. The last
+                        ;; such, since it went in last: a client with two
+                        ;; matching subscriptions is sent the publish twice.
+                        (let [pending (vec (:pending state))
+                              i       (last (keep-indexed
+                                             (fn [i m] (when (identical? (:payload m) (:payload msg)) i))
+                                             pending))]
+                          (if i
+                            (assoc state :pending (into clojure.lang.PersistentQueue/EMPTY
+                                                        (concat (subvec pending 0 i)
+                                                                (subvec pending (inc i)))))
+                            state)))))]
+    (not (identical? before after))))
+
+(defn- left-meanwhile?
+  "The connection `key` has left since the caller found it live, and the
+   message it put in the window is out of it again, so that the caller
+   queues it as for a session that is away. The caller asks a moment before
+   the window is touched, and remove-client! can hand the window over in
+   between: the message then went in flight to a socket that was gone,
+   neither handed over nor queued, and nothing sent it again. The 3,000 a
+   second chaos run lost a handful at its final reconnect.
+
+   Asked after the message is in the window rather than under a lock with
+   the hand-over: the delivery runs on a connection's virtual thread, and
+   one waiting on a monitor holds its carrier, so contended ones stopped
+   every connection on the broker. A hand-over after this sees the
+   message, since the connection stops being live before the hand-over
+   begins."
+  [key client-id packet-identifier msg]
+  (and (not (live-key? key))
+       (taken-back! client-id packet-identifier msg)))
+
 (defn- deliver-now-or-queue!
   [key client-id msg publisher-key]
   (if-let [packet-identifier (acquire-packet-identifier! client-id msg
                                                          (receive-maximum-of key))]
-    ;; A refused send has to give the identifier back, or the window fills with
-    ;; messages that were discarded rather than sent and the subscriber
-    ;; eventually stops being delivered to entirely.
-    ;; Discarded as expired or too large counts as delivered: nobody will be.
-    (do (if (send-publish! key msg packet-identifier)
+    (if (left-meanwhile? key client-id packet-identifier msg)
+      (do (trace/trace! client-id msg "not sent: its connection has left")
+          false)
+      ;; A refused send has to give the identifier back, or the window fills with
+      ;; messages that were discarded rather than sent and the subscriber
+      ;; eventually stops being delivered to entirely.
+      ;; Discarded as expired or too large counts as delivered: nobody will be.
+      (let [sent? (send-publish! key msg packet-identifier)]
+        (trace/trace! client-id msg (if sent? "sent" "not sent: expired or too large") packet-identifier)
+        (if sent?
           (note-delivered! client-id msg)
           (release-packet-identifier! client-id packet-identifier))
-        true)
+        true))
     (let [held? (queue-pending! client-id msg)]
-      (if held?
-        (note-delivered! client-id msg)
-        (do (.increment ^LongAdder MqttStat/droppedMessages)
-            (note-refused! client-id publisher-key)))
-      (when (>= (pending-count client-id) pause-threshold)
-        (throttle-publisher! key publisher-key client-id))
-      held?)))
+      (if (and held? (left-meanwhile? key client-id nil msg))
+        (do (trace/trace! client-id msg "not held: its connection has left")
+            false)
+        (do
+          (trace/trace! client-id msg (if held? "pending: window full" "refused: pending queue full")
+                        (pending-count client-id))
+          (if held?
+            (note-delivered! client-id msg)
+            (do (.increment ^LongAdder MqttStat/droppedMessages)
+                (note-refused! client-id publisher-key)))
+          (when (>= (pending-count client-id) pause-threshold)
+            (throttle-publisher! key publisher-key client-id))
+          held?)))))
 
 (declare flush-pending!)
 
@@ -2618,10 +2706,13 @@
           ;; finds, so the identifier has to come back here as well — otherwise a
           ;; session that was away long enough returns to a window full of
           ;; messages it will never be sent.
-          (when-not (send-publish! key msg packet-identifier)
-            (release-packet-identifier! client-id packet-identifier)
-            ;; Expired here is expired there: nobody will be sent it.
-            (settled! client-id msg))
+          (let [sent? (send-publish! key msg packet-identifier)]
+            (trace/trace! client-id msg (if sent? "sent from pending" "not sent from pending: expired")
+                          packet-identifier)
+            (when-not sent?
+              (release-packet-identifier! client-id packet-identifier)
+              ;; Expired here is expired there: nobody will be sent it.
+              (settled! client-id msg)))
           (recur (inc sent)))))))
 
 (defn redeliver-inflight!
@@ -2642,6 +2733,8 @@
   [key client-id]
   (doseq [[identifier msg] (sort-by first (:inflight (some-> (existing-outbound client-id) deref)))]
     (log/trace "redelivering to" client-id "identifier:" identifier)
+    (trace/trace! client-id msg "redelivered on the resume" identifier
+                  (or (::msg-key msg) (::cluster-key msg) (::release-key msg) ""))
     (if (::released? msg)
       ;; The client answered it with a PUBREC: what is owed now is the
       ;; PUBREL, not the message again (§4.4). A client that had the PUBREL
@@ -2876,6 +2969,8 @@
                                  :retain? (delivery-retain? subscription retain retain?)
                                  :subscription-identifiers (identifiers-of subscription)}
                                 msg key client-id)]
+            (when (nil? delivery)
+              (trace/trace! client-id msg "not sent: it has it here already"))
             (if (or (nil? delivery) (deliver-or-queue! key client-id delivery publisher-key))
               (conj live client-id)
               live))
@@ -3134,6 +3229,9 @@
                                (filter #(intent/withhold? view me % t v not-served))
                                (keys local))]
           (doseq [c withheld]
+            (when (trace/on? c topic)
+              (trace/trace! c (assoc msg :topic topic) "withheld: its sender had it elsewhere"
+                            "view" v (pr-str (intent/state-at view c v))))
             (when (live-connection c)
               (note-withheld-live! c (:client-id (get clients client-key)) v
                                    (intent/state-at view c v) (contains? not-served c))))
@@ -3149,6 +3247,23 @@
   (fn [{:keys [client-key]}]
     (contains? withheld (:client-id (get @*clients* client-key)))))
 
+(defn- unsubscribed-here?
+  "Whether `client-id`, which the sender had here on `t` and which is not
+   among `local` — this broker's subscribers the copy matched in the live
+   trie — is connected here with no subscription to it: it unsubscribed,
+   and the sender had not heard. Asked of the connection's own record, not
+   of the trie. A session moving in is live a moment before its
+   subscriptions are in the live trie, and one being taken over here is in
+   neither for a moment; a copy judged then took the client for one that
+   had unsubscribed, neither delivered it nor queued it, and a chaos run
+   lost the copies that reached two clients 2 and 3 ms after each resumed."
+  [client-id t local]
+  (boolean
+   (when-not (contains? local client-id)
+     (when-let [client (some->> (live-connection client-id) (get @*clients*))]
+       (not-any? #(and (nil? (:share-group %)) (intent/filter-matches? (:topic-filter %) t))
+                 (:subscribed-topics client))))))
+
 (defn- judged-plan
   "For a judged copy on `topic`: whom this broker queues it for, as
    {:leaving [{:client-id :qos}]}, unless it delivered to them live. Its
@@ -3160,8 +3275,7 @@
    does not reach back to the copy."
   [topic {:keys [view me v not-served local withheld] t :topic}]
   (let [served  (keep (fn [[c q]] (when-not (contains? withheld c) {:client-id c :qos q})) local)
-        owed    (remove (fn [{:keys [client-id]}]
-                          (and (live-connection client-id) (not (contains? local client-id))))
+        owed    (remove #(unsubscribed-here? (:client-id %) t local)
                         (intent/owed view me t v not-served))
         ;; A client whose history the view no longer reaches back to is
         ;; judged as copies were before there was a view: see route. Only
@@ -3261,6 +3375,27 @@
                        :publisher  (when (instance? SelectionKey client-key)
                                      (connection-of client-key))}))))
 
+;; Trace, when asked for: a publish on a followed topic as it arrives and
+;; where it is planned to go, and the followed clients matching it here that
+;; it is not delivered to. See mqttkat.trace.
+(defn- trace-publish! [topic msg plan chosen]
+  (when (and (trace/publishes? topic) (trace/message? msg))
+    (let [followed (fn [cs] (filterv #(trace/on? % topic) (map :client-id cs)))]
+      (trace/publish! msg "arrived from" (:client-id (get @*clients* (:client-key msg)))
+                      "planned" (pr-str (cond-> {:brokers (vec (keys (:brokers plan)))}
+                                          (:holders plan)
+                                          (assoc :holders (into {} (map (fn [[b cs]] [b [(count cs) (followed cs)]]))
+                                                                (:holders plan)))
+                                          (seq (:queue plan))   (assoc :queue (followed (:queue plan)))
+                                          (seq (:leaving plan)) (assoc :leaving (followed (:leaving plan)))))
+                      "chosen here" (count chosen))))
+  (when (and (trace/following? topic) (not= 2 (long (or (:qos msg) 0))))
+    (let [chosen (into #{} (map :client-key) chosen)]
+      (doseq [{:keys [client-key]} (matching-subscribers topic)
+              :let [client-id (:client-id (get @*clients* client-key))]
+              :when (and (trace/on? client-id topic) (not (contains? chosen client-key)))]
+        (trace/trace! client-id msg "matched here but not chosen")))))
+
 (defn- publish-keyed [{:keys [topic qos retain? payload properties] :as msg}]
   (log/debug "PUBLISH:" (dissoc msg :client-key))
   ;; Counted once per publish, not once per subscriber: this is how busy the
@@ -3297,6 +3432,7 @@
         ;; Not chosen at all for QoS 2 — see anyone-to-deliver-to?.
         keys (when-not (= 2 (long qos))
                (subscribers-for topic (:client-key msg) serve-group? groups-only? withhold? matches))]
+    (trace-publish! topic msg plan keys)
     (case (long qos)
       0 (forward-to-brokers! plan topic msg (or (qos-0 keys topic msg false) #{}))
       ;; Queued for the sessions that are away after the live deliveries,

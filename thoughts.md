@@ -2,7 +2,184 @@
 
 In this file will go my thoughts and ramblings about this project and what I have done and what I might do next.
 
+## 20261007
+
+### Taken for unsubscribed while it moved in
+
+Run 130526, traced on the last minute only, caught two of the late losses
+in the act. Each copy came over a bridge to broker-1 2 and 3 ms after its
+client had resumed there, and broker-1 matched the client, did not choose
+it, and neither sent the copy nor queued it. Judging a copy asks who the
+sender had here; of those, one connected here with no subscription in the
+live trie is taken to have unsubscribed. A session moving in is live a
+moment before its subscriptions reach the live trie, and one taken over
+here is in neither for a moment, so a copy judged then was dropped for a
+client that had never left the topic. Whether it unsubscribed is now asked
+of the connection's own record, which carries the subscriptions from the
+start: a client that really unsubscribed has none there, and one moving in
+has its copy queued, for the reads that follow its resume.
+
+### The late five, again
+
+Run 122731, untraced, kept every broker writing all the way and lost 5:
+QoS 1, kept wildcard subscribers, each a different message, each across a
+bridge, sent 149 to 166 s in. That is the shape runs 105435 and 221324 had
+too, and the one the trace of only the moves found nothing for: so it is
+somewhere in the live steps, which that trace left out. Following every
+live step of every message is tens of millions of lines; following them for
+the late messages only is a quarter of that, and a chaos client's payload
+names its sequence, which is its send time. So the trace can now be given
+the messages to follow by name (MQTTKAT_TRACE_MESSAGES), and with no topics
+named it follows those publishes where they enter as well.
+
+### Broker-2 stopped for two minutes
+
+The traced run 111735 lost 11, and none at the move: each was sent 34 to
+82 s in, and the clients that lost one show no move step for it at all.
+Seven were on broker-2, sent within five seconds of each other, and one
+message was lost by four clients there while three others on the same
+broker had it from the cluster's queue.
+
+The stat lines say why to look at broker-2. From about 11:18:45 it wrote
+nothing at all, not even PINGRESPs, while PINGREQs still came in; brokers 1
+and 3 said their bridges to it had acknowledged nothing for 30, 60, 90 and
+120 s, and with their links full they held every publisher, so the whole
+cluster sat at under one message a second until the final reconnect. Its own
+links timed out the word on 16,000 copies and took them as delivered. A
+broker that stops is a bug before it is a loss, and the losses sit at its
+edge.
+
+A broker that writes nothing while packets come in now dumps every thread,
+virtual ones too (Thread/getAllStackTraces leaves those out, and they are
+the connections), next to its log, at most three times; scripts/threads.bb
+counts the threads by the first frame of ours they are in. The launcher
+also turns on jdk.tracePinnedThreads: the last broker-wide stall was a
+monitor pinning connection threads, and deliver-queued! still takes one.
+
+### Five left, and a trace of only the moves
+
+With the runs spread again, 5 of 14.7 million were lost, all QoS 1, all
+for kept wildcard subscribers that the final reconnect put back on the
+broker they had been on. One message was lost by two of them, on the
+same broker. So the race at the hand-over was not it, or not all of it.
+
+Reading the code did not find it, so the next run is traced: every
+subscriber, but only the steps a moving session takes: handed over,
+restored or left on the cluster's queue at the resume, read from it,
+resent under its identifier, redelivered, withheld, not sent.
+MQTTKAT_TRACE_WHAT picks the steps, and leaves out the forty million live
+sends a trace of every client would otherwise write.
+
 ## 20261006
+
+### Six left, and a race at the hand-over
+
+With the drain waiting for Rama the 3,000 a second run lost 6 of 15
+million owed: the 333,000 before were late, not lost. The six were all
+QoS 1, for kept wildcard subscribers on broker 1, bridged from the other
+two, sent 20 to 35 seconds before the final reconnect, with Rama's queue
+empty at the end. So they were never put on it.
+
+One way that happens: a delivery asks whether the connection is still
+live, and only then takes a place in the client's window. If the client
+disconnects in between, the hand-over empties the window first, and the
+delivery then puts its message in flight to a socket that is gone. It is
+neither handed over nor queued, and nothing sends it again. The two now
+take the same lock, the one a read of the cluster's queue already took,
+and the delivery asks again under it: a connection gone by then refuses
+the message, and the caller queues it as for any client that is away.
+It could not be timed from outside, so the run will say whether this was
+the six.
+
+It said something else first: every delivery stopped 44 seconds in and
+stayed stopped until the final reconnect. The deliveries run on each
+connection's virtual thread, and on Java 21 a virtual thread waiting on
+a monitor keeps its carrier thread. Four hundred publishers delivering to
+the same wildcard subscribers waited on its lock until no carrier was
+left, and the connections' writers had none to run on. So no lock: the
+delivery puts the message in the window as before, then asks whether the
+connection is still live. If it has gone, the delivery takes the message
+out again, and the caller queues it. If the hand-over took it first, the
+cluster's queue has it already. And since the connection stops being live
+before the hand-over starts, a hand-over that runs after the check sees
+the message.
+
+### A PUBLISH ahead of its CONNACK
+
+The run after that had one protocol error: a kept subscriber was sent a
+QoS 1 PUBLISH at the final reconnect before its CONNACK. Every live
+delivery waits for the CONNACK, and the flush after it sends what waited.
+A read of the cluster's queue did not: a message the old broker handed
+over in flight goes out at once under its identifier, and a restatement
+reads the queue of every connection the cluster has as here, including
+one whose CONNECT is still waiting on its connect record, which with Rama
+45 seconds behind can take a while. Such a read now takes nothing until
+the CONNACK is out, and leaves the queue to the reads that follow it.
+
+### A drain that waits for Rama
+
+The next 3,000 a second run, on the 1024 window, lost 350,000 rather than
+1.17 million, all in the last minute before the final reconnect. A trace
+of every client on one topic found each of its lost messages in the
+same place: a copy that reached the broker its client had just left,
+which queued it on the cluster, while the broker the client had moved
+to read that queue at 2, 5, 10, 20, 40 and 60 seconds and whenever Rama
+nudged it. With Rama 45 seconds behind, those writes landed after the
+reads, and the drain, which ended on ten seconds without a delivery,
+ended before the nudges came. The probe afterwards still had them on
+the queues, 1,000 to 2,000 for each client that lost most.
+
+Late is not lost, but the check cannot tell them apart. The drain now
+also watches Rama's queue counts, when the brokers use an external Rama,
+and ends only once those have not moved for :drain-ms either. Whatever
+is still queued then, with every client connected, is printed: that is
+a message nothing read back.
+
+### A minute on the bridges
+
+The trace of the next 3,000 a second run, on ten topics, had every copy
+that crossed a bridge reach the other broker, and the kept clients it
+followed lost no QoS 2 message before the final reconnect. What they did
+lose, some 180 each, were copies that reached the broker they had left
+after they had gone: it queued them on the cluster, and the drain ended
+before the new broker read them back.
+
+They were that late because every bridge was a minute behind. From the
+publish's arrival at one broker to its copy's at the next took ten
+seconds in the first ten seconds of load, forty by the first minute, and
+40 to 75 seconds from then to the end, on all six links. Each link moved
+about 450 messages a second. A broker stops reading a bridge while a
+subscriber it feeds is behind, and with 135 wildcard subscribers at
+3,000 a second one of them always is. That sets the rate, and it is not
+wrong: it is the back-pressure that keeps the subscriber from losing
+messages. What made it a minute was the bridge's Receive Maximum,
+16,384: a link held its publishers once its own queue reached 2,048, and
+only filled that once the peer's window was full, so a copy waited
+behind some 18,000 others. 18,000 at 450 a second is 40 seconds.
+
+The window is 1024 now. The publishers are held as soon, behind a pipe a
+sixteenth as long, and a peer that keeps up still has the window for
+10,000 messages a second at a 100 ms round trip. Trace lines now carry
+the QoS too: a QoS 0 delivery is not followed, and without it a message
+a client was not sent could not be told from one it was sent at QoS 0.
+
+The clients that lost most were not among those followed: the top ten
+were kept wildcard subscribers, some 40,000 each, from 54 seconds in.
+
+### Following a message through the brokers
+
+After #53, a 3,000 a second run still lost 1.4 million messages, all for
+kept sessions, and none of it showed up anywhere I could look. The lost
+messages were not on Rama's queues. Nothing was withheld from the clients
+that lost them while the run went on, nothing was handed over at the end,
+and every connect and subscribe that failed to record did so at the final
+move. Counts and warnings only say how many, so the broker now has a
+trace: -Dmqttkat.trace (or MQTTKAT_TRACE) names the clients to follow by a
+regex, -Dmqttkat.traceTopics (MQTTKAT_TRACE_TOPICS) the topics. One log
+line follows each thing done with their messages: sent, pending, refused,
+withheld, left out, queued on the cluster, handed over, taken from the
+queue, settled. A publish on a followed topic is also logged where it
+enters, with the brokers its plan sends copies to.
 
 ### A message taken off a queue stays off
 

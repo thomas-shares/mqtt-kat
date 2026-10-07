@@ -100,6 +100,10 @@
                          [(str "-Dmqttkat.brokerId=broker-" n)
                           (str "-Dmqttkat.advertise=" advertise)
                           "-Dmqttkat.sysInterval=60"
+                          ;; A virtual thread that blocks while pinned prints
+                          ;; its stack, once per distinct stack: a pinned
+                          ;; connection thread stalled a whole broker once.
+                          "-Djdk.tracePinnedThreads=full"
                           "-jar" jar (str mqtt) (str web)])
             proc (apply p/process {:out :write :out-file (fs/file log)
                                    :err :write :err-file (fs/file log)}
