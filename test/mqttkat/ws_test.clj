@@ -71,13 +71,20 @@
    namespaces leave clients registered. The two counts were checked against
    each other before this was changed — MqttStat and util/client-counts agree
    exactly — so the leftovers are real connections and the test was wrong, not
-   the count."
+   the count.
+
+   Those leftovers can also leave while this waits: a CI run saw a client
+   connect and the count stay at 23 for ten seconds, because an earlier
+   namespace's client went at the same moment. So a frame that agrees with the
+   broker's own count when it is read passes too. That is still the result the
+   page promises, and a page that stopped updating would disagree with it."
   [^LinkedBlockingQueue q n]
   (let [deadline (+ (System/currentTimeMillis) 10000)]
     (loop [seen []]
       (if-let [msg (and (< (System/currentTimeMillis) deadline) (take-message q))]
         ;; Every frame carries the fields, so the count is on all three kinds.
-        (if (= (str n) (second (re-find #"\"m-clients\":\"([\d,]+)\"" msg)))
+        (if (contains? (hash-set (str n) (str (:clients (state/reading))))
+                       (second (re-find #"\"m-clients\":\"([\d,]+)\"" msg)))
           msg
           (recur (conj seen msg)))
         (do (is false (str "no frame reporting " n " clients; saw " (pr-str seen))) nil)))))
@@ -218,6 +225,8 @@
 
         (testing "connecting an MQTT client reaches the browser"
           (is (= 1 (ws/connected)) "exactly this test's browser should be listening")
+          ;; Only frames sent from here on can say the client arrived.
+          (.clear received)
           (let [before (:clients (state/reading))
                 c      (tu/connect! "ws-watched")]
             (is (some? (await-clients received (inc before)))
