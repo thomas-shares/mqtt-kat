@@ -27,6 +27,27 @@ how they ended. `chaos/broker-kill.edn` and `chaos/broker-restart.edn` use
 all of it. Not yet run against a Rama cluster: only the checks, a resend test
 against the suite's own broker and a short single-broker run have.
 
+### First broker-kill runs
+
+Three brokers, QoS 1 and 2, persistent publishers resending, a broker killed
+or stopped every ten seconds or so (run 165703). Of 1.15M messages owed, 4
+were lost (QoS 1, each acknowledged by a broker killed right after) and 148
+QoS 2 messages arrived twice, against 35 and 79 in the run before it, whose
+publishers did not resend. 367 packets were resent, 555 QoS 1 repeats were
+allowed. The QoS 2 duplicates sit right after a broker stopped, and the
+earlier run's did too, which is the open "delivered twice across a crash"
+item: a subscriber acknowledged on the dead broker, whose word did not reach
+the cluster, is given the message again where it resumes. The report now
+says how many of the duplicates were of a message its publisher had also
+sent twice (`:duplicate-resent`), which would be a different gap: a QoS 2
+publish resent to a broker that has no record of its packet identifier.
+Two things seen on the way. A restarted broker takes 20 to 40 s to listen
+again, so `:down-ms` is only the start of an outage (`:outages` in the
+report has the real ones). And after each kill, up to 64 of 80 clients were
+disconnected for around ten seconds with two brokers up, which is about
+`hand-over-wait-millis`: a session whose broker died is waited on before it
+is handed over.
+
 ## 20261007
 
 ### Taken for unsubscribed while it moved in

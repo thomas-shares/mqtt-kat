@@ -368,7 +368,9 @@
                     :deliveries {[0 1] two [0 2] [{:at 650 :qos 1}]}}))]
     (is (= {:duplicate 1} (kinds (r 1 nil))) "QoS 0 subscriber, twice, never resent")
     (is (:ok? (r 1 1)) "QoS 1 resent")
-    (is (= {:duplicate 1} (kinds (r 2 1))) "QoS 2 resent still exactly once")))
+    (is (= {:duplicate 1} (kinds (r 2 1))) "QoS 2 resent still exactly once")
+    (is (= {0 1} (:duplicate-resent (r 2 1))) "and said to be of a resent publish")
+    (is (= {} (:duplicate-resent (r 2 nil))))))
 
 ;; A broker is down from its kill to its :broker-up, tens of seconds, not
 ;; just around the two events: a loss in the middle of that is still the

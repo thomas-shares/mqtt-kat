@@ -457,7 +457,10 @@
                                      :retain? false :duplicate? false}
                               pid (assoc :packet-identifier pid)))))
           :sent
-          (do (when pid (retire! c pid false)) :failed))))))
+          ;; A persistent publisher keeps what it could not send, for the
+          ;; next connection to send as a resend; a clean one's went with
+          ;; its session.
+          (do (when (and pid (not (:persistent? c))) (retire! c pid false)) :failed))))))
 
 (defn close! [c]
   (locking (:lock c)

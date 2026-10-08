@@ -322,6 +322,7 @@
         lost-route (volatile! {})
         lost-by-session (volatile! {})
         dup-by     (volatile! {})
+        dup-resent (volatile! {})
         lost       (volatile! 0)
         lost-sent  (volatile! {})
         lost-span  (volatile! nil)
@@ -410,10 +411,15 @@
               1 (when (> n 1) (bump! 3 (dec n)))
               (when (> n 1)
                 (vswap! dup-by update possible (fnil inc 0))
+                (when (pos? (long (:resends m 0)))
+                  (vswap! dup-resent update possible (fnil inc 0)))
                 (add! {:kind :duplicate :client client :msg id :qos possible :times n
                        :at at :brokers brokers
                        :session (select-keys (get clients client) [:persistent? :mqtt5? :filter :sub-qos])
                        :sent (:sent m) :acked (:acked m) :pub-broker (:pub-broker m)
+                       ;; The publisher sent it twice: the broker that took the
+                       ;; second may not have had the first's packet identifier.
+                       :publisher-resent? (pos? (long (:resends m 0)))
                        :near-broker-chaos? (or (boolean (some broker-event?
                                                               (context events client m before after)))
                                                (down-during? (:outages opts)
@@ -435,6 +441,7 @@
      :lost-route @lost-route
      :lost-by-session @lost-by-session
      :duplicate-by @dup-by
+     :duplicate-resent @dup-resent
      :lost       @lost
      :lost-sent  @lost-sent
      :lost-span  @lost-span}))
@@ -476,6 +483,7 @@
                                (update :lost-route #(merge-with + % (:lost-route r)))
                                (update :lost-by-session #(merge-with + % (:lost-by-session r)))
                                (update :duplicate-by #(merge-with + % (:duplicate-by r)))
+                               (update :duplicate-resent #(merge-with + % (:duplicate-resent r)))
                                (update :lost-sent #(merge-with + % (:lost-sent r)))
                                (cond-> (pos? (long (:lost r)))
                                  (-> (assoc-in [:lost-clients client] (:lost r))
@@ -483,7 +491,7 @@
                          {:stats {:required 0 :delivered-required 0 :deliveries 0
                                   :qos1-repeats 0 :optional-delivered 0}
                           :counts {} :lost-by (sorted-map) :lost-route {} :lost-clients {}
-                          :lost-by-session {} :duplicate-by (sorted-map) :lost-sent {}
+                          :lost-by-session {} :duplicate-by (sorted-map) :duplicate-resent (sorted-map) :lost-sent {}
                           :lost-spans {}}
                          (map vector clients per))
         counts   (atom (:counts merged))
@@ -513,6 +521,8 @@
      :lost-by-session (:lost-by-session merged)
      ;; {qos n}: second deliveries by QoS — 2 or 0, as 1 may repeat.
      :duplicate-by (:duplicate-by merged)
+     ;; Of those, the ones whose publisher had sent the message twice.
+     :duplicate-resent (:duplicate-resent merged)
      ;; The ten clients that lost the most: the report keeps only the first
      ;; :max-violations of each kind, all of which may be one client's.
      :lost-by-client (into {} (take 10 (sort-by (comp - val) (:lost-clients merged))))
