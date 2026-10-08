@@ -374,18 +374,27 @@
 
 ;; A broker is down from its kill to its :broker-up, tens of seconds, not
 ;; just around the two events: a loss in the middle of that is still the
-;; outage's.
+;; outage's, if the message was on that broker or its subscriber was.
 (deftest a-loss-in-the-middle-of-an-outage-is-near-it
-  (let [r (run {:sub sub
-                :publishes {[0 1] (msg 1 30000000 30000100)}
-                :deliveries {}
-                :events [{:at 10000000 :type :kill-broker :broker 3}
-                         {:at 45000000 :type :broker-up :broker 3}]})]
-    (is (= {1 {:near-broker-chaos 1}} (:lost-by r)))
-    (is (= [{:broker 3 :from 10000000 :to 45000000}] (:outages r))))
-  (let [r (run {:sub sub
-                :publishes {[0 1] (msg 1 50000000 50000100)}
-                :deliveries {}
-                :events [{:at 10000000 :type :kill-broker :broker 3}
-                         {:at 45000000 :type :broker-up :broker 3}]})]
-    (is (= {1 {:elsewhere 1}} (:lost-by r)) "after it, not")))
+  (let [events [{:at 10000000 :type :kill-broker :broker 3}
+                {:at 45000000 :type :broker-up :broker 3}]
+        lost   (fn [m evs] (run {:sub sub :publishes {[0 1] m} :deliveries {} :events evs}))]
+    (testing "published to the broker that was down"
+      (let [r (lost (assoc (msg 1 30000000 30000100) :pub-broker 3) events)]
+        (is (= {1 {:near-broker-chaos 1}} (:lost-by r)))
+        (is (= [{:broker 3 :from 10000000 :to 45000000}] (:outages r)))))
+    (testing "or its subscriber was last on it"
+      (let [r (lost (assoc (msg 1 30000000 30000100) :pub-broker 1)
+                    (conj events {:at 5000000 :type :connected :client "s" :broker 3}))]
+        (is (= {1 {:near-broker-chaos 1}} (:lost-by r)))))
+    (testing "not when the brokers it used were up, whatever else was down"
+      (let [r (lost (assoc (msg 1 30000000 30000100) :pub-broker 1)
+                    (conj events {:at 5000000 :type :connected :client "s" :broker 2}))]
+        (is (= {1 {:elsewhere 1}} (:lost-by r)))))
+    (testing "nor after the outage"
+      (let [r (lost (assoc (msg 1 50000000 50000100) :pub-broker 3) events)]
+        (is (= {1 {:elsewhere 1}} (:lost-by r)))))
+    (testing "and a lost message says whether its publisher had sent it twice"
+      (let [r (lost (assoc (msg 1 50000000 50000100) :pub-broker 3 :resends 1) events)]
+        (is (= 1 (:lost-resent r)))
+        (is (true? (:publisher-resent? (first (:violations r)))))))))

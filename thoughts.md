@@ -48,6 +48,21 @@ disconnected for around ten seconds with two brokers up, which is about
 `hand-over-wait-millis`: a session whose broker died is waited on before it
 is handed over.
 
+### Near broker chaos had to mean the right broker
+
+Run 171519: all 70,684 publishes acknowledged this time (keeping the unsent
+ones of a persistent publisher, 46 caught in flight by a kill and all
+acknowledged after a resend), no QoS 2 duplicate of a resent message, but 42
+lost against 4. They were all called near broker chaos, and that was the
+classifier's fault: with a broker killed every ten seconds and away for
+twenty, some broker was down for 87 % of the run, so "a broker was down" held
+for nearly every loss. It now counts only the brokers the message was
+published to and the brokers its subscriber was on or went to, and the report
+says whether each lost message had been resent (`:lost-resent`). Of the 42, 22
+were sent within a second of two brokers being stopped together, and 12 were
+sent 170 to 179 s in, when only broker 3 was up and the clients that lost
+them were connected to it.
+
 ## 20261007
 
 ### Taken for unsubscribed while it moved in

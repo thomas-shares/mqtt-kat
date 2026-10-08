@@ -192,9 +192,34 @@
     (into acc (for [[b from] open] {:broker b :from from :to forever}))))
 
 (defn- down-during?
-  "Whether any broker was down at some moment between `lo` and `hi`."
-  [outages lo hi]
-  (boolean (some #(and (<= (long (:from %)) (long hi)) (>= (long (:to %)) (long lo))) outages)))
+  "Whether one of `brokers` was down at some moment between `lo` and `hi`. A
+   run that kills a broker every ten seconds, each away for twenty, has one
+   down nearly all the time, so \"some broker was down\" says nothing: only
+   the brokers a message and its subscriber were using count."
+  [outages brokers lo hi]
+  (boolean (some #(and (contains? brokers (:broker %))
+                       (<= (long (:from %)) (long hi)) (>= (long (:to %)) (long lo)))
+                 outages)))
+
+(defn- brokers-used
+  "The brokers `client` touched from its last event before `lo` to `hi`: where
+   it was when the window began, and wherever it went in it. `by-client` is
+   its :connected and :dropped events by client, in time order."
+  [by-client client lo hi]
+  (let [evs (get by-client client)
+        [before in] (split-with #(< (long (:at %)) (long lo)) evs)]
+    (into (if-let [e (peek (vec before))] #{(:broker e)} #{})
+          (comp (take-while #(<= (long (:at %)) (long hi))) (map :broker))
+          in)))
+
+(defn- near-outage?
+  "Whether a broker `m` or `client` was using was down while `m` was on its
+   way, from `lo` to `hi`."
+  [{:keys [outages by-client]} client m lo hi]
+  (and (seq outages)
+       (down-during? outages
+                     (conj (brokers-used by-client client lo hi) (:pub-broker m))
+                     lo hi)))
 
 (defn- context
   "The chaos around a message for `client`: what happened to that client, and
@@ -323,6 +348,7 @@
         lost-by-session (volatile! {})
         dup-by     (volatile! {})
         dup-resent (volatile! {})
+        lost-resent (volatile! 0)
         lost       (volatile! 0)
         lost-sent  (volatile! {})
         lost-span  (volatile! nil)
@@ -342,7 +368,7 @@
         (let [m     (get publishes id)
               ctx   (context events client m before after)
               near? (or (boolean (some broker-event? ctx))
-                        (down-during? (:outages opts)
+                        (near-outage? opts client m
                                       (- (long (:sent m)) (long before))
                                       (+ (long (or (:acked m) (:sent m))) (long after))))]
           ;; {1 {:near-broker-chaos 12 :elsewhere 0} 2 {...}}: a loss next to
@@ -356,6 +382,7 @@
           ;; stays: which of the two lost it says much about where.
           (vswap! lost-by-session update (if (:persistent? (get clients client)) :kept :clean) (fnil inc 0))
           (vswap! lost inc)
+          (when (pos? (long (:resends m 0))) (vswap! lost-resent inc))
           ;; When the lost ones were sent, by the second, and this client's
           ;; first and last: a loss throughout the run is another bug from one
           ;; around the final reconnect.
@@ -371,6 +398,7 @@
                  ;; lasts.
                  :sub-ended-by ended-by
                  :near-broker-chaos? near?
+                 :publisher-resent? (pos? (long (:resends m 0)))
                  :context ctx}))))
     ;; What it was handed.
     (doseq [id (delivered-ids ds)
@@ -422,7 +450,7 @@
                        :publisher-resent? (pos? (long (:resends m 0)))
                        :near-broker-chaos? (or (boolean (some broker-event?
                                                               (context events client m before after)))
-                                               (down-during? (:outages opts)
+                                               (near-outage? opts client m
                                                              (- (long (:sent m)) (long before))
                                                              (+ (long (reduce max (long (:sent m)) (or at [])))
                                                                 (long after))))
@@ -442,6 +470,7 @@
      :lost-by-session @lost-by-session
      :duplicate-by @dup-by
      :duplicate-resent @dup-resent
+     :lost-resent @lost-resent
      :lost       @lost
      :lost-sent  @lost-sent
      :lost-span  @lost-span}))
@@ -462,7 +491,9 @@
         by-topic (into {} (for [[topic ms] (group-by (comp :topic val) publishes)]
                             [topic (by-time (comp :sent val) ms)]))
         events   (by-time :at events)
-        opts     (assoc opts :outages (outages events))
+        opts     (assoc opts :outages (outages events)
+                        :by-client (group-by :client (filter #(contains? #{:connected :dropped} (:type %))
+                                                             (:xs events))))
         clients  (distinct (concat (keys subscriptions) (keys deliveries)))
         per      (pmap #(check-client run opts match? by-topic events %) clients)
         ;; Each client kept its first max-violations of a kind; of those, the
@@ -484,6 +515,7 @@
                                (update :lost-by-session #(merge-with + % (:lost-by-session r)))
                                (update :duplicate-by #(merge-with + % (:duplicate-by r)))
                                (update :duplicate-resent #(merge-with + % (:duplicate-resent r)))
+                               (update :lost-resent + (:lost-resent r))
                                (update :lost-sent #(merge-with + % (:lost-sent r)))
                                (cond-> (pos? (long (:lost r)))
                                  (-> (assoc-in [:lost-clients client] (:lost r))
@@ -491,7 +523,7 @@
                          {:stats {:required 0 :delivered-required 0 :deliveries 0
                                   :qos1-repeats 0 :optional-delivered 0}
                           :counts {} :lost-by (sorted-map) :lost-route {} :lost-clients {}
-                          :lost-by-session {} :duplicate-by (sorted-map) :duplicate-resent (sorted-map) :lost-sent {}
+                          :lost-by-session {} :duplicate-by (sorted-map) :duplicate-resent (sorted-map) :lost-resent 0 :lost-sent {}
                           :lost-spans {}}
                          (map vector clients per))
         counts   (atom (:counts merged))
@@ -523,6 +555,8 @@
      :duplicate-by (:duplicate-by merged)
      ;; Of those, the ones whose publisher had sent the message twice.
      :duplicate-resent (:duplicate-resent merged)
+     ;; How many of the lost were of a message its publisher sent twice.
+     :lost-resent (:lost-resent merged)
      ;; The ten clients that lost the most: the report keeps only the first
      ;; :max-violations of each kind, all of which may be one client's.
      :lost-by-client (into {} (take 10 (sort-by (comp - val) (:lost-clients merged))))
