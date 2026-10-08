@@ -138,11 +138,13 @@
       ;; nothing either. Both behaviours are wanted, so both are pinned.
       (Connection/setQos0BackPressure false)
       (Connection/setMaxQueued limit)
+      ;; The stalled subscriber takes everything under the topic; the healthy
+      ;; one takes only the paced messages, so what it is owed is exactly those.
       (let [topic (tu/topic "isolation")
-            deaf  (deaf-subscriber! topic)
+            deaf  (deaf-subscriber! (str topic "/#"))
             _     (Thread/sleep 200)
             pub   (tu/connect! "isolation-pub")]
-        (saturate! pub topic)
+        (saturate! pub (str topic "/flood"))
         (settle!)
 
         ;; The healthy subscriber joins only now, so it starts with an empty
@@ -152,14 +154,27 @@
         ;; threshold. Asserting a proportion here was flaky — with the limit
         ;; set this low for the test, a healthy subscriber that pauses for a
         ;; moment crosses it too.
+        ;;
+        ;; The stall has to hold through the burst, not only up to it. The
+        ;; saturating flood alone does not guarantee that: by the time the burst
+        ;; starts the stalled subscriber's socket may have taken part of the
+        ;; backlog, and then the paced messages fit without a drop. So a flood
+        ;; of about 12 MB, three times what the socket buffers can hold for a
+        ;; subscriber that never reads, goes in between the paced messages. That
+        ;; much cannot all be absorbed, however the kernel sizes its buffers.
         (let [healthy (tu/connect! "healthy-sub")
               n       20
+              flood   300
               before  (.sum MqttStat/droppedMessages)]
-          (subscribe! healthy topic)
+          (subscribe! healthy (str topic "/paced"))
           (dotimes [i n]
             (client/send-message (:client pub)
                                  {:packet-type :PUBLISH :qos 0 :retain? false
-                                  :topic topic :payload (str "paced-" i)})
+                                  :topic (str topic "/paced") :payload (str "paced-" i)})
+            (dotimes [_ flood]
+              (client/send-message (:client pub)
+                                   {:packet-type :PUBLISH :qos 0 :retain? false
+                                    :topic (str topic "/flood") :payload payload}))
             (Thread/sleep 5))
           (let [got (tu/take-n! (:ch healthy) n 5000)]
             (is (= n (count (:PUBLISH got)))
