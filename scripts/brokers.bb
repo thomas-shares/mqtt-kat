@@ -18,6 +18,8 @@
 ;;
 ;; Each broker is broker-<n>, advertises 127.0.0.1 with its own port, logs to
 ;; logs/brokers/broker-<n>.log and leaves its pid in logs/brokers/broker-<n>.pid.
+;; A start moves the log it replaces to logs/brokers/broker-<n>.<stamp>.log
+;; instead of deleting it, so a broker killed and started again keeps its logs.
 ;; The jar is target/mqtt-kat-0.0.1-standalone.jar: run `lein uberjar` first.
 (require '[babashka.cli :as cli]
          '[babashka.fs :as fs]
@@ -39,6 +41,15 @@
 
 (defn pid-file [n] (fs/path run-dir (str "broker-" n ".pid")))
 (defn log-file [n] (fs/path run-dir (str "broker-" n ".log")))
+
+(defn archived-log-file
+  "Where the log that a start replaces goes: named by when that start came,
+   so every start's log is kept and a chaos run's can be told from the next."
+  [n]
+  (let [stamp (-> (p/shell {:out :string} "date" "+%Y%m%d-%H%M%S") :out str/trim)]
+    (loop [i 0]
+      (let [f (fs/path run-dir (str "broker-" n "." stamp (when (pos? i) (str "-" i)) ".log"))]
+        (if (fs/exists? f) (recur (inc i)) f)))))
 
 (defn pid-of
   "The pid in broker-n's pid file, if the process is still there."
@@ -91,7 +102,8 @@
                        n (str/join " and " taken) (first taken)))
 
       :else
-      (let [_    (fs/delete-if-exists log)
+      (let [_    (when (fs/exists? log)
+                   (fs/move log (archived-log-file n)))
             argv (concat ["java"
                           "--add-opens" "java.base/java.lang=ALL-UNNAMED"
                           "--enable-native-access=ALL-UNNAMED"
