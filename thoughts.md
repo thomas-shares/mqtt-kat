@@ -63,6 +63,25 @@ were sent within a second of two brokers being stopped together, and 12 were
 sent 170 to 179 s in, when only broker 3 was up and the clients that lost
 them were connected to it.
 
+### A killed broker is not waited on for ten seconds
+
+The chaos runs showed 70 of 80 clients disconnected for about ten seconds
+after each kill of a broker holding most of them, with two brokers up:
+publishers skipped a quarter of what they tried to send. That is the
+hand-over wait in `once-gone`. A CONNECT that resumes a session another broker
+still has connected waits for it to say it has gone, and it leaves early only
+when that broker is no longer in the cluster, which for a killed one is ten
+minutes off. `bridge/peer-gone?` now also says a listed peer is gone when it
+has refused every connection for three seconds (`refused-for-gone-ms`),
+probed at most every 250 ms. A peer that does not answer at all is not
+refusing and is still waited on. Not shorter than that on purpose: a broker
+that is stopping closes its listener first and hands its sessions over after,
+which takes a second or two and ends with it unlisted, and leaving before the
+hand-over lands is what sent QoS 2 messages out twice under new identifiers
+(see `once-gone`). The identifier gate (`gate-identifiers!`) asks the same
+question. Not run against a cluster yet: `broker-kill.edn` should show
+`:skipped` and the 10 s `connected` dips shrink to about three.
+
 ## 20261007
 
 ### Taken for unsubscribed while it moved in

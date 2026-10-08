@@ -481,3 +481,41 @@
             (reset! bridge/peer-alive? nil)
             (bridge/drop! "peer-42")
             (.stop ^MqttServer (:server p) 100)))))))
+
+;; A killed broker stays listed in the cluster for ten minutes, and what waits
+;; on its hand-over waited it out. A listed peer that refuses every connection
+;; for a few seconds is gone; one that answers, or only does not answer, is
+;; not.
+(deftest a-listed-peer-that-refuses-connections-is-gone
+  (let [ss   (java.net.ServerSocket. 0 1 (java.net.InetAddress/getByName "127.0.0.1"))
+        port (.getLocalPort ss)]
+    (try
+      (reset! bridge/peer-alive? (constantly true))
+      (reset! bridge/peer-address (fn [id] (when (= "peer-gone-test" id)
+                                             {:host "127.0.0.1" :port port})))
+      (with-redefs [bridge/refused-for-gone-ms 300
+                    bridge/probe-every-ms      0]
+        (is (false? (bridge/peer-gone? "peer-gone-test")) "listening")
+        (.close ss)
+        (is (false? (bridge/peer-gone? "peer-gone-test")) "refusing, but only just")
+        (Thread/sleep 400)
+        (is (true? (bridge/peer-gone? "peer-gone-test")) "refusing for long enough")
+        (is (false? (bridge/peer-gone? "another-peer")) "no address: nothing to say"))
+      (testing "no longer listed: gone at once"
+        (reset! bridge/peer-alive? (constantly false))
+        (is (true? (bridge/peer-gone? "anyone"))))
+      (testing "no cluster: never"
+        (reset! bridge/peer-alive? nil)
+        (is (false? (bridge/peer-gone? "peer-gone-test"))))
+      (testing "and back again: not gone"
+        (let [ss2 (java.net.ServerSocket. port 1 (java.net.InetAddress/getByName "127.0.0.1"))]
+          (try
+            (reset! bridge/peer-alive? (constantly true))
+            (with-redefs [bridge/refused-for-gone-ms 300
+                          bridge/probe-every-ms      0]
+              (is (false? (bridge/peer-gone? "peer-gone-test"))))
+            (finally (.close ss2)))))
+      (finally
+        (reset! bridge/peer-alive? nil)
+        (reset! bridge/peer-address nil)
+        (try (.close ss) (catch Exception _ nil))))))

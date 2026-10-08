@@ -311,6 +311,70 @@
   ;; and the clients it was for, still connected there, never had it.
   (atom nil))
 
+(defonce peer-address
+  ;; (fn [peer-id] -> {:host :port} or nil): where the cluster says a peer
+  ;; listens. Installed by mqttkat.rama.cluster next to `peer-alive?`.
+  (atom nil))
+
+(def refused-for-gone-ms
+  "How long a peer must have refused every connection, probed as often as
+   probe-every-ms, before it is taken to be gone though the cluster still
+   lists it. A broker that is killed stays listed for ten minutes, and what
+   waits on its hand-over (handlers/hand-over-wait-millis) waited it out
+   to the end while every client it had sat disconnected. A broker that is
+   stopping closes its listener first and hands its sessions over after,
+   in a second or two, and is unlisted as soon as it has: so this is
+   longer than that, and the wait it replaces ends no later than the
+   hand-over's own."
+  3000)
+
+(def probe-every-ms
+  "How often a peer is probed at most, whoever asks: a hand-over waits in
+   a loop, once per client moving."
+  250)
+
+(def ^:private probe-timeout-ms 200)
+
+(defonce ^:private probes
+  ;; peer-id -> {:at millis it was last probed :since millis it began to
+  ;; refuse, or nil}
+  (ConcurrentHashMap.))
+
+(defn- refused?
+  "Whether `peer` refused a connection just now: something answered that
+   nothing listens there. A peer that does not answer at all is not
+   refusing, it may be busy or cut off."
+  [{:keys [host port]}]
+  (try
+    (with-open [sock (java.net.Socket.)]
+      (.connect sock (java.net.InetSocketAddress. ^String host (int port)) (int probe-timeout-ms))
+      false)
+    (catch java.net.ConnectException _ true)
+    (catch Exception _ false)))
+
+(defn peer-gone?
+  "Whether `peer-id` has left the cluster, or is listed and has refused
+   every connection for refused-for-gone-ms: a broker whose process is
+   gone. False when this broker has no cluster."
+  [peer-id]
+  (let [alive? @peer-alive?
+        where  @peer-address]
+    (cond
+      (nil? alive?)             false
+      (not (alive? peer-id))    true
+      :else
+      (if-let [peer (and where (where peer-id))]
+        (let [now   (System/currentTimeMillis)
+              state (.compute probes peer-id
+                              (reify java.util.function.BiFunction
+                                (apply [_ _ {:keys [at since] :as old}]
+                                  (if (and old (< (- now (long at)) (long probe-every-ms)))
+                                    old
+                                    {:at now :since (when (refused? peer) (or since now))}))))]
+          (boolean (and (:since state)
+                        (>= (- now (long (:since state))) (long refused-for-gone-ms)))))
+        false))))
+
 (declare lost!)
 
 ;; ── delivered, not only taken ────────────────────────────────────────────

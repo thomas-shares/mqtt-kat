@@ -1469,7 +1469,9 @@
   "`client-id`'s session as the cluster has it once the connection `session`
    records on another broker has ended there, read again every 100 ms for
    hand-over-wait-millis at most; at once when that broker is not in the
-   cluster any more, since it will not say. Read before then, the queue
+   cluster any more, since it will not say, and after a few seconds when it
+   is still listed but refuses every connection (bridge/peer-gone?): a
+   killed broker stays listed for ten minutes. Read before then, the queue
    lacked what that broker was handing over, and a catch-up read found it
    later, after the identifiers it was in flight under had gone to other
    messages: a QoS 2 message went out again under a new one, and a PUBREL
@@ -1477,14 +1479,13 @@
    end delivered hundreds of them twice."
   [resume client-id session my-broker-id]
   (let [deadline (+ (System/currentTimeMillis) (long hand-over-wait-millis))
-        alive?   (or @bridge/peer-alive? (constantly true))
         same?    (fn [s] (and (connected-elsewhere? s my-broker-id)
                               (= (:connect-id s) (:connect-id session))))]
     (loop []
       (let [{s :session :as resumed} (resume client-id)]
         (cond
           (not (same? s))                         resumed
-          (not (alive? (:broker-id s)))           resumed
+          (bridge/peer-gone? (:broker-id s))      resumed
           (> (System/currentTimeMillis) deadline)
           (do (log/warn "session" client-id "is still recorded on" (:broker-id s)
                         "after" hand-over-wait-millis "ms - resuming it without its hand-over,"
@@ -1525,7 +1526,6 @@
   (future
     (try
       (let [deadline (+ (System/currentTimeMillis) (long identifier-gate-millis))
-            alive?   (or @bridge/peer-alive? (constantly true))
             same?    (fn [s] (and (connected-elsewhere? s my-broker-id)
                                   (= (:connect-id s) (:connect-id session))))]
         (loop []
@@ -1544,7 +1544,7 @@
 
               :else
               (let [s (:session (resume client-id))]
-                (if (or (not (same? s)) (not (alive? (:broker-id s))))
+                (if (or (not (same? s)) (bridge/peer-gone? (:broker-id s)))
                   (let [cid (get-in @catching-up [client-id :connect-id])]
                     (swap! (outbound-atom client-id) #(if (:gate %) (assoc % :gate :landed) %))
                     (if cid
