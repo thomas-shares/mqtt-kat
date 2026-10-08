@@ -1,0 +1,6 @@
+;; three-brokers.edn with the broker kills taken out: brokers are still stopped
+;; politely (SIGTERM, so each withdraws as it goes), and clients still die, move
+;; and change their subscriptions. What a graceful stop should leave whole.
+;;
+;;   bb scripts/chaos.bb chaos/three-brokers.edn chaos/three-brokers-stops.edn
+{:chaos {:kill-broker nil}}
