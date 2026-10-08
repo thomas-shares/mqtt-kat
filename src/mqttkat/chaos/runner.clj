@@ -624,7 +624,7 @@
                       (shutdown-agents)
                       (System/exit 2)))]
     (pp/pprint (select-keys result [:ok? :drain :stats :counts :lost-by :lost-route :lost-by-session
-                                    :lost-by-client :lost-span :lost-by-sent :duplicate-by :published-by-qos :in-flight-at-kill :clients :report]))
+                                    :lost-by-client :lost-span :lost-by-sent :duplicate-by :outages :published-by-qos :in-flight-at-kill :clients :report]))
     (doseq [v (take 10 (:violations result))]
       (println " " (pr-str (dissoc v :context))))
     (shutdown-agents)

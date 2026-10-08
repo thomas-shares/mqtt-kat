@@ -174,6 +174,28 @@
           (recur (inc i) (if (or (= client (:client e)) (broker-event? e)) (conj! acc e) acc)))
         (persistent! acc)))))
 
+(defn- outages
+  "[{:broker :from :to}]: each stretch a broker was down, from the kill or
+   stop to its :broker-up, or to forever when it never came back. A broker
+   takes tens of seconds to come back, far longer than the :down-ms it is
+   left for, and the events alone mark only the two ends of that."
+  [events]
+  (let [[open acc]
+        (reduce (fn [[open acc] {:keys [type broker at]}]
+                  (case type
+                    (:kill-broker :stop-broker) [(update open broker #(or % at)) acc]
+                    :broker-up (if-let [from (get open broker)]
+                                 [(dissoc open broker) (conj acc {:broker broker :from from :to at})]
+                                 [open acc])
+                    [open acc]))
+                [{} []] (:xs events))]
+    (into acc (for [[b from] open] {:broker b :from from :to forever}))))
+
+(defn- down-during?
+  "Whether any broker was down at some moment between `lo` and `hi`."
+  [outages lo hi]
+  (boolean (some #(and (<= (long (:from %)) (long hi)) (>= (long (:to %)) (long lo))) outages)))
+
 (defn- context
   "The chaos around a message for `client`: what happened to that client, and
    to any broker, from `before` it was sent until `after` its
@@ -318,7 +340,10 @@
         (bump! 1 1)
         (let [m     (get publishes id)
               ctx   (context events client m before after)
-              near? (boolean (some broker-event? ctx))]
+              near? (or (boolean (some broker-event? ctx))
+                        (down-during? (:outages opts)
+                                      (- (long (:sent m)) (long before))
+                                      (+ (long (or (:acked m) (:sent m))) (long after))))]
           ;; {1 {:near-broker-chaos 12 :elsewhere 0} 2 {...}}: a loss next to
           ;; a killed broker is a known gap (see thoughts.md); one elsewhere
           ;; is news.
@@ -389,8 +414,12 @@
                        :at at :brokers brokers
                        :session (select-keys (get clients client) [:persistent? :mqtt5? :filter :sub-qos])
                        :sent (:sent m) :acked (:acked m) :pub-broker (:pub-broker m)
-                       :near-broker-chaos? (boolean (some broker-event?
-                                                          (context events client m before after)))
+                       :near-broker-chaos? (or (boolean (some broker-event?
+                                                              (context events client m before after)))
+                                               (down-during? (:outages opts)
+                                                             (- (long (:sent m)) (long before))
+                                                             (+ (long (reduce max (long (:sent m)) (or at [])))
+                                                                (long after))))
                        ;; From the publish to the last copy: a second copy
                        ;; can come long after the first, from wherever the
                        ;; client went in between.
@@ -426,6 +455,7 @@
         by-topic (into {} (for [[topic ms] (group-by (comp :topic val) publishes)]
                             [topic (by-time (comp :sent val) ms)]))
         events   (by-time :at events)
+        opts     (assoc opts :outages (outages events))
         clients  (distinct (concat (keys subscriptions) (keys deliveries)))
         per      (pmap #(check-client run opts match? by-topic events %) clients)
         ;; Each client kept its first max-violations of a kind; of those, the
@@ -497,6 +527,9 @@
                                     {} (:lost-sent merged)))
      ;; {qos {:in-flight :acked-after :never-acked}}: publishes a broker's
      ;; death caught unacknowledged, and how they ended.
+     ;; [{:broker :from :to}] in microseconds into the run: when each broker
+     ;; was really down, kill to listening again.
+     :outages (:outages opts)
      :in-flight-at-kill (in-flight-at-kill (map val publishes) events)
      ;; {qos {:published :acked :resent}}: what the publishers got out of the
      ;; brokers, by the QoS they published at.

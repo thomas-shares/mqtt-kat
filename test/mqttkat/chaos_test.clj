@@ -369,3 +369,21 @@
     (is (= {:duplicate 1} (kinds (r 1 nil))) "QoS 0 subscriber, twice, never resent")
     (is (:ok? (r 1 1)) "QoS 1 resent")
     (is (= {:duplicate 1} (kinds (r 2 1))) "QoS 2 resent still exactly once")))
+
+;; A broker is down from its kill to its :broker-up, tens of seconds, not
+;; just around the two events: a loss in the middle of that is still the
+;; outage's.
+(deftest a-loss-in-the-middle-of-an-outage-is-near-it
+  (let [r (run {:sub sub
+                :publishes {[0 1] (msg 1 30000000 30000100)}
+                :deliveries {}
+                :events [{:at 10000000 :type :kill-broker :broker 3}
+                         {:at 45000000 :type :broker-up :broker 3}]})]
+    (is (= {1 {:near-broker-chaos 1}} (:lost-by r)))
+    (is (= [{:broker 3 :from 10000000 :to 45000000}] (:outages r))))
+  (let [r (run {:sub sub
+                :publishes {[0 1] (msg 1 50000000 50000100)}
+                :deliveries {}
+                :events [{:at 10000000 :type :kill-broker :broker 3}
+                         {:at 45000000 :type :broker-up :broker 3}]})]
+    (is (= {1 {:elsewhere 1}} (:lost-by r)) "after it, not")))
