@@ -74,7 +74,8 @@
    and forwarded them to no other broker, which lost them for every
    subscriber elsewhere (the chaos run's :stop-broker). Closing the clients
    first also parks their persistent sessions while the cluster can still
-   be told."
+   be told. What is still batched for the other brokers and for Rama is sent
+   before the cluster is let go."
   []
   (when-let [stop-server @*server*]
     (log/info "Server stopping...")
@@ -85,6 +86,10 @@
     ;; ran.
     (stop-server :timeout 1000)
     (reset! *server* nil)
+    ;; What the pool's shutdown cancelled is sent now, and the writes it went
+    ;; into awaited, before the links close and the broker leaves the cluster
+    ;; (see mqttkat.handlers/flush-batches!).
+    (h/flush-batches! 3000)
     ;; Nothing to do unless -main opened one.
     (rama/disconnect!)))
 

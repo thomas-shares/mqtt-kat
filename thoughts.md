@@ -2,6 +2,29 @@
 
 In this file will go my thoughts and ramblings about this project and what I have done and what I might do next.
 
+## 20261008
+
+### A stop that did not send what its timers would have
+
+A broker stopped with SIGTERM lost the settle words and take-offs it had
+batched in the last hundred milliseconds. `stop!` shuts the handlers' pool
+down first, and that cancels the timers that would have sent the batches.
+Nothing else sends them.
+
+A settle word that never reaches its origin leaves the origin holding the
+message. Once this broker is gone the origin queues a copy for the session,
+and a client that already had the message gets it again. A take-off that
+never lands leaves the entry on Rama for the next resume. The notes give a
+lost PUBREC as the cause of the QoS 2 duplicates across a crash; the timing
+of the duplicates points at the lost settle word.
+
+`stop!` now sends both batches itself and waits for the queue writes and the
+link writes to land, before it withdraws from the cluster and closes the
+links (`flush-batches!`). A link drain is a marker queued behind what the
+link already holds; the link's thread counts it down once everything before
+it has been written. A killed broker cannot do this, so kills keep the
+window, and its length is the batch: a hundred milliseconds.
+
 ## 20261006
 
 ### A take-off the depot had, but the topology did not yet

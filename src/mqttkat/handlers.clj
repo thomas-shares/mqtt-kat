@@ -1120,6 +1120,27 @@
           (catch Exception e
             (log/warn e "could not tell" origin "that" (count ks) "messages are delivered")))))))
 
+(defn flush-batches!
+  "Send now what the batch timers would have sent (the take-offs and settle
+   words still batched, and the queue writes they went into), then wait, up to
+   `millis`, for those writes and the link writes to land. A stopping broker
+   calls this once its clients are gone: the shutdown of the pool cancels the
+   timers, so nothing else sends them. A settle word lost that way leaves the
+   message's origin holding it, and once this broker is gone the origin queues
+   a copy, which a client that had the message already then gets again. True
+   when everything landed in time."
+  [millis]
+  (let [deadline (+ (System/currentTimeMillis) (long millis))
+        left     #(max 0 (- deadline (System/currentTimeMillis)))]
+    (flush-dequeues!)
+    (flush-settled!)
+    (let [writes (if-let [drain (:drain-writes! @session-source)] (drain (left)) true)
+          links  (bridge/drain! (left))
+          ok?    (and writes links)]
+      (when-not ok?
+        (log/warn "stopping before every take-off and settle word was sent"))
+      ok?)))
+
 (defn- settle-soon!
   "Tell `origin` with the next batch that `k` has reached everyone here."
   [origin k]

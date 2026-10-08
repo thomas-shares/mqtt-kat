@@ -801,6 +801,20 @@
   [conn client-id keys]
   (queue-op! conn client-id [:dequeue (vec keys)]))
 
+(defn drain-queue-writes!
+  "Wait, up to `millis`, until the queue writes made so far have landed on
+   Rama: the take-offs and enqueues a broker is leaving with, which closing its
+   connection would cut off. True once no lane has a write still out. A lane
+   leaves the map when its last batch lands, so an empty map is the answer."
+  [{:keys [queue-writer]} millis]
+  (let [^java.util.concurrent.ConcurrentHashMap lanes (:lanes queue-writer)
+        deadline (+ (System/currentTimeMillis) (long millis))]
+    (loop []
+      (cond
+        (.isEmpty lanes)                        true
+        (> (System/currentTimeMillis) deadline) false
+        :else                                   (do (Thread/sleep 10) (recur))))))
+
 (defn session
   "The record for `client-id`, or nil if it has never connected."
   [{:keys [sessions]} client-id]
@@ -1664,6 +1678,7 @@
            :resume       (fn [client-id] (resume conn client-id))
            :enqueue!     (fn [client-id msg key] (enqueue! conn client-id msg key))
            :dequeue!     (fn [client-id keys] (dequeue! conn client-id keys))
+           :drain-writes! (fn [millis] (drain-queue-writes! conn millis))
            :queued       (fn [client-id limit] (queued conn client-id limit))
            :settled!     (fn [peer-id msg-keys]
                            (when-let [peer (get @(:brokers conn) peer-id)]

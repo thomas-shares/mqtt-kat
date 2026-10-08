@@ -378,3 +378,20 @@
         (Thread/sleep (+ 500 bridge/awaiting-grace-ms))
         (is (empty? @undelivered))
         (finally (bridge/drop! "peer-15") (.stop ^MqttServer (:server p) 100))))))
+
+(deftest drain-waits-for-the-link-to-write-what-was-queued-before-it
+  ;; A settle word queued behind a QoS 1 message the peer has no slot for is not
+  ;; written until the peer frees one: drain! says so, and then that it has.
+  (let [p (peer connack-2)]
+    (try
+      (let [sent (doall (for [i (range 2)] (send! p "peer-6" (str "t/" i) 1)))]
+        (is (tu/wait-until #(= 2 (count (publishes p)))))
+        (let [third (send! p "peer-6" "t/2" 1)]
+          (bridge/settled! "me" "peer-6" {:host "127.0.0.1" :port (:port p)} #{"k1"})
+          (is (false? (bridge/drain! 300)) "held behind the message waiting for a slot")
+          (puback! p (:packet-identifier (first (publishes p))))
+          (is (true? (bridge/drain! 5000)) "drained once a slot is free")
+          (is (tu/wait-until #(some (fn [m] (= "k1" (String. ^bytes (:payload m) "UTF-8")))
+                                    (publishes p))))
+          (run! deref (conj sent third))))
+      (finally (bridge/drop! "peer-6") (.stop ^MqttServer (:server p) 100)))))

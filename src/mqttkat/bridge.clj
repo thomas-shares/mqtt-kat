@@ -29,7 +29,7 @@
             [mqttkat.client :as client])
   (:import [java.io IOException]
            [java.util Set]
-           [java.util.concurrent ConcurrentHashMap LinkedBlockingQueue Semaphore TimeUnit]
+           [java.util.concurrent ConcurrentHashMap CountDownLatch LinkedBlockingQueue Semaphore TimeUnit]
            [java.util.concurrent.atomic AtomicBoolean AtomicInteger LongAdder]
            [org.mqttkat MqttHandler MqttStat]
            [org.mqttkat.server Connection]))
@@ -641,9 +641,12 @@
             (when-not (client/connected? c)
               (throw (IOException. "closed by the peer")))
             (when-let [item (.poll queue 200 TimeUnit/MILLISECONDS)]
-              (write! link c window item)
-              (when (<= (.size queue) (long queue-resume-at))
-                (release-holds! link)))
+              (if-let [barrier (:barrier item)]
+                ;; Everything queued before it is written: see drain!.
+                (.countDown ^CountDownLatch barrier)
+                (do (write! link c window item)
+                    (when (<= (.size queue) (long queue-resume-at))
+                      (release-holds! link)))))
             (let [now (System/currentTimeMillis)]
               (if (> (- now swept) (long awaiting-sweep-ms))
                 (do (expire-awaiting! peer-id (- now (long awaiting-limit-ms)))
@@ -666,13 +669,15 @@
         (forget-link! peer-id link nil)
         (let [queued  (java.util.ArrayList.)
               _       (.drainTo queue queued)
+              _       (doseq [{:keys [barrier]} queued :when barrier] (.countDown ^CountDownLatch barrier))
+              items   (remove :barrier queued)
               unacked (vec (.values inflight))]
           (.clear inflight)
-          (when (or (pos? (.size queued)) (seq unacked))
-            (log/warn "bridge to" peer-id "gone with" (.size queued) "messages queued and"
+          (when (or (seq items) (seq unacked))
+            (log/warn "bridge to" peer-id "gone with" (count items) "messages queued and"
                       (count unacked) "unacknowledged; handing them back")
-            (.add ^LongAdder MqttStat/droppedMessages (+ (.size queued) (count unacked))))
-          (doseq [{:keys [on-lost]} queued] (lost! peer-id on-lost :link-gone-queued))
+            (.add ^LongAdder MqttStat/droppedMessages (+ (count items) (count unacked))))
+          (doseq [{:keys [on-lost]} items] (lost! peer-id on-lost :link-gone-queued))
           (doseq [{:keys [on-lost]} unacked] (lost! peer-id on-lost :link-gone-unacknowledged)))
         (release-holds! link)
         (when-let [o @opened]
@@ -782,6 +787,30 @@
   (.clear ^ConcurrentHashMap awaiting)
   (doseq [peer-id (keys @connections)]
     (drop! peer-id)))
+
+(defn drain!
+  "Wait, up to `millis`, until each live link has written what was queued for
+   it before this call. What a stopping broker is about to tell its peers, the
+   settle words and takeovers, is lost if the links are closed first. True
+   once every link has; false when one has not in time, as when its window is
+   full and its peer silent."
+  [millis]
+  (let [deadline (+ (System/currentTimeMillis) (long millis))
+        barriers (doall
+                  (for [{:keys [^LinkedBlockingQueue queue ^AtomicBoolean running]} (vals @connections)
+                        :when (and running (.get running))]
+                    (let [latch (CountDownLatch. 1)
+                          item  {:barrier latch}]
+                      (.put queue item)
+                      ;; A link that ended as this went in is not going to take it:
+                      ;; its thread has emptied the queue for the last time.
+                      (when-not (.get running)
+                        (.remove queue item)
+                        (.countDown latch))
+                      latch)))]
+    (every? (fn [^CountDownLatch latch]
+              (.await latch (max 0 (- deadline (System/currentTimeMillis))) TimeUnit/MILLISECONDS))
+            barriers)))
 
 (defn send-to!
   "Publish `msg` to `peer-id` at `peer` — {:host :port} — as this broker,
