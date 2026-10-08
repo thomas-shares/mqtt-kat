@@ -1,0 +1,28 @@
+;; One broker on an external Rama cluster, killed and started again with
+;; every client connected to it: nothing is up to take over, so what comes
+;; through is what the cluster kept, and persistent publishers resend what
+;; the broker never acknowledged. QoS 1 and 2 only.
+;;
+;;   bb scripts/chaos.bb chaos/broker-restart.edn
+;;
+;; The in-process Rama of single-broker.edn dies with its broker and cannot
+;; be used for this.
+{:setup {:brokers {:count 1 :port 1885 :http 8085 :heap "1g" :rama :external}
+         :rama    {:start? true :stop? false}}
+
+ :load {:publishers      10
+        :subscribers     30
+        :topics          5
+        :rate            300
+        :duration-s      90
+        :qos             {0 0, 1 1, 2 1}
+        :sub-qos         {0 0, 1 1, 2 1}
+        :pub-persistent  1.0
+        :persistent      1.0
+        :wildcard        0.2}
+
+ :chaos {:kill-broker {:every-ms [15000 20000] :down-ms [3000 6000] :min-up 0}
+         :stop-broker {:every-ms [40000 50000] :down-ms [2000 4000] :min-up 0}}
+
+ :check {:subscribe-settle-ms 2000
+         :drain-ms            10000}}

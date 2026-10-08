@@ -86,6 +86,13 @@
           :qos              {0 1, 1 1, 2 1}   ; weights for each publish's QoS
           :sub-qos          {0 1, 1 1, 2 1}   ; weights for each subscription's QoS
           :persistent       0.75        ; share of subscribers with a persistent session
+          ;; Share of publishers with a persistent session. Those keep what
+          ;; is unacknowledged when a connection drops and send it again
+          ;; (DUP, same packet identifier) if the broker still has the
+          ;; session: the way to find out what a killed broker does with a
+          ;; retransmitted QoS 1 or 2 publish. The rest are clean and never
+          ;; resend.
+          :pub-persistent   0.0
           :wildcard         0.2         ; share subscribed to every topic with +
           :mqtt             {4 1, 5 1}  ; weights for the protocol version
           :session-expiry-s 3600}
@@ -98,7 +105,13 @@
    ;;   :toggle-subscription  a subscriber unsubscribes, or subscribes again
    ;;   :kill-broker          SIGKILL, started again after :down-ms
    ;;   :stop-broker          SIGTERM, the same
-   ;;     :min-up             never take the brokers below this many
+   ;;     :min-up             never take the brokers below this many (0: all
+   ;;                         of them may be down at once)
+   ;;     :count              how many go down together, default 1
+   ;;     :who                which: :any (random), :publishers or :subscribers
+   ;;                         (the brokers holding the most of those, so what
+   ;;                         is in flight when they die is as much as it can
+   ;;                         be), or :busiest (the most clients of any kind)
    :chaos {}
 
    :check {:subscribe-settle-ms 1000    ; how long a subscription takes to reach every broker
@@ -191,7 +204,7 @@
   (not= :off (get-in cfg [:setup :redirect :policy] :off)))
 
 (defn- make-clients [cfg ^Random rng lg run-id]
-  (let [{:keys [publishers subscribers topics qos sub-qos persistent wildcard mqtt
+  (let [{:keys [publishers subscribers topics qos sub-qos persistent pub-persistent wildcard mqtt
                 window session-expiry-s]} (:load cfg)
         follow?  (redirecting? cfg)
         topic-of #(str "chaos/" run-id "/t" %)
@@ -210,7 +223,9 @@
                     (c/make lg {:id (str "chaos-" run-id "-p" i) :kind :pub :idx i
                                 :mqtt5? (= 5 (pick-weighted rng mqtt))
                                 :follow-redirects? follow?
-                                :persistent? false :window window})))]
+                                :persistent? (< (.nextDouble rng) (double pub-persistent))
+                                :session-expiry-s session-expiry-s
+                                :window window})))]
     {:subscribers subs
      :publishers  pubs
      :topics      (mapv topic-of (range topics))
@@ -330,9 +345,12 @@
         (ledger/event! (:ledger state) {:type what :client (:id cl) :broker (c/broker-of cl)})
         true))))
 
-(defn- start-broker! [state n]
-  (let [b (get @(:brokers state) n)]
-    (run-command! state (control-command (:cfg state) :start n))
+(defn- start-brokers!
+  "Start whichever brokers are down, once, then wait for each of `ns`."
+  [state ns]
+  (run-command! state (control-command (:cfg state) :start (first ns)))
+  (doseq [n ns
+          :let [b (get @(:brokers state) n)]]
     (if (wait-until #(listening? b) 90000)
       (do (swap! (:brokers state) assoc-in [n :up?] true)
           (ledger/event! (:ledger state) {:type :broker-up :broker n})
@@ -340,19 +358,48 @@
       (do (ledger/event! (:ledger state) {:type :broker-failed-to-start :broker n})
           (println (format "  broker-%d did not come back - see logs/brokers/broker-%d.log" n n))))))
 
+(defn- start-broker! [state n] (start-brokers! state [n]))
+
+(defn- clients-by-broker
+  "{broker-number clients connected there} for the clients in `pool`."
+  [pool]
+  (frequencies (keep #(when (c/connected? %) (c/broker-of %)) pool)))
+
+(defn- shuffle-with [^Random rng xs]
+  (let [a (java.util.ArrayList. ^java.util.Collection (vec xs))]
+    (java.util.Collections/shuffle a rng)
+    (vec a)))
+
+(defn- victims
+  "Up to `k` of the brokers `up`, by `who` (see :chaos in the defaults).
+   The busiest first, ties and the rest at random."
+  [state rng who k up]
+  (let [load  (clients-by-broker (case who
+                                   :publishers  (:publishers state)
+                                   :subscribers (:subscribers state)
+                                   (:clients state)))
+        shuf  (shuffle-with rng up)
+        order (if (#{:publishers :subscribers :busiest} who)
+                (sort-by (fn [b] (- (long (get load (:n b) 0)))) shuf)
+                shuf)]
+    (vec (take k order))))
+
 (defn- broker-action [state signal]
   (fn [rng spec]
-    (let [up (up-brokers state)]
-      (when (> (count up) (long (:min-up spec 1)))
-        (let [{:keys [n]} (choose rng up)
-              down        (between rng (:down-ms spec [5000 10000]))]
-          (swap! (:brokers state) assoc-in [n :up?] false)
-          (ledger/event! (:ledger state) {:type (if (= :kill signal) :kill-broker :stop-broker)
-                                          :broker n})
-          (println (format "  %s broker-%d for %d ms" (if (= :kill signal) "killing" "stopping") n down))
-          (run-command! state (control-command (:cfg state) signal n))
+    (let [up (up-brokers state)
+          k  (min (long (:count spec 1)) (- (count up) (long (:min-up spec 1))))]
+      (when (pos? k)
+        (let [down  (between rng (:down-ms spec [5000 10000]))
+              ns    (mapv :n (victims state rng (:who spec :any) k up))
+              kind  (if (= :kill signal) :kill-broker :stop-broker)]
+          (doseq [n ns]
+            (swap! (:brokers state) assoc-in [n :up?] false)
+            (ledger/event! (:ledger state) {:type kind :broker n :together ns}))
+          (println (format "  %s broker-%s for %d ms" (if (= :kill signal) "killing" "stopping")
+                           (str/join "+" ns) down))
+          (doseq [n ns] (run-command! state (control-command (:cfg state) signal n)))
           (Thread/sleep down)
-          (start-broker! state n)
+          (start-brokers! state ns)
           true)))))
 
 (defn- progress [state]
@@ -577,7 +624,7 @@
                       (shutdown-agents)
                       (System/exit 2)))]
     (pp/pprint (select-keys result [:ok? :drain :stats :counts :lost-by :lost-route :lost-by-session
-                                    :lost-by-client :lost-span :lost-by-sent :duplicate-by :clients :report]))
+                                    :lost-by-client :lost-span :lost-by-sent :duplicate-by :published-by-qos :in-flight-at-kill :clients :report]))
     (doseq [v (take 10 (:violations result))]
       (println " " (pr-str (dissoc v :context))))
     (shutdown-agents)

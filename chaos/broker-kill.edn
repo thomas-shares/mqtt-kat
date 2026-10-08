@@ -1,0 +1,37 @@
+;; What a dying broker does to QoS 1 and 2, and nothing else going wrong to
+;; hide it: only QoS 1 and 2 are published and subscribed, publishers hold
+;; persistent sessions and send again what a broker had not acknowledged
+;; (DUP, same packet identifier, §4.4), and the broker with the most
+;; publishers is killed, now and then two at once, every ten seconds or so.
+;; Clients are left alone apart from the odd kill.
+;;
+;;   bb scripts/chaos.bb chaos/broker-kill.edn
+;;
+;; Needs the Rama cluster, as three-brokers.edn does. In the report:
+;;   :in-flight-at-kill  per QoS, publishes a broker's death caught
+;;                       unacknowledged, and how many were acknowledged later
+;;   :lost-by            QoS 1 and 2 lost, :near-broker-chaos or :elsewhere
+;;   :duplicate-by       QoS 2 delivered twice: the exactly-once promise
+;;                       broken by a retransmission after the crash
+;; QoS 1 repeating is allowed and counted as :qos1-repeats under :stats.
+{:setup {:brokers {:count 3 :port 1885 :http 8085 :heap "1g" :rama :external}
+         :rama    {:start? true :stop? false}}
+
+ :load {:publishers      20
+        :subscribers     60
+        :topics          10
+        :rate            500
+        :duration-s      180
+        :qos             {0 0, 1 1, 2 1}
+        :sub-qos         {0 0, 1 1, 2 1}
+        :pub-persistent  1.0
+        :persistent      0.75
+        :wildcard        0.2
+        :mqtt            {4 1, 5 1}}
+
+ :chaos {:kill-client  {:every-ms [2000 5000] :down-ms [0 3000] :who :any}
+         :kill-broker  {:every-ms [10000 15000] :down-ms [3000 8000] :min-up 1 :who :publishers}
+         :stop-broker  {:every-ms [30000 45000] :down-ms [2000 5000] :min-up 1 :count 2 :who :subscribers}}
+
+ :check {:subscribe-settle-ms 2000
+         :drain-ms            10000}}

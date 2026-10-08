@@ -285,7 +285,23 @@ bb scripts/chaos.bb --keep chaos/single-broker.edn                   # leave the
 bb scripts/chaos.bb chaos/single-broker.edn chaos/long.edn           # ten minutes, heavier
 bb scripts/chaos.bb chaos/redirect.edn                               # clients go where the brokers send them
 bb scripts/chaos.bb chaos/load.edn                                   # N brokers, X clients, Y seconds of load, no chaos
+bb scripts/chaos.bb chaos/broker-kill.edn                            # QoS 1 and 2 only, the busiest brokers killed, publishers resend
+bb scripts/chaos.bb chaos/broker-restart.edn                         # one broker on external Rama, killed with nothing to take over
 ```
+
+`chaos/broker-kill.edn` and `chaos/broker-restart.edn` are for what a dying
+broker does to QoS 1 and 2. Their publishers are persistent
+(`:load :pub-persistent`, the share that is), so what a dead broker had not
+acknowledged is sent again with DUP set and the same packet identifier once
+the session is back (§4.4), instead of being forgotten. The report adds
+`:in-flight-at-kill`, per QoS the publishes a broker's death caught
+unacknowledged and how many were acknowledged afterwards, and
+`:published-by-qos`. A `:kill-broker` or `:stop-broker` takes `:who`
+(`:publishers`, `:subscribers` or `:busiest` kills the brokers holding the
+most of them), `:count` (that many at once) and `:min-up 0` (all of them may
+be down together). A QoS 1 publish sent twice may arrive twice; a QoS 2 one
+may not. Note that a weight map in a scenario merges over the defaults, so
+leaving QoS 0 out takes `{0 0, 1 1, 2 1}`.
 
 By default a chaos client starts on broker `i mod N` and comes back to any
 broker that is up. `:setup :redirect` hands that to the brokers: the runner

@@ -255,6 +255,31 @@
             (recur (inc i) best)))
         best))))
 
+(defn- in-flight-at-kill
+  "{qos {:in-flight n :acked-after n :never-acked n}}: publishes still
+   unacknowledged when the broker they went to was killed or stopped, and
+   whether they were acknowledged afterwards, by a retransmission to a
+   broker that kept the session. A clean publisher's are :never-acked, which
+   promises nothing; a persistent one's that are :acked-after must then
+   have arrived, which :lost judges as for any acknowledged message."
+  [publishes events]
+  (let [downs (->> (:xs events)
+                   (filter #(contains? #{:kill-broker :stop-broker} (:type %)))
+                   (group-by :broker))
+        ;; per broker, the times it went down, ascending
+        at    (update-vals downs #(vec (sort (map :at %))))]
+    (reduce
+     (fn [acc {:keys [qos sent acked pub-broker]}]
+       (let [t (when (and (pos? (long qos)) pub-broker)
+                 (some #(when (>= (long %) (long sent)) %) (get at pub-broker)))]
+         (if (and t (or (nil? acked) (> (long acked) (long t))))
+           (-> acc
+               (update-in [qos :in-flight] (fnil inc 0))
+               (update-in [qos (if acked :acked-after :never-acked)] (fnil inc 0)))
+           acc)))
+     (sorted-map)
+     publishes)))
+
 ;; ── the verdict ────────────────────────────────────────────────────────
 
 (defn- check-client
@@ -351,7 +376,12 @@
             (when (> (long max-qos) (long possible))
               (add! {:kind :qos-upgraded :client client :msg id :allowed possible
                      :got max-qos}))
-            (case (long possible)
+            ;; QoS 1 may repeat, and so may a message a publisher sent again
+            ;; at QoS 1: the broker cannot tell a resend from a second
+            ;; publish, so a subscriber of any QoS may get it twice. A QoS 2
+            ;; publish resent is held to its exactly-once promise: the
+            ;; broker has its packet identifier on record.
+            (case (long (if (and (== 1 (long (:qos m))) (pos? (long (:resends m 0)))) 1 possible))
               1 (when (> n 1) (bump! 3 (dec n)))
               (when (> n 1)
                 (vswap! dup-by update possible (fnil inc 0))
@@ -465,4 +495,14 @@
      :lost-by-sent (into (sorted-map)
                          (reduce-kv (fn [m s n] (update m (* 10 (quot (long s) 10)) (fnil + 0) n))
                                     {} (:lost-sent merged)))
+     ;; {qos {:in-flight :acked-after :never-acked}}: publishes a broker's
+     ;; death caught unacknowledged, and how they ended.
+     :in-flight-at-kill (in-flight-at-kill (map val publishes) events)
+     ;; {qos {:published :acked :resent}}: what the publishers got out of the
+     ;; brokers, by the QoS they published at.
+     :published-by-qos (reduce (fn [acc {:keys [qos acked resends]}]
+                                 (cond-> (update-in acc [qos :published] (fnil inc 0))
+                                   acked    (update-in [qos :acked] (fnil inc 0))
+                                   resends  (update-in [qos :resent] (fnil inc 0))))
+                               (sorted-map) (map val publishes))
      :violations (vec violations)}))

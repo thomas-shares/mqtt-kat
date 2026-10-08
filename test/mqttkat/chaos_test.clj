@@ -5,7 +5,8 @@
             [mqttkat.chaos.check :as check]
             [mqttkat.chaos.client :as c]
             [mqttkat.chaos.ledger :as ledger]
-            [mqttkat.chaos.runner :as runner]))
+            [mqttkat.chaos.runner :as runner]
+            [mqttkat.test-util :as tu]))
 
 (defn- run
   "The verdict on one subscription of client \"s\" to `filter` and the
@@ -284,3 +285,87 @@
         (doseq [[id m] pubs]
           (is (= (slowly #(required? opts %1 %2) subs m) (:required (get owed id))))
           (is (= (slowly #(possible? opts %1 %2) subs m) (#'check/possible-qos opts check/matches? idx m))))))))
+
+
+;; A broker's death catches publishes between sending and acknowledgement.
+;; The report says how many, per QoS, and how they ended.
+(deftest publishes-in-flight-when-their-broker-died
+  (let [r (run {:sub sub
+                :publishes {[0 1] (assoc (msg 1 500 600) :pub-broker 1)    ; acked before the kill
+                            [0 2] (assoc (msg 1 1500 3000) :pub-broker 1)  ; acked after: resent
+                            [0 3] (assoc (msg 2 1600 nil) :pub-broker 1)   ; never acked
+                            [0 4] (assoc (msg 2 1700 3100) :pub-broker 2)  ; another broker's death
+                            [0 5] (assoc (msg 0 1800 nil) :pub-broker 1)   ; QoS 0 promises nothing
+                            [0 6] (assoc (msg 1 3500 3600) :pub-broker 1)} ; after the kill
+                :deliveries {[0 1] [{:at 650 :qos 1}] [0 2] [{:at 3100 :qos 1}]
+                             [0 4] [{:at 3200 :qos 2}] [0 6] [{:at 3700 :qos 1}]}
+                :events [{:at 2000 :type :kill-broker :broker 1}
+                         {:at 5000 :type :broker-up :broker 1}]})]
+    (is (= {1 {:in-flight 1 :acked-after 1}
+            2 {:in-flight 1 :never-acked 1}}
+           (:in-flight-at-kill r)))))
+
+;; A persistent publisher keeps what is unacknowledged across a dropped
+;; connection and sends it again (§4.4). Here the unacknowledged publishes are
+;; put in by hand, as a connection dropped before the broker answered would
+;; leave them, so the resend is certain, not a race.
+(deftest a-persistent-publisher-resends-what-was-never-acknowledged
+  (tu/ensure-broker!)
+  (doseq [mqtt5? [false true] qos [1 2]]
+    (testing (str (if mqtt5? "MQTT 5" "MQTT 3.1.1") ", QoS " qos)
+      (let [lg      (ledger/ledger)
+            id      (str "resend-" mqtt5? "-" qos "-" (System/nanoTime))
+            cl      (c/make lg {:id id :kind :pub :idx 7 :mqtt5? mqtt5? :persistent? true
+                                :session-expiry-s 60 :window 4})
+            broker  {:n 1 :host "127.0.0.1" :port tu/port}
+            topic   (str "chaos/" id)
+            inflight ^java.util.concurrent.ConcurrentHashMap (:inflight cl)]
+        (try
+          (is (c/connect! cl broker))
+          (is (tu/wait-until #(c/connected? cl)))
+          ;; Sent on a connection that died before the answer.
+          (ledger/published! lg [7 1] {:topic topic :qos qos :pub-broker 1})
+          (.put inflight 77 {:id [7 1] :topic topic :qos qos :size 32 :stage :sent :n 1})
+          (.acquire ^java.util.concurrent.Semaphore (:window cl))
+          (c/kill! cl 0 false)
+          (is (c/connect! cl broker))
+          (is (tu/wait-until #(some? (:acked (get (:publishes lg) [7 1]))))
+              "the resent publish was acknowledged")
+          (is (= 1 (:resent (c/counters cl))))
+          (is (= 1 (:resends (get (:publishes lg) [7 1]))))
+          (is (.isEmpty inflight) "and is no longer kept")
+          (finally (c/close! cl)))))))
+
+;; The same, in a run: persistent publishers dropped over and over, and
+;; whatever they resend must end up delivered once.
+(deftest persistent-publishers-in-a-run
+  (tu/ensure-broker!)
+  (let [cfg (runner/deep-merge
+             (runner/config [])
+             {:run-id     (str "resend-" (System/currentTimeMillis))
+              :report-dir (str (System/getProperty "java.io.tmpdir") "/chaos-test")
+              :setup {:brokers {:count 1 :host "127.0.0.1" :port tu/port :rama :in-process}}
+              :load  {:publishers 4 :subscribers 6 :topics 2 :rate 200 :duration-s 3
+                      :qos {0 0, 1 1, 2 1} :sub-qos {0 0, 1 1, 2 1} :pub-persistent 1.0
+                      :persistent 1.0 :wildcard 0.0}
+              :chaos {:kill-client {:every-ms [100 300] :down-ms [0 300] :who :publishers}}
+              :check {:subscribe-settle-ms 200 :drain-ms 1500 :clean-grace-ms 1000}})
+        r   (runner/run-scenario! cfg)]
+    (is (:ok? r) (pr-str (select-keys r [:counts :lost-by :duplicate-by])))
+    (is (pos? (get-in r [:stats :acked])))
+    (is (pos? (:drops (:clients r))) "publishers were dropped")))
+
+;; QoS 1 sent twice may arrive twice, at any subscription QoS; QoS 2 may not.
+(deftest a-resent-publish-and-how-often-it-may-arrive
+  (let [two [{:at 650 :qos 0} {:at 700 :qos 0}]
+        ;; A second subscription owed one message, so that the run proves
+        ;; something whatever the first is judged to be.
+        other {:filter "t/2" :qos 1 :sub-sent 0 :from 10}
+        r   (fn [qos resends]
+              (run {:sub [(assoc sub :qos 0) other]
+                    :publishes {[0 1] (cond-> (msg qos 500 600) resends (assoc :resends resends))
+                                [0 2] (assoc (msg 1 500 600) :topic "t/2")}
+                    :deliveries {[0 1] two [0 2] [{:at 650 :qos 1}]}}))]
+    (is (= {:duplicate 1} (kinds (r 1 nil))) "QoS 0 subscriber, twice, never resent")
+    (is (:ok? (r 1 1)) "QoS 1 resent")
+    (is (= {:duplicate 1} (kinds (r 2 1))) "QoS 2 resent still exactly once")))

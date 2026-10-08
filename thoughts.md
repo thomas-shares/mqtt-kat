@@ -2,6 +2,31 @@
 
 In this file will go my thoughts and ramblings about this project and what I have done and what I might do next.
 
+## 20261008
+
+### Chaos for a dying broker, from the publisher's side
+
+Every chaos run so far judged a killed broker by what its subscribers got.
+Its publishers were clean sessions that never resent, so a QoS 1 or 2 publish
+the broker had received and not yet acknowledged simply became "may or may
+not arrive", and the half of the promise that matters when a broker dies,
+what it does with the retransmission, was never exercised. Now
+`:load :pub-persistent` makes that share of publishers persistent. They keep
+their unacknowledged publishes across a drop and, if the session is present,
+send them again as §4.4 says: PUBLISH with DUP and the same packet
+identifier, PUBREL for a QoS 2 publish already PUBRECed. A QoS 1 publish that
+went twice may arrive twice, at any subscription QoS; a QoS 2 one is still
+held to once, so a broker that forgets the packet identifier across a crash
+shows up as a `:duplicate`. Found on the way: a weight map in a scenario
+merges over the defaults, so `:qos {1 1, 2 1}` left QoS 0 at weight 1.
+
+Broker actions take `:who` (`:publishers`, `:subscribers`, `:busiest`: kill
+the brokers holding the most of them), `:count` and `:min-up 0`, and the
+report says per QoS how many publishes a broker's death caught in flight and
+how they ended. `chaos/broker-kill.edn` and `chaos/broker-restart.edn` use
+all of it. Not yet run against a Rama cluster: only the checks, a resend test
+against the suite's own broker and a short single-broker run have.
+
 ## 20261007
 
 ### Taken for unsubscribed while it moved in

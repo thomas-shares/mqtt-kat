@@ -12,9 +12,15 @@
    not counted twice (§4.3.3, method B). A subscribe or unsubscribe the
    connection dropped under is sent again on the next one.
 
-   Publishers use clean sessions and do not resend: a publish whose PUBACK or
-   PUBCOMP never came is not a promise the broker made, and the checker treats
-   it as one that may or may not arrive."
+   A publisher is clean unless `:persistent?`. A clean one does not resend: a
+   publish whose PUBACK or PUBCOMP never came is not a promise the broker
+   made, and the checker treats it as one that may or may not arrive. A
+   persistent one keeps what is unacknowledged across a dropped connection
+   and, when the broker still has its session, sends it again as §4.4 says:
+   a PUBLISH with DUP set and the same packet identifier, and a PUBREL for a
+   QoS 2 publish already PUBRECed. So a broker killed mid-handshake is judged
+   on what it does with a retransmission: an acknowledged message must still
+   arrive, and a QoS 2 one only once."
   (:require [clojure.string :as str]
             [clojure.tools.logging :as log]
             [mqttkat.chaos.ledger :as ledger])
@@ -52,11 +58,15 @@
           :window       (Semaphore. (int window))
           :next-id      (AtomicInteger.)
           :seq          (AtomicLong.)
+          :sent-n       (AtomicLong.)
           :counters     {:unparseable (LongAdder.)
                          :refused     (LongAdder.)
                          :drops       (LongAdder.)
                          :connects    (LongAdder.)
-                         :redirected  (LongAdder.)}}))
+                         :redirected  (LongAdder.)
+                         ;; Packets a persistent publisher sent again after a
+                         ;; reconnect that kept its session.
+                         :resent      (LongAdder.)}}))
 
 (defn- bump! [c k] (.increment ^LongAdder (get-in c [:counters k])))
 
@@ -135,8 +145,8 @@
 ;; ── losing a connection ───────────────────────────────────────────────
 
 (defn- release-inflight!
-  "A clean publisher's unacknowledged publishes went with its session; give
-   their window slots back. They stay unacknowledged in the ledger."
+  "A publisher's unacknowledged publishes went with its session; give their
+   window slots back. They stay unacknowledged in the ledger."
   [c]
   (doseq [k (vec (.keySet ^ConcurrentHashMap (:inflight c)))]
     (when (.remove ^ConcurrentHashMap (:inflight c) k)
@@ -156,7 +166,8 @@
       (reset! (:last-drop c) at)
       (bump! c :drops)
       (case (:kind c)
-        :pub (release-inflight! c)
+        ;; A persistent publisher keeps them for the next CONNACK to decide.
+        :pub (when-not (:persistent? c) (release-inflight! c))
         :sub (when-not (:persistent? c)
                (ledger/ended! (:ledger c) (:id c) :drop at)
                (reset! (:sub c) {:state :none})
@@ -217,6 +228,28 @@
   [c]
   (first (reset-vals! (:redirect-to c) nil)))
 
+(defn payload ^bytes [pub seq size]
+  (let [head (.getBytes (str pub ":" seq "|") StandardCharsets/US_ASCII)
+        out  (byte-array (max (long size) (alength head)) (byte (int \.)))]
+    (System/arraycopy head 0 out 0 (alength head))
+    out))
+
+(defn- resend-inflight!
+  "§4.4: after a reconnect that kept the session, a publisher sends again what
+   was not acknowledged, in the order it first went out: a PUBLISH with DUP
+   set, or for a QoS 2 publish the broker has already PUBRECed, its PUBREL."
+  [c]
+  (doseq [[pid {:keys [topic qos size stage] :as m}]
+          (sort-by (comp :n val) (vec (seq ^ConcurrentHashMap (:inflight c))))]
+    (bump! c :resent)
+    (ledger/resent! (:ledger c) (:id m))
+    (send! c (if (= :released stage)
+               (MqttPubRel/encode (v5 c {:packet-type :PUBREL :packet-identifier pid}))
+               (MqttPublish/encode
+                (v5 c {:packet-type :PUBLISH :topic topic :qos qos :packet-identifier pid
+                       :payload (payload (:idx c) (second (:id m)) size)
+                       :retain? false :duplicate? true}))))))
+
 (defn- on-connack [c msg]
   (locking (:lock c)
     (let [code (bit-and 0xFF (long (or (:reason-code msg) (:connect-return-code msg) 0)))
@@ -234,10 +267,14 @@
           (when (and (:persistent? c) @(:had-session? c) (not present?))
             (let [at (or @(:last-drop c) (ledger/now lg))]
               (ledger/session-lost! lg (:id c) (ledger/now lg))
-              (ledger/ended! lg (:id c) :session-lost at)
-              (reset! (:sub c) {:state :none})
-              (.clear ^java.util.Set (:awaiting-rel c))))
+              (when (= :sub (:kind c))
+                (ledger/ended! lg (:id c) :session-lost at)
+                (reset! (:sub c) {:state :none})
+                (.clear ^java.util.Set (:awaiting-rel c)))
+              ;; Nothing the broker kept can be retransmitted to.
+              (when (= :pub (:kind c)) (release-inflight! c))))
           (when (:persistent? c) (reset! (:had-session? c) true))
+          (when (and (= :pub (:kind c)) present?) (resend-inflight! c))
           (sync-subscription! c))))))
 
 (defn- on-suback [c msg]
@@ -307,7 +344,7 @@
             (send! c (MqttPubRec/encode (v5 c {:packet-type :PUBREC :packet-identifier pid})))))))
 
 (defn- retire! [c pid ok?]
-  (when-let [id (.remove ^ConcurrentHashMap (:inflight c) pid)]
+  (when-let [{:keys [id]} (.remove ^ConcurrentHashMap (:inflight c) pid)]
     (when ok? (ledger/acked! (:ledger c) id))
     (.release ^Semaphore (:window c))))
 
@@ -328,8 +365,11 @@
       :PUBACK   (retire! c (:packet-identifier msg) (not (failed? msg)))
       :PUBREC   (if (failed? msg)
                   (retire! c (:packet-identifier msg) false)
-                  (send! c (MqttPubRel/encode (v5 c {:packet-type :PUBREL
-                                                     :packet-identifier (:packet-identifier msg)}))))
+                  (do (.computeIfPresent ^ConcurrentHashMap (:inflight c) (:packet-identifier msg)
+                                         (reify java.util.function.BiFunction
+                                           (apply [_ _ m] (assoc m :stage :released))))
+                      (send! c (MqttPubRel/encode (v5 c {:packet-type :PUBREL
+                                                         :packet-identifier (:packet-identifier msg)})))))
       :PUBCOMP  (retire! c (:packet-identifier msg) true)
       ;; The other form of a redirect: accepted, then told to go.
       :DISCONNECT (locking (:lock c) (redirected! c msg))
@@ -388,12 +428,6 @@
 
 ;; ── publishing ────────────────────────────────────────────────────────
 
-(defn payload ^bytes [pub seq size]
-  (let [head (.getBytes (str pub ":" seq "|") StandardCharsets/US_ASCII)
-        out  (byte-array (max (long size) (alength head)) (byte (int \.)))]
-    (System/arraycopy head 0 out 0 (alength head))
-    out))
-
 (defn publish!
   "One message, if the publisher is connected and — above QoS 0 — has a free
    slot in its window within `wait-ms`. Returns :sent, :skipped or :failed."
@@ -410,7 +444,9 @@
             pid (when (pos? qos) (next-id c))]
         (ledger/published! (:ledger c) id {:topic topic :qos qos :pub-broker broker})
         (when pid
-          (.put ^ConcurrentHashMap (:inflight c) pid id)
+          (.put ^ConcurrentHashMap (:inflight c) pid
+                {:id id :topic topic :qos qos :size size :stage :sent
+                 :n (.incrementAndGet ^AtomicLong (:sent-n c))})
           ;; Dropped between the check above and here: on-drop! has already
           ;; emptied the window, so this slot is ours to give back.
           (when-not (= epoch (:epoch @(:conn c)))

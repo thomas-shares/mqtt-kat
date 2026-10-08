@@ -59,6 +59,14 @@
 (defn published! [ledger id m]
   (.put ^ConcurrentHashMap (:publishes ledger) id (assoc m :sent (now ledger))))
 
+(defn resent!
+  "A persistent publisher sent `id` again after a reconnect (§4.4). A QoS 1
+   publish the broker may then have taken twice is allowed to arrive twice."
+  [ledger id]
+  (.computeIfPresent ^ConcurrentHashMap (:publishes ledger) id
+                     (reify java.util.function.BiFunction
+                       (apply [_ _ m] (update m :resends (fnil inc 0))))))
+
 (defn acked! [ledger id]
   (let [t      (now ledger)
         first? (volatile! false)]
