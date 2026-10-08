@@ -82,6 +82,37 @@ hand-over lands is what sent QoS 2 messages out twice under new identifiers
 question. Not run against a cluster yet: `broker-kill.edn` should show
 `:skipped` and the 10 s `connected` dips shrink to about three.
 
+### Run 180149: what the 54 losses have in common
+
+With the shorter hand-over wait (publishers skipped 7,383 messages, not
+24,096) the run lost 54 and had 80 QoS 2 duplicates, 3 of them of resent
+messages. Read against each subscriber's own connects and drops (the report's
+`:events`), the losses are three groups.
+
+- 30 are s24's, all QoS 2 and all resent. s24 was between brokers from
+  148.12 s (broker 3 killed) to 152.47 s: its attempt on broker 2 got no
+  CONNACK before broker 2 was stopped at 151.57 s. The resends were
+  acknowledged 82 to 575 ms before its CONNECT on broker 1. It is a wildcard
+  subscriber, so the roughly two thousand ordinary publishes of that window
+  were owed to it too, and only the resent ones went missing.
+- About 20 are the resends acknowledged at 114.286 s on broker 3, for
+  subscribers that had come from the killed broker 1 and been connected on
+  broker 3 for 32 to 178 ms, or not yet (s24, 23 ms before). Resends reach a
+  broker in a burst when the clients come back together, which is when the
+  sessions are moving in; ordinary publishes seldom arrive in that window.
+  This looks like the "taken for unsubscribed while it moved in" case again
+  (20261007), for a publish that enters on the broker itself and not over a
+  bridge. Not shown yet.
+- 9 are s5's and were not resent: acknowledged by broker 1 3 to 6 ms after
+  they were sent, and 16 to 19 ms after the runner issued the kill, which is
+  before the process was gone (bb has to start to send it). s5 stayed on
+  broker 3 and the others there had them.
+
+The three duplicates of resent messages are QoS 2 publishes sent while broker
+3 was being killed (147.96 to 148.04 s), delivered once already, resent and
+delivered again on broker 1: the packet identifier of an inbound QoS 2
+publish is held by one broker only.
+
 ## 20261007
 
 ### Taken for unsubscribed while it moved in
