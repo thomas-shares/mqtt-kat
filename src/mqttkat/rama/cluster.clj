@@ -756,13 +756,16 @@
                                               (assoc s :busy? false :gone? true))))]
     (if (seq (:ops before))
       (send-batch! w conn client-id lane (queue-records client-id (:ops before)) (:futs before)
-                   (first queue-retry-millis) :ack)
+                   (first queue-retry-millis) (:ack-level before :ack))
       (.remove ^java.util.concurrent.ConcurrentHashMap (:lanes w) client-id lane))))
 
 (defn- queue-op!
   "Put `op` in `client-id`'s lane, and start the lane if it was idle.
-   Returns a future that completes once Rama has it."
-  [{:keys [queue-writer] :as conn} client-id op]
+   Returns a future that completes once Rama has it: once the topology has
+   it, or with `ack-level` :append-ack once the depot does. A lane is for
+   one client, so every op in it asks the same."
+  ([conn client-id op] (queue-op! conn client-id op :ack))
+  ([{:keys [queue-writer] :as conn} client-id op ack-level]
   (let [w   queue-writer
         fut (java.util.concurrent.CompletableFuture.)]
     (loop []
@@ -773,12 +776,12 @@
                                                       s
                                                       (-> s (update :ops conj op)
                                                           (update :futs conj fut)
-                                                          (assoc :busy? true)))))]
+                                                          (assoc :busy? true :ack-level ack-level)))))]
         (cond
           ;; Going idle as this arrived: the next lookup finds a new lane.
           (:gone? after)       (do (Thread/onSpinWait) (recur))
           (not (:busy? before)) (start-lane! w conn client-id lane))))
-    fut))
+    fut)))
 
 (defn enqueue!
   "Queue `message` for `client-id` under `key` (a new one when nil), and
@@ -793,6 +796,24 @@
   "Take `keys` off `client-id`'s queue. A future, as enqueue! returns."
   [conn client-id keys]
   (queue-op! conn client-id [:dequeue (vec keys)]))
+
+(defn hold!
+  "enqueue!, for a queue that is read only seconds after it is written:
+   the future completes once the depot has the write, not once the
+   topology has processed it. What a publisher's QoS 2 messages wait for
+   their PUBREL on (mqttkat.handlers/inbound-qos-2-id): its PUBREC waits on
+   this, and waiting on the topology, hundreds of ms under load, put a
+   thousand QoS 2 publishes in flight at a broker's death. The PUBREL that
+   reads it on another broker comes after the publisher has reconnected
+   there, seconds on."
+  [conn client-id message key]
+  (let [{:keys [key message]} (->enqueue client-id message key)]
+    (queue-op! conn client-id [:enqueue key message false] :append-ack)))
+
+(defn unhold!
+  "dequeue!, as hold! is enqueue!."
+  [conn client-id keys]
+  (queue-op! conn client-id [:dequeue (vec keys)] :append-ack))
 
 (defn session
   "The record for `client-id`, or nil if it has never connected."
@@ -1664,6 +1685,8 @@
            :resume       (fn [client-id] (resume conn client-id))
            :enqueue!     (fn [client-id msg key] (enqueue! conn client-id msg key))
            :dequeue!     (fn [client-id keys] (dequeue! conn client-id keys))
+           :hold!        (fn [client-id msg key] (hold! conn client-id msg key))
+           :unhold!      (fn [client-id keys] (unhold! conn client-id keys))
            :queued       (fn [client-id limit] (queued conn client-id limit))
            :settled!     (fn [peer-id msg-keys]
                            (when-let [peer (get @(:brokers conn) peer-id)]

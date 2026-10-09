@@ -328,6 +328,10 @@
           (.put inflight 77 {:id [7 1] :topic topic :qos qos :size 32 :stage :sent :n 1})
           (.acquire ^java.util.concurrent.Semaphore (:window cl))
           (c/kill! cl 0 false)
+          ;; Back only once the broker has parked the session: sooner, it
+          ;; can answer Session Present 0, and the client rightly lets go of
+          ;; what it held instead of sending it again.
+          (tu/wait-for-parked-session! id)
           (is (c/connect! cl broker))
           (is (tu/wait-until #(some? (:acked (get (:publishes lg) [7 1]))))
               "the resent publish was acknowledged")

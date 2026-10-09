@@ -46,9 +46,19 @@ still queued at the end of both runs).
 So QoS 2 across a crash is at least once for now, in the window between the
 publish on the PUBREL and its take-off landing. Making it exactly once needs
 the copies to be recognised where they are delivered, by their message key,
-or the window made small: the held writes waited on only until the depot has
-them (:append-ack) rather than until the topology has processed them, since
-a PUBREL that comes elsewhere comes seconds later. And a publisher
+or the window made small.
+
+The window is made small now. The held writes, and their take-offs, go
+through `cluster/hold!` and `unhold!`, which are done once the depot has them
+(:append-ack) rather than once the topology has processed them. The PUBREC
+and the PUBCOMP wait for that, which is milliseconds, not the hundreds the
+topology takes under load. The cost is on the other side: a PUBREL that comes
+to another broker can find the topology not yet up to the message. So a
+PUBREL for one this broker did not take reads the cluster for it for up to
+five seconds (`held-read-wait-millis`) before taking it as done, off the
+reader's thread, and a second PUBREL for it meanwhile is left to the first.
+A PUBREL for one that was done already, sent again because its PUBCOMP was
+lost, is answered five seconds late. Not run against a cluster yet. And a publisher
 that never sends its PUBREL and comes back clean on another broker leaves its
 held messages there until they are let go by hand.
 
