@@ -15,8 +15,22 @@ CONNECT's read of the queue and the session being live here is queued on the
 cluster for it, and comes 2 s later with the first catch-up read, or sooner
 when a nudge brings it. The first version of the test listened for one
 second and called those lost. So the chaos losses need a second live broker:
-the resend enters on one while the subscriber resumes on another. The next
-thing to try is two brokers in one JVM.
+the resend enters on one while the subscriber resumes on another.
+
+Two brokers cannot run in one JVM (the broker's state is global), so the test
+plays the second over the bridge. As the sender: its view has the client on
+the dead broker, so it queues copies on the cluster itself; once the client's
+CONNECT is in its view, it sends them here at that view while the session is
+still waiting on the dead broker's hand-over. They are queued for it, and
+come with the takeover's read or the first catch-up. As the receiver of what
+this broker forwards: publishes enter here while the client moves from the
+dead broker to the live fake one, and every one went either to the live one
+or onto the client's queue. Nothing lost either way, at QoS 1 or 2. So
+neither half of the hand between two brokers loses a message on its own in
+these shapes. What the tests do not have is the second broker's own side,
+which judges, delivers and acknowledges the copies, and what happens when
+that broker is itself stopped mid-hand. That needs two real brokers, which
+the chaos runs are.
 
 The runner now records `:broker-signalled` when brokers.bb has actually sent
 the kill or stop, a few hundred ms after the `:kill-broker` it decided on, and
