@@ -25,7 +25,21 @@ already has, so the module is unchanged and nothing needs redeploying.
 
 Left: a broker that dies between publishing on the PUBREL and the take-off
 landing leaves it held, and a PUBREL sent again publishes it a second time.
-That window is milliseconds, against a loss to everyone. And a publisher
+
+That window was not milliseconds. Run 134336 lost nothing, for the first
+time, and delivered 614 resent QoS 2 messages twice: a write to the cluster
+under load lands hundreds of ms later, and the PUBREC waiting on one put 346
+QoS 2 publishes in flight at the kills against 26 at QoS 1. So the broker
+that takes the PUBREL now marks the held message as being released, waits
+for the mark to land, and only then publishes it (`release-held!`). A PUBREL
+that finds it marked elsewhere takes it off and does not publish it again.
+What that gives back is a loss in a smaller window: a broker that dies after
+the mark lands and before the publish is done. Every copy held under the
+identifier comes off, after a resend, which also takes off the copies a
+resend left twice (the 19 still queued at the end of 134336).
+A message released this way is published off the reader's thread, once the
+mark has landed, so two of one publisher's QoS 2 messages can go out in the
+other order when their marks land so. And a publisher
 that never sends its PUBREL and comes back clean on another broker leaves its
 held messages there until they are let go by hand.
 

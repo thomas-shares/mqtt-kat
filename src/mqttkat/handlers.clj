@@ -3066,13 +3066,21 @@
                 (keep-session? client)
                 (not (bridge/bridge? (:client-id client))))))
 
+(defn- inbound-all-on-cluster
+  "Every [key msg] `client-id` has held on the cluster under
+   `packet-identifier`, oldest first. Usually one; two when a PUBLISH sent
+   again reached a broker before the first broker's write had landed, and
+   each was held."
+  [client-id packet-identifier]
+  (when-let [{:keys [queued]} @session-source]
+    (filterv (fn [[_ m]] (= packet-identifier (:packet-identifier m)))
+             (queued (inbound-qos-2-id client-id) inbound-qos-2-read-limit))))
+
 (defn- inbound-on-cluster
   "[key msg] for `client-id`'s QoS 2 message held on the cluster under
    `packet-identifier`, or nil."
   [client-id packet-identifier]
-  (when-let [{:keys [queued]} @session-source]
-    (some (fn [[k m]] (when (= packet-identifier (:packet-identifier m)) [k m]))
-          (queued (inbound-qos-2-id client-id) inbound-qos-2-read-limit))))
+  (first (inbound-all-on-cluster client-id packet-identifier)))
 
 (defn discard-inbound-qos-2!
   "Let go of whatever QoS 2 messages of `client-id`'s the cluster holds for
@@ -3136,7 +3144,10 @@
       (swap! *clients* update-in [client-key :inbound-inflight] (fnil inc 0)))
     (swap! *inflight* assoc [client-id packet-identifier]
            (cond-> {:msg held :topic (:topic held topic)}
-             cluster? (assoc ::inbound-key k)))
+             cluster?                 (assoc ::inbound-key k)
+             ;; Sent again: another broker's write of it may land after
+             ;; this one's, and is taken off with it on the PUBREL.
+             (and cluster? duplicate?) (assoc ::resent? true)))
     ;; Reported on the PUBREC, the first answer of the handshake, rather than on
     ;; the PUBCOMP at the end (§3.5.2.1). The subscribers counted here are the
     ;; ones matching now; §4.3.3 publishes on PUBREL, so the set can differ by
@@ -3833,61 +3844,129 @@
       true)))
 
 ;;there is no need to do
+(defn- publish-released!
+  "Publish a QoS 2 message on its PUBREL: §4.3.3 publishes then, so the
+   subscribers are whoever matches now — but they are chosen the same way as
+   on any other publish. Collecting the writes to Rama it makes in `held`,
+   as a QoS 1 publish does for its PUBACK: see publish-keyed."
+  [topic msg ^java.util.List held]
+  (binding [*hand-offs* (when @session-source held)]
+    (let [{:keys [plan serve-group? groups-only? withhold? matches]} (route topic msg)]
+      (delivering-for-origin
+       msg
+       #(let [live (qos-2-send (subscribers-for topic (:client-key msg) serve-group? groups-only?
+                                                withhold? matches)
+                               topic msg)]
+          (queue-for-offline-sessions! topic msg live)
+          (forward-to-brokers! plan topic msg live))))))
+
+(defn- finish-pubrel!
+  "Give the publisher's slot back, forget the message, and once `held` has
+   landed send the PUBCOMP, to the connection holding the client by then."
+  [client-key client-id packet-identifier ^java.util.List held]
+  (when (contains? @*inflight* [client-id packet-identifier])
+    ;; The slot is given back on PUBREL, which is what makes the quota a
+    ;; limit on messages in flight rather than on messages ever sent. Only
+    ;; on a connection still here: one that went is not counted any more.
+    (swap! *clients* (fn [m] (if (contains? m client-key)
+                               (update-in m [client-key :inbound-inflight] (fn [n] (max 0 (dec (or n 0)))))
+                               m))))
+  (swap! *inflight* dissoc [client-id packet-identifier])
+  ;; Last, not first: the PUBCOMP tells the publisher it is done with this
+  ;; identifier. Sent before the message was queued for the sessions that
+  ;; are away, a subscriber reconnecting on it could miss it; sent before
+  ;; the entry was removed, a new publish reusing the identifier at once
+  ;; had its own entry removed by the dissoc above. And on a cluster not
+  ;; before those writes have landed, for the reason the PUBACK waits.
+  (once-handed-off! held
+                    #(when-let [k (or (live-connection client-id) client-key)]
+                       (send-buffer [k] (MqttPubComp/encode {:packet-type       :PUBCOMP
+                                                             :packet-identifier packet-identifier})))))
+
+(defn- add-write! [^java.util.List held fut]
+  (when (instance? CompletableFuture fut) (.add held fut)))
+
+(defn- release-held!
+  "Publish a QoS 2 message held on the cluster under `keys`, its PUBREL
+   having come here. First it is marked as being released, and only once the
+   mark has landed is it published: a broker that dies while publishing it
+   leaves the mark, and the PUBREL the publisher sends again elsewhere finds
+   it and does not publish it a second time. Unmarked, a run with a broker
+   killed every few seconds delivered six hundred QoS 2 messages twice: the
+   take-off that comes after publishing lands hundreds of milliseconds
+   later under load, and a broker killed in between left the message to be
+   published again. What the mark trades for that is a message whose broker
+   died after marking it and before publishing it: that one is lost.
+   Then it is taken off, every copy held under the identifier, and the
+   PUBCOMP sent."
+  [client-key client-id packet-identifier topic msg keys sweep?]
+  (let [{:keys [enqueue! dequeue!]} @session-source
+        id   (inbound-qos-2-id client-id)
+        mark (enqueue! id (assoc (for-cluster (assoc msg :topic topic)) :releasing? true) (first keys))]
+    (once-done! mark
+                ;; Off Rama's own thread: publishing can wait on it.
+                #(future
+                   (let [held (java.util.ArrayList.)]
+                     (try
+                       (publish-released! topic msg held)
+                       (let [all (cond-> (set keys)
+                                   sweep? (into (map first) (inbound-all-on-cluster client-id packet-identifier)))]
+                         (add-write! held (dequeue! id (vec all))))
+                       (catch Throwable t
+                         (log/warn t "could not release the QoS 2 message" packet-identifier "of" client-id))
+                       (finally
+                         (finish-pubrel! client-key client-id packet-identifier held))))))))
+
 (defn pubrel
   [{:keys [packet-identifier client-key]}]
   #_(log/debug "received (PUBREL:" packet-identifier)
   (let [client    (get @*clients* client-key)
         client-id (:client-id client)
         local     (get @*inflight* [client-id packet-identifier])
-        ;; Not here: the PUBLISH went to another broker, which went after
-        ;; its PUBREC. Held on the cluster, it is published from there.
-        taken     (when (and (nil? local) (held-on-cluster? client))
-                    (inbound-on-cluster client-id packet-identifier))
-        {:keys [topic msg]} (or local (when-let [[_ m] taken] {:topic (:topic m) :msg m}))
-        inbound-key (if local (::inbound-key local) (first taken))
-        ;; From the connection the PUBREL came on, not the one the PUBLISH
-        ;; did: a client that reconnected in between, its session kept, is
-        ;; this connection now. Another broker's bridge does that when its
-        ;; link drops, and the publish, taken for a client's, went on to
-        ;; every other broker.
-        msg       (some-> msg (assoc :client-key client-key))
         held      (java.util.ArrayList.)]
-    (when topic
-      ;; §4.3.3 publishes on the PUBREL, so the subscribers are whoever matches
-      ;; now — but they are chosen the same way as on any other publish.
-      ;; Collecting the writes to Rama it makes, as a QoS 1 publish does for
-      ;; its PUBACK: see publish-keyed.
-      (binding [*hand-offs* (when @session-source held)]
-        (let [{:keys [plan serve-group? groups-only? withhold? matches]} (route topic msg)]
-          (delivering-for-origin
-           msg
-           #(let [live (qos-2-send (subscribers-for topic (:client-key msg) serve-group? groups-only?
-                                                    withhold? matches)
-                                   topic msg)]
-              (queue-for-offline-sessions! topic msg live)
-              (forward-to-brokers! plan topic msg live))))
-        ;; Published: no broker is to publish it again on a PUBREL. Taken off
-        ;; before the PUBCOMP, which is the publisher's word that it may use
-        ;; the identifier for another.
-        (when-let [{:keys [dequeue!]} (when inbound-key @session-source)]
-          (let [fut (dequeue! (inbound-qos-2-id client-id) [inbound-key])]
-            (when (instance? CompletableFuture fut) (.add held fut))))))
-    (when (contains? @*inflight* [client-id packet-identifier])
-      ;; The slot is given back on PUBREL, which is what makes the quota a
-      ;; limit on messages in flight rather than on messages ever sent.
-      (swap! *clients* update-in [client-key :inbound-inflight]
-             (fn [n] (max 0 (dec (or n 0))))))
-    (swap! *inflight* dissoc [client-id packet-identifier])
-    ;; Last, not first: the PUBCOMP tells the publisher it is done with this
-    ;; identifier. Sent before the message was queued for the sessions that
-    ;; are away, a subscriber reconnecting on it could miss it; sent before
-    ;; the entry was removed, a new publish reusing the identifier at once
-    ;; had its own entry removed by the dissoc above. And on a cluster not
-    ;; before those writes have landed, for the reason the PUBACK waits.
-    (once-handed-off! held
-                      #(send-buffer [client-key]
-                                    (MqttPubComp/encode {:packet-type       :PUBCOMP
-                                                         :packet-identifier packet-identifier})))))
+    (cond
+      ;; The PUBREL before this one is releasing it, and answers for both.
+      (::releasing? local) nil
+
+      ;; Held here only: published now. From the connection the PUBREL came
+      ;; on, not the one the PUBLISH did: a client that reconnected in
+      ;; between, its session kept, is this connection now. Another broker's
+      ;; bridge does that when its link drops, and the publish, taken for a
+      ;; client's, went on to every other broker.
+      (and local (not (::inbound-key local)))
+      (do (publish-released! (:topic local) (assoc (:msg local) :client-key client-key) held)
+          (finish-pubrel! client-key client-id packet-identifier held))
+
+      ;; Held on the cluster as well: marked, then published.
+      local
+      (do (swap! *inflight* update [client-id packet-identifier] assoc ::releasing? true)
+          (release-held! client-key client-id packet-identifier (:topic local)
+                         (assoc (:msg local) :client-key client-key)
+                         [(::inbound-key local)] (::resent? local)))
+
+      ;; Not here: the PUBLISH went to another broker, which went after its
+      ;; PUBREC. Held on the cluster, it is published from there — unless
+      ;; that broker had begun to release it, and may have published it.
+      (held-on-cluster? client)
+      (let [found (inbound-all-on-cluster client-id packet-identifier)
+            keys  (mapv first found)]
+        (cond
+          (empty? found)
+          (finish-pubrel! client-key client-id packet-identifier held)
+
+          (some (comp :releasing? second) found)
+          (do (add-write! held ((:dequeue! @session-source) (inbound-qos-2-id client-id) keys))
+              (finish-pubrel! client-key client-id packet-identifier held))
+
+          :else
+          (let [[_ m] (first found)
+                msg   (assoc m :client-key client-key)]
+            (swap! *inflight* assoc [client-id packet-identifier]
+                   {:msg msg :topic (:topic m) ::inbound-key (first keys) ::releasing? true})
+            (release-held! client-key client-id packet-identifier (:topic m) msg keys false))))
+
+      :else
+      (finish-pubrel! client-key client-id packet-identifier held))))
 
 (defn pubcomp [{:keys [packet-identifier client-key] :as msg}]
   #_(log/debug "received PUBCOMP:" (dissoc msg :client-key))

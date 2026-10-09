@@ -375,6 +375,24 @@
         (Thread/sleep 1000)
         (is (= ["taken elsewhere" "sent twice"] @received) "published once")
         (is (tu/wait-until #(empty? (cluster/queued *conn* (h/inbound-qos-2-id pub-id))) 5000)))
+      (testing "a PUBREL for one the broker that went had begun to release is not published again"
+        ;; That broker marked it, may have published it, and went before its
+        ;; take-off landed: the PUBREL comes again to the next.
+        (client/send-message (:client raw) {:packet-type :PUBLISH :topic topic :qos 2 :packet-identifier 9
+                                            :payload (.getBytes "released there" "UTF-8")
+                                            :retain? false :duplicate? false})
+        (tu/expect! (:ch raw) :PUBREC 5000)
+        (let [id      (h/inbound-qos-2-id pub-id)
+              [k m]   (first (filter #(= 9 (:packet-identifier (second %))) (cluster/queued *conn* id)))]
+          (is (some? k))
+          @(cluster/record! *conn* (cluster/->enqueue id (assoc m :releasing? true) k)))
+        (swap! h/*inflight* dissoc [pub-id 9])
+        (client/send-message (:client raw) {:packet-type :PUBREL :packet-identifier 9})
+        (tu/expect! (:ch raw) :PUBCOMP 5000)
+        (Thread/sleep 1000)
+        (is (not-any? #{"released there"} @received) "not published a second time")
+        (is (tu/wait-until #(empty? (cluster/queued *conn* (h/inbound-qos-2-id pub-id))) 5000)
+            "and taken off"))
       (finally
         (tu/close! raw)
         (close! sub)))))
