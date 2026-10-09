@@ -139,7 +139,7 @@
        (<= (long (:sent m)) (long (or (:to sub) forever)))))
 
 (defn- broker-event? [e]
-  (contains? #{:kill-broker :stop-broker :broker-up} (:type e)))
+  (contains? #{:kill-broker :stop-broker :broker-signalled :broker-up} (:type e)))
 
 ;; ── looking things up by time ──────────────────────────────────────────
 ;;
@@ -175,21 +175,24 @@
         (persistent! acc)))))
 
 (defn- outages
-  "[{:broker :from :to}]: each stretch a broker was down, from the kill or
-   stop to its :broker-up, or to forever when it never came back. A broker
-   takes tens of seconds to come back, far longer than the :down-ms it is
-   left for, and the events alone mark only the two ends of that."
+  "[{:broker :from :signalled :to}]: each stretch a broker was down, from the
+   kill or stop to its :broker-up, or to forever when it never came back. A
+   broker takes tens of seconds to come back, far longer than the :down-ms it
+   is left for, and the events alone mark only the two ends of that.
+   :signalled is when the signal had been sent (brokers.bb takes a few
+   hundred ms to start): until then the broker was still taking publishes."
   [events]
   (let [[open acc]
         (reduce (fn [[open acc] {:keys [type broker at]}]
                   (case type
-                    (:kill-broker :stop-broker) [(update open broker #(or % at)) acc]
-                    :broker-up (if-let [from (get open broker)]
-                                 [(dissoc open broker) (conj acc {:broker broker :from from :to at})]
+                    (:kill-broker :stop-broker) [(update open broker #(or % {:from at})) acc]
+                    :broker-signalled [(update open broker #(cond-> % (and % (nil? (:signalled %))) (assoc :signalled at))) acc]
+                    :broker-up (if-let [o (get open broker)]
+                                 [(dissoc open broker) (conj acc (assoc o :broker broker :to at))]
                                  [open acc])
                     [open acc]))
                 [{} []] (:xs events))]
-    (into acc (for [[b from] open] {:broker b :from from :to forever}))))
+    (into acc (for [[b o] open] (assoc o :broker b :to forever)))))
 
 (defn- down-during?
   "Whether one of `brokers` was down at some moment between `lo` and `hi`. A

@@ -397,7 +397,13 @@
             (ledger/event! (:ledger state) {:type kind :broker n :together ns}))
           (println (format "  %s broker-%s for %d ms" (if (= :kill signal) "killing" "stopping")
                            (str/join "+" ns) down))
-          (doseq [n ns] (run-command! state (control-command (:cfg state) signal n)))
+          ;; The kill event above is when the runner decided; brokers.bb has
+          ;; to start before it sends the signal, a few hundred ms later, and
+          ;; a broker acknowledged publishes in between. This is when the
+          ;; signal had gone.
+          (doseq [n ns]
+            (run-command! state (control-command (:cfg state) signal n))
+            (ledger/event! (:ledger state) {:type :broker-signalled :broker n :signal signal}))
           (Thread/sleep down)
           (start-brokers! state ns)
           true)))))

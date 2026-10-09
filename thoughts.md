@@ -2,6 +2,27 @@
 
 In this file will go my thoughts and ramblings about this project and what I have done and what I might do next.
 
+## 20261009
+
+### Moving in on one broker loses nothing
+
+`moving_in_test` stands in for the chaos runs' losses on a single broker with
+an in-process Rama. A kept session is recorded as connected on a broker that
+is gone, either unlisted or listed at a port that refuses. A publisher
+streams QoS 1 or 2, a third of it with DUP set as a resend's is, while the
+client comes back here. Nothing is lost. What is published between the
+CONNECT's read of the queue and the session being live here is queued on the
+cluster for it, and comes 2 s later with the first catch-up read, or sooner
+when a nudge brings it. The first version of the test listened for one
+second and called those lost. So the chaos losses need a second live broker:
+the resend enters on one while the subscriber resumes on another. The next
+thing to try is two brokers in one JVM.
+
+The runner now records `:broker-signalled` when brokers.bb has actually sent
+the kill or stop, a few hundred ms after the `:kill-broker` it decided on, and
+each outage in the report carries it as `:signalled`. Run 180149's s5 losses
+were acknowledged in between.
+
 ## 20261008
 
 ### Chaos for a dying broker, from the publisher's side

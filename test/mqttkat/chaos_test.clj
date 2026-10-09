@@ -383,6 +383,10 @@
       (let [r (lost (assoc (msg 1 30000000 30000100) :pub-broker 3) events)]
         (is (= {1 {:near-broker-chaos 1}} (:lost-by r)))
         (is (= [{:broker 3 :from 10000000 :to 45000000}] (:outages r)))))
+    (testing "and when the signal had actually gone, which is later"
+      (let [r (lost (assoc (msg 1 30000000 30000100) :pub-broker 3)
+                    (conj events {:at 10400000 :type :broker-signalled :broker 3 :signal :kill}))]
+        (is (= [{:broker 3 :from 10000000 :signalled 10400000 :to 45000000}] (:outages r)))))
     (testing "or its subscriber was last on it"
       (let [r (lost (assoc (msg 1 30000000 30000100) :pub-broker 1)
                     (conj events {:at 5000000 :type :connected :client "s" :broker 3}))]
