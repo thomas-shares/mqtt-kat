@@ -324,3 +324,37 @@
           (finally
             ((:stop peer))
             (bridge/drop! live)))))))
+
+(deftest a-pubrel-for-a-publish-another-broker-took-delivers-it
+  ;; A QoS 2 publish is held where it was received until its PUBREL
+  ;; (§4.3.3). When that broker goes after its PUBREC, the publisher sends
+  ;; only the PUBREL again (§4.4), to whichever broker it reconnects to. The
+  ;; chaos runs lost each such message for every subscriber: acknowledged
+  ;; with a PUBCOMP, published nowhere. Here the broker that took it is
+  ;; stood in for by forgetting what this one holds for the publisher.
+  (let [topic    (tu/topic "pubrel-elsewhere")
+        received (atom [])
+        sub      (connect! (client received) (tu/client-id "rel-sub") true)
+        pub-id   (tu/client-id "rel-pub")
+        raw      (tu/client! 16 true)]
+    (try
+      (deref (:connack sub) 5000 nil)
+      (client/send-message (:client sub) {:packet-type :SUBSCRIBE :packet-identifier 1
+                                          :topics [{:qos 2 :topic-filter topic}]})
+      (deref (:suback sub) 5000 nil)
+      (client/send-message (:client raw) {:packet-type :CONNECT :protocol-name "MQTT" :protocol-version 4
+                                          :keep-alive 100 :clean-session? false :client-id pub-id})
+      (tu/expect! (:ch raw) :CONNACK 5000)
+      (client/send-message (:client raw) {:packet-type :PUBLISH :topic topic :qos 2 :packet-identifier 7
+                                          :payload (.getBytes "taken elsewhere" "UTF-8")
+                                          :retain? false :duplicate? false})
+      (tu/expect! (:ch raw) :PUBREC 5000)
+      ;; The broker that took it is gone, and what it held with it.
+      (swap! mqttkat.handlers/*inflight* dissoc [pub-id 7])
+      (client/send-message (:client raw) {:packet-type :PUBREL :packet-identifier 7})
+      (tu/expect! (:ch raw) :PUBCOMP 5000)
+      (is (tu/wait-until #(= ["taken elsewhere"] @received) 5000)
+          "acknowledged with a PUBCOMP, so it must have been published")
+      (finally
+        (tu/close! raw)
+        (close! sub)))))
