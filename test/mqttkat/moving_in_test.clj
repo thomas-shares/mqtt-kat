@@ -18,6 +18,7 @@
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [mqttkat.bridge :as bridge]
             [mqttkat.client :as client]
+            [mqttkat.handlers :as h]
             [mqttkat.rama.cluster :as cluster]
             [mqttkat.test-util :as tu])
   (:import [org.mqttkat MqttHandler]))
@@ -350,11 +351,30 @@
                                           :retain? false :duplicate? false})
       (tu/expect! (:ch raw) :PUBREC 5000)
       ;; The broker that took it is gone, and what it held with it.
-      (swap! mqttkat.handlers/*inflight* dissoc [pub-id 7])
+      (swap! h/*inflight* dissoc [pub-id 7])
       (client/send-message (:client raw) {:packet-type :PUBREL :packet-identifier 7})
       (tu/expect! (:ch raw) :PUBCOMP 5000)
       (is (tu/wait-until #(= ["taken elsewhere"] @received) 5000)
           "acknowledged with a PUBCOMP, so it must have been published")
+      (is (tu/wait-until #(empty? (cluster/queued *conn* (h/inbound-qos-2-id pub-id))) 5000)
+          "and the cluster holds it no longer")
+      (testing "a PUBLISH sent again to a broker that never had it is that message, not a second"
+        ;; The publisher had no PUBREC from the broker that went, so it sends
+        ;; the PUBLISH again (DUP) to the next.
+        (client/send-message (:client raw) {:packet-type :PUBLISH :topic topic :qos 2 :packet-identifier 8
+                                            :payload (.getBytes "sent twice" "UTF-8")
+                                            :retain? false :duplicate? false})
+        (tu/expect! (:ch raw) :PUBREC 5000)
+        (swap! h/*inflight* dissoc [pub-id 8])
+        (client/send-message (:client raw) {:packet-type :PUBLISH :topic topic :qos 2 :packet-identifier 8
+                                            :payload (.getBytes "sent twice" "UTF-8")
+                                            :retain? false :duplicate? true})
+        (tu/expect! (:ch raw) :PUBREC 5000)
+        (client/send-message (:client raw) {:packet-type :PUBREL :packet-identifier 8})
+        (tu/expect! (:ch raw) :PUBCOMP 5000)
+        (Thread/sleep 1000)
+        (is (= ["taken elsewhere" "sent twice"] @received) "published once")
+        (is (tu/wait-until #(empty? (cluster/queued *conn* (h/inbound-qos-2-id pub-id))) 5000)))
       (finally
         (tu/close! raw)
         (close! sub)))))

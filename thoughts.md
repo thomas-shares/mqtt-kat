@@ -4,6 +4,31 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261009
 
+### A QoS 2 message waits for its PUBREL on the cluster
+
+Run 110041 lost 3 messages, each for every subscriber of its topic: QoS 2
+publishes taken by a broker 14 to 120 ms before it was stopped. It sent the
+PUBREC and went; the publisher sent only the PUBREL again (§4.4), to the
+broker it came back to; that broker held nothing under the identifier,
+answered PUBCOMP, and published nothing. The message lived in one broker's
+`*inflight*` from PUBLISH to PUBREL, because §4.3.3 publishes on the PUBREL.
+
+Now a kept session's QoS 2 publish is also put on the cluster, on a queue
+beside the clients' queues under a name no client can have
+(`inbound-qos-2-id`: U+0000 is not allowed in an MQTT string), and the PUBREC
+waits for that write as a PUBACK waits for its own. A PUBREL that finds
+nothing here reads it from there and publishes it; either way it comes off
+before the PUBCOMP. A PUBLISH sent again with DUP to a broker that never had
+it is taken as the one the cluster holds, not as a second. A session that
+starts afresh lets go of what it held. The queue is the one the module
+already has, so the module is unchanged and nothing needs redeploying.
+
+Left: a broker that dies between publishing on the PUBREL and the take-off
+landing leaves it held, and a PUBREL sent again publishes it a second time.
+That window is milliseconds, against a loss to everyone. And a publisher
+that never sends its PUBREL and comes back clean on another broker leaves its
+held messages there until they are let go by hand.
+
 ### Moving in on one broker loses nothing
 
 `moving_in_test` stands in for the chaos runs' losses on a single broker with
