@@ -58,7 +58,18 @@ PUBREL for one this broker did not take reads the cluster for it for up to
 five seconds (`held-read-wait-millis`) before taking it as done, off the
 reader's thread, and a second PUBREL for it meanwhile is left to the first.
 A PUBREL for one that was done already, sent again because its PUBCOMP was
-lost, is answered five seconds late. Not run against a cluster yet. And a publisher
+lost, is answered five seconds late.
+
+Run 153440 lost 345, 252 of them resent, and still had 874 QoS 2 publishes
+in flight at the kills. Two things, both mine. The take-off, now fast, landed
+before what publishing the message wrote for away sessions, which is still
+slow: a broker killed in between had neither the held copy nor the copies,
+so it is now taken off only once those have landed. And the held writes
+still waited for one of the 256 queue-write permits, behind the queues of
+every subscriber that was away; they no longer do (`urgent?` lanes): there
+are only as many as QoS 2 messages in flight. The "19 still queued" at the
+end of the last three runs are the same 19, left from run 134336 on a
+cluster that was not reset. And a publisher
 that never sends its PUBREL and comes back clean on another broker leaves its
 held messages there until they are let go by hand.
 

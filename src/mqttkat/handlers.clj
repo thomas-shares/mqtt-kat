@@ -3915,12 +3915,18 @@
    marked and not yet published as had been caught published and not yet
    taken off — and a run lost 1,901 where the one before duplicated 614."
   [client-key client-id packet-identifier topic msg keys sweep?]
-  (let [held (java.util.ArrayList.)]
+  (let [held (java.util.ArrayList.)
+        all  (cond-> (set keys)
+               sweep? (into (map first) (inbound-all-on-cluster client-id packet-identifier)))]
     (publish-released! topic msg held)
-    (let [all (cond-> (set keys)
-                sweep? (into (map first) (inbound-all-on-cluster client-id packet-identifier)))]
-      (add-write! held (unhold! client-id (vec all))))
-    (finish-pubrel! client-key client-id packet-identifier held)))
+    ;; Taken off only once what publishing it wrote has landed: taken off
+    ;; first, by a write that lands in milliseconds while the copies for
+    ;; away sessions take hundreds, a broker killed in between had neither,
+    ;; and a run lost 345.
+    (once-handed-off! held
+                      #(let [after (java.util.ArrayList.)]
+                         (add-write! after (unhold! client-id (vec all)))
+                         (finish-pubrel! client-key client-id packet-identifier after)))))
 
 (def held-read-wait-millis
   "How long a PUBREL for a QoS 2 message this broker did not take reads the
@@ -3967,8 +3973,8 @@
         local     (get @*inflight* [client-id packet-identifier])
         held      (java.util.ArrayList.)]
     (cond
-      ;; A PUBREL before this one is reading it from the cluster, and
-      ;; answers for both.
+      ;; A PUBREL before this one is releasing it, here or from the
+      ;; cluster, and answers for both.
       (::reading? local) nil
 
       ;; Held here only: published now. From the connection the PUBREL came
@@ -3980,11 +3986,13 @@
       (do (publish-released! (:topic local) (assoc (:msg local) :client-key client-key) held)
           (finish-pubrel! client-key client-id packet-identifier held))
 
-      ;; Held on the cluster as well: published, and taken off there.
+      ;; Held on the cluster as well: published, and taken off there once
+      ;; that has landed. A PUBREL again meanwhile is left to this one.
       local
-      (release-held! client-key client-id packet-identifier (:topic local)
-                     (assoc (:msg local) :client-key client-key)
-                     [(::inbound-key local)] (::resent? local))
+      (do (swap! *inflight* update [client-id packet-identifier] assoc ::reading? true)
+          (release-held! client-key client-id packet-identifier (:topic local)
+                         (assoc (:msg local) :client-key client-key)
+                         [(::inbound-key local)] (::resent? local)))
 
       ;; Not here: the PUBLISH went to another broker, which went after its
       ;; PUBREC. Held on the cluster, it is published from there.
