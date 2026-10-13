@@ -60,6 +60,21 @@ elsewhere. That window is one depot append.
 This changes the module: `bb scripts/rama.bb update` before the brokers.
 Then `chaos/load.edn chaos/qos2.edn` for what it costs, before a chaos run.
 
+First runs of it. Chaos run 142955: resent messages lost 6 and delivered twice
+0, against 252 and 1,012 before. But 224 QoS 2 publishes were never
+acknowledged, 21 kept sessions were lost, and four subscribers lost blocks of
+a hundred or more away from any broker's death. The first is mine: a PUBREL
+for a message already being released was left to the first release, and one
+waiting on a slow write left the publisher's PUBREL unanswered for good. It
+is answered at once now, as a PUBREL for one already done always was. And the
+letting go was asked for on whatever thread the publish's writes landed on,
+often Rama's, where it could wait for a permit: it does not wait now. The
+load run with chaos/qos2.edn, 3,000 QoS 2 publishes a second asked for, got
+690, and Rama fell so far behind that the drain gave up after twenty minutes
+with 131 sessions lost. Whether holding is what made it fall behind, nothing
+says yet: `MQTTKAT_HOLD_QOS2=false` turns holding off, so the same jar can be
+run both ways.
+
 ## 20261009
 
 ### Moving in on one broker loses nothing

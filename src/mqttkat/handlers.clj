@@ -3039,6 +3039,15 @@
 ;    (log/trace "K" k)
 ;    (swap! outbound assoc (:client-key k) (:packet-identifier msg))))))
 
+(def hold-qos-2?
+  "Whether a kept session's QoS 2 messages are held on the cluster from
+   PUBLISH to PUBREL (held-on-cluster?). On unless -Dmqttkat.holdQos2=false
+   or MQTTKAT_HOLD_QOS2=false, which reaches brokers started by
+   scripts/brokers.bb: so one jar can be run both ways, to see what holding
+   costs under load."
+  (delay (not= "false" (or (System/getProperty "mqttkat.holdQos2")
+                           (System/getenv "MQTTKAT_HOLD_QOS2")))))
+
 (defn- held-on-cluster?
   "Whether a QoS 2 publish from `client` is held on the cluster from its
    PUBLISH to its PUBREL: on a cluster that holds them, from a client whose
@@ -3050,7 +3059,8 @@
    published nowhere. A clean session's messages in flight end with its
    connection, as its session does (§4.1)."
   [client]
-  (boolean (and (:hold! @session-source)
+  (boolean (and @hold-qos-2?
+                (:hold! @session-source)
                 client
                 (keep-session? client)
                 (not (bridge/bridge? (:client-id client))))))
@@ -3889,8 +3899,14 @@
         local     (get @*inflight* [client-id packet-identifier])
         held      (java.util.ArrayList.)]
     (cond
-      ;; A PUBREL before this one is releasing it, and answers for both.
-      (::releasing? local) nil
+      ;; A PUBREL before this one is releasing it: answered now, as one for
+      ;; a message already done was before anything was held. Left to the
+      ;; first, it waited on whatever that waited on, and a release that
+      ;; waited on a write that was slow to land left the publisher with
+      ;; its PUBREL never answered, however often it sent it.
+      (::releasing? local)
+      (send-buffer [client-key] (MqttPubComp/encode {:packet-type       :PUBCOMP
+                                                      :packet-identifier packet-identifier}))
 
       ;; Taken here. From the connection the PUBREL came on, not the one the
       ;; PUBLISH did: a client that reconnected in between, its session

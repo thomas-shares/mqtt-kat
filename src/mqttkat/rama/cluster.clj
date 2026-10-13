@@ -829,7 +829,10 @@
    the publisher's slot held a little longer; the PUBREC's, before it,
    held the message itself at risk, which is why hold! does not wait."
   [conn client-id packet-identifiers]
-  (record! conn (->unhold client-id packet-identifiers)))
+  ;; Not waiting for a permit: this is asked once what publishing the
+  ;; message wrote has landed, on whatever thread that landed on — one of
+  ;; Rama's, as often as not, which may be what gives a permit back.
+  (record! conn (->unhold client-id packet-identifiers) {:wait? false}))
 
 (defn held
   "The QoS 2 message `client-id` has held under `packet-identifier`, or

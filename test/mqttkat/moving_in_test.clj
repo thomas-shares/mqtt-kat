@@ -377,6 +377,14 @@
         (Thread/sleep 500)
         (is (= ["taken elsewhere" "sent twice"] @received) "published once")
         (is (tu/wait-until #(nil? (cluster/held *conn* pub-id 8)) 5000)))
+      (testing "a PUBREL for one already being released is answered at once"
+        ;; The first release may be waiting on a write that is slow to land;
+        ;; the publisher's PUBREL sent again is not left unanswered meanwhile.
+        (swap! h/*inflight* assoc [pub-id 10] {::h/releasing? true})
+        (try
+          (client/send-message (:client raw) {:packet-type :PUBREL :packet-identifier 10})
+          (tu/expect! (:ch raw) :PUBCOMP 1000)
+          (finally (swap! h/*inflight* dissoc [pub-id 10]))))
       (testing "a session that starts afresh lets go of what it held"
         (client/send-message (:client raw) {:packet-type :PUBLISH :topic topic :qos 2 :packet-identifier 9
                                             :payload (.getBytes "never released" "UTF-8")
