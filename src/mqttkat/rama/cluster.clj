@@ -718,13 +718,12 @@
    more than five seconds behind, with the batch in its depot already, and
    waited on that way every attempt again failed the same way and added
    the same batch to what the topology was behind on."
-  [w conn client-id lane records futs delay-ms ack-level urgent?]
-  ((if urgent? (fn [f] (f)) #(with-permit! w %))
+  [w conn client-id lane records futs delay-ms ack-level]
+  (with-permit! w
     (fn []
       (let [done (fn [_ e]
-                   (when-not urgent?
-                     (.release ^java.util.concurrent.Semaphore (:permits w))
-                     (run-waiting! w))
+                   (.release ^java.util.concurrent.Semaphore (:permits w))
+                   (run-waiting! w)
                    (cond
                      (nil? e)
                      (do (run! #(.complete ^CompletableFuture % nil) futs)
@@ -736,7 +735,7 @@
                      :else
                      (do (note-queue-failure! w client-id e)
                          (let [again (min (* 2 (long delay-ms)) (long (second queue-retry-millis)))
-                               retry ^Runnable #(send-batch! w conn client-id lane records futs again :append-ack urgent?)]
+                               retry ^Runnable #(send-batch! w conn client-id lane records futs again :append-ack)]
                            (.schedule ^java.util.concurrent.ScheduledExecutorService @retry-timer
                                       ^Runnable #(.execute ^java.util.concurrent.Executor @queue-executor retry)
                                       (long delay-ms) java.util.concurrent.TimeUnit/MILLISECONDS)))))]
@@ -757,18 +756,13 @@
                                               (assoc s :busy? false :gone? true))))]
     (if (seq (:ops before))
       (send-batch! w conn client-id lane (queue-records client-id (:ops before)) (:futs before)
-                   (first queue-retry-millis) (:ack-level before :ack) (:urgent? before))
+                   (first queue-retry-millis) :ack)
       (.remove ^java.util.concurrent.ConcurrentHashMap (:lanes w) client-id lane))))
 
 (defn- queue-op!
   "Put `op` in `client-id`'s lane, and start the lane if it was idle.
-   Returns a future that completes once Rama has it: once the topology has
-   it, or with `ack-level` :append-ack once the depot does. `urgent?` lanes
-   do not wait for one of queue-writes-in-flight: something waits on them
-   now, and there are only as many as there are QoS 2 messages in flight.
-   A lane is for one client, so every op in it asks the same."
-  ([conn client-id op] (queue-op! conn client-id op :ack false))
-  ([{:keys [queue-writer] :as conn} client-id op ack-level urgent?]
+   Returns a future that completes once Rama has it."
+  [{:keys [queue-writer] :as conn} client-id op]
   (let [w   queue-writer
         fut (java.util.concurrent.CompletableFuture.)]
     (loop []
@@ -779,12 +773,12 @@
                                                       s
                                                       (-> s (update :ops conj op)
                                                           (update :futs conj fut)
-                                                          (assoc :busy? true :ack-level ack-level :urgent? urgent?)))))]
+                                                          (assoc :busy? true)))))]
         (cond
           ;; Going idle as this arrived: the next lookup finds a new lane.
           (:gone? after)       (do (Thread/onSpinWait) (recur))
           (not (:busy? before)) (start-lane! w conn client-id lane))))
-    fut)))
+    fut))
 
 (defn enqueue!
   "Queue `message` for `client-id` under `key` (a new one when nil), and
@@ -799,26 +793,6 @@
   "Take `keys` off `client-id`'s queue. A future, as enqueue! returns."
   [conn client-id keys]
   (queue-op! conn client-id [:dequeue (vec keys)]))
-
-(defn hold!
-  "enqueue!, for a queue that is read only seconds after it is written:
-   the future completes once the depot has the write, not once the
-   topology has processed it. What a publisher's QoS 2 messages wait for
-   their PUBREL on (mqttkat.handlers/inbound-qos-2-id): its PUBREC waits on
-   this, and waiting on the topology, hundreds of ms under load, put a
-   thousand QoS 2 publishes in flight at a broker's death. Nor does it wait
-   for one of queue-writes-in-flight behind the queues of every subscriber
-   that is away: after the first change it still waited there, and still
-   had 874 in flight. The PUBREL that reads it on another broker comes after
-   the publisher has reconnected there, seconds on."
-  [conn client-id message key]
-  (let [{:keys [key message]} (->enqueue client-id message key)]
-    (queue-op! conn client-id [:enqueue key message false] :append-ack true)))
-
-(defn unhold!
-  "dequeue!, as hold! is enqueue!."
-  [conn client-id keys]
-  (queue-op! conn client-id [:dequeue (vec keys)] :append-ack true))
 
 (defn session
   "The record for `client-id`, or nil if it has never connected."
@@ -1690,8 +1664,6 @@
            :resume       (fn [client-id] (resume conn client-id))
            :enqueue!     (fn [client-id msg key] (enqueue! conn client-id msg key))
            :dequeue!     (fn [client-id keys] (dequeue! conn client-id keys))
-           :hold!        (fn [client-id msg key] (hold! conn client-id msg key))
-           :unhold!      (fn [client-id keys] (unhold! conn client-id keys))
            :queued       (fn [client-id limit] (queued conn client-id limit))
            :settled!     (fn [peer-id msg-keys]
                            (when-let [peer (get @(:brokers conn) peer-id)]

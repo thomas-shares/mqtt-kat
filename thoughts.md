@@ -2,76 +2,43 @@
 
 In this file will go my thoughts and ramblings about this project and what I have done and what I might do next.
 
+## 20261013
+
+### Holding QoS 2 on the cluster, tried and taken out
+
+Run 110041 lost three QoS 2 messages for every subscriber: the broker that
+took the PUBLISH went after its PUBREC, and the PUBREL sent again elsewhere
+(§4.4) found nothing and was answered with a PUBCOMP. The message lives in
+one broker's `*inflight*` from PUBLISH to PUBREL. `moving_in_test` has that
+case, and fails, as it should until it is fixed.
+
+Five changes tried holding the message on the cluster until its PUBREL, on
+the queue the module already has under a name no client can have, and all
+five are reverted:
+
+- Held, PUBREC after the write landed, taken off after publishing (run
+  134336): nothing lost, 614 resent messages delivered twice. The take-off
+  lands hundreds of ms after the publish under load, and a broker killed in
+  between leaves it to be published again; and the PUBREC waiting on a write
+  put 346 QoS 2 publishes in flight at the kills against 26 at QoS 1.
+- Marked as being released before publishing (run 140447): 1,901 lost. The
+  mark lands as slowly as the take-off, so it only moved the window, and it
+  was a second write in the publisher's one queue lane.
+- Written at :append-ack, read again for 5 s on a PUBREL elsewhere (run
+  153440): 345 lost; the fast take-off overtook the publish's own writes.
+- Taken off only after the publish landed, held writes outside the 256
+  queue permits (run 122607): the cluster stalled for 30 s after two kills,
+  QoS 1 as well, 2,009 lost. Hundreds of PUBRELs each scanning the
+  publisher's held queue every 250 ms, and writes no longer bounded, are the
+  likely cause; not shown which.
+
+What to keep for a second attempt: a structure of its own, keyed by
+publisher and identifier, so a PUBREL is one lookup and nothing scans or
+polls; its writes bounded like every other; publish, wait for what that
+wrote, then take it off; and a load run before a chaos run, since the
+PUBREC and PUBCOMP latency it adds is what widened every window.
+
 ## 20261009
-
-### A QoS 2 message waits for its PUBREL on the cluster
-
-Run 110041 lost 3 messages, each for every subscriber of its topic: QoS 2
-publishes taken by a broker 14 to 120 ms before it was stopped. It sent the
-PUBREC and went; the publisher sent only the PUBREL again (§4.4), to the
-broker it came back to; that broker held nothing under the identifier,
-answered PUBCOMP, and published nothing. The message lived in one broker's
-`*inflight*` from PUBLISH to PUBREL, because §4.3.3 publishes on the PUBREL.
-
-Now a kept session's QoS 2 publish is also put on the cluster, on a queue
-beside the clients' queues under a name no client can have
-(`inbound-qos-2-id`: U+0000 is not allowed in an MQTT string), and the PUBREC
-waits for that write as a PUBACK waits for its own. A PUBREL that finds
-nothing here reads it from there and publishes it; either way it comes off
-before the PUBCOMP. A PUBLISH sent again with DUP to a broker that never had
-it is taken as the one the cluster holds, not as a second. A session that
-starts afresh lets go of what it held. The queue is the one the module
-already has, so the module is unchanged and nothing needs redeploying.
-
-Left: a broker that dies between publishing on the PUBREL and the take-off
-landing leaves it held, and a PUBREL sent again publishes it a second time.
-
-That window was not milliseconds. Run 134336 lost nothing, for the first
-time, and delivered 614 resent QoS 2 messages twice: a write to the cluster
-under load lands hundreds of ms later, and the PUBREC waiting on one put 346
-QoS 2 publishes in flight at the kills against 26 at QoS 1.
-
-Marking the held message as being released before publishing it, and not
-publishing a marked one again, was tried next and taken out. The mark takes
-as long to land as the take-off, so as many messages were caught marked and
-not yet published as had been caught published and not yet taken off, and
-those were lost: run 140447 lost 1,901, every one resent, with 1,032 QoS 2
-publishes in flight at the kills. All of one publisher's held writes go
-through one lane of the queue writer, one batch at a time and each waited on
-until the topology has it, and the mark was a second write in that lane.
-What stays from that change: after a resend every copy held under the
-identifier is taken off, which ends the copies a resend left twice (the 19
-still queued at the end of both runs).
-
-So QoS 2 across a crash is at least once for now, in the window between the
-publish on the PUBREL and its take-off landing. Making it exactly once needs
-the copies to be recognised where they are delivered, by their message key,
-or the window made small.
-
-The window is made small now. The held writes, and their take-offs, go
-through `cluster/hold!` and `unhold!`, which are done once the depot has them
-(:append-ack) rather than once the topology has processed them. The PUBREC
-and the PUBCOMP wait for that, which is milliseconds, not the hundreds the
-topology takes under load. The cost is on the other side: a PUBREL that comes
-to another broker can find the topology not yet up to the message. So a
-PUBREL for one this broker did not take reads the cluster for it for up to
-five seconds (`held-read-wait-millis`) before taking it as done, off the
-reader's thread, and a second PUBREL for it meanwhile is left to the first.
-A PUBREL for one that was done already, sent again because its PUBCOMP was
-lost, is answered five seconds late.
-
-Run 153440 lost 345, 252 of them resent, and still had 874 QoS 2 publishes
-in flight at the kills. Two things, both mine. The take-off, now fast, landed
-before what publishing the message wrote for away sessions, which is still
-slow: a broker killed in between had neither the held copy nor the copies,
-so it is now taken off only once those have landed. And the held writes
-still waited for one of the 256 queue-write permits, behind the queues of
-every subscriber that was away; they no longer do (`urgent?` lanes): there
-are only as many as QoS 2 messages in flight. The "19 still queued" at the
-end of the last three runs are the same 19, left from run 134336 on a
-cluster that was not reset. And a publisher
-that never sends its PUBREL and comes back clean on another broker leaves its
-held messages there until they are let go by hand.
 
 ### Moving in on one broker loses nothing
 
