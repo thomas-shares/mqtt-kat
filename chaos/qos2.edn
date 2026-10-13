@@ -1,0 +1,11 @@
+;; An overlay: QoS 2 only, from persistent publishers, so every publish is
+;; held on the cluster from its PUBLISH to its PUBREL. For what holding costs
+;; under load, before a chaos run asks what it buys:
+;;
+;;   bb scripts/chaos.bb chaos/load.edn chaos/qos2.edn
+;;   bb scripts/chaos.bb chaos/broker-kill.edn chaos/qos2.edn
+;;
+;; Weights of 0, not missing keys: maps merge over the defaults.
+{:load {:qos            {0 0, 1 0, 2 1}
+        :sub-qos        {0 0, 1 1, 2 1}
+        :pub-persistent 1.0}}

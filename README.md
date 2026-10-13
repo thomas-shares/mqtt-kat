@@ -287,6 +287,7 @@ bb scripts/chaos.bb chaos/redirect.edn                               # clients g
 bb scripts/chaos.bb chaos/load.edn                                   # N brokers, X clients, Y seconds of load, no chaos
 bb scripts/chaos.bb chaos/broker-kill.edn                            # QoS 1 and 2 only, the busiest brokers killed, publishers resend
 bb scripts/chaos.bb chaos/broker-restart.edn                         # one broker on external Rama, killed with nothing to take over
+bb scripts/chaos.bb chaos/load.edn chaos/qos2.edn                    # overlay: QoS 2 only, persistent publishers
 ```
 
 `chaos/broker-kill.edn` and `chaos/broker-restart.edn` are for what a dying

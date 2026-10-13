@@ -146,6 +146,8 @@
      :brokers-state  PState client, the registry
      :retained-state PState client, shard -> topic -> retained message
      :queued-state   PState client, client-id -> key -> queued message
+     :held-state     PState client, client-id -> packet identifier -> a QoS 2
+                     message published and not yet released: see hold!
      :nudges-state   PState client, `$$nudges`: which clients connected
                      here have had something queued since
      :trie           atom, the in-memory copy of every subscription in the
@@ -193,6 +195,7 @@
      :settings-state (r/foreign-pstate cluster module-name "$$settings")
      :retained-state (r/foreign-pstate cluster module-name "$$retained")
      :queued-state  (r/foreign-pstate cluster module-name "$$queued")
+     :held-state    (r/foreign-pstate cluster module-name "$$held")
      :nudges-state  (r/foreign-pstate cluster module-name "$$nudges")
      :stats-state   (r/foreign-pstate cluster module-name "$$rama-stats")
      :detail-state  (r/foreign-pstate cluster module-name "$$broker-detail")
@@ -340,6 +343,20 @@
       :key       (or key (handlers/new-message-key))
       :message   (assoc message :queued-at now)
       :at        now})))
+
+(defn ->hold
+  "The record holding a QoS 2 `message` `client-id` published under
+   `packet-identifier`, until its PUBREL."
+  [client-id packet-identifier message]
+  {:event :hold :client-id client-id :packet-identifier (long packet-identifier)
+   :message message :at (System/currentTimeMillis)})
+
+(defn ->unhold
+  "The record letting go of `client-id`'s held QoS 2 messages under
+   `packet-identifiers`: released and published."
+  [client-id packet-identifiers]
+  {:event :unhold :client-id client-id :packet-identifiers (mapv long packet-identifiers)
+   :at (System/currentTimeMillis)})
 
 (defn ->dequeue
   "The record for messages taken off `client-id`'s queue, by key."
@@ -793,6 +810,32 @@
   "Take `keys` off `client-id`'s queue. A future, as enqueue! returns."
   [conn client-id keys]
   (queue-op! conn client-id [:dequeue (vec keys)]))
+
+(defn hold!
+  "Hold a QoS 2 message `client-id` published, until its PUBREL, wherever
+   that comes (mqttkat.handlers/qos-2-accept). A future, done once the
+   depot has it: the PUBREC waits on it, and waiting on the topology took
+   hundreds of ms under load. Through record!, so it is bounded like every
+   other session event."
+  [conn client-id packet-identifier message]
+  (record! conn (->hold client-id packet-identifier message) {:ack-level :append-ack}))
+
+(defn unhold!
+  "Let go of what hold! held under `packet-identifiers`. A future, done
+   once the topology has it, not only the depot: the PUBCOMP waits on it,
+   and a PUBREL sent again after a PUBCOMP that was lost, to another broker,
+   read the message there before the topology had let go of it, and
+   published it a second time. The PUBCOMP's wait costs nothing worse than
+   the publisher's slot held a little longer; the PUBREC's, before it,
+   held the message itself at risk, which is why hold! does not wait."
+  [conn client-id packet-identifiers]
+  (record! conn (->unhold client-id packet-identifiers)))
+
+(defn held
+  "The QoS 2 message `client-id` has held under `packet-identifier`, or
+   nil: one point read."
+  [{:keys [held-state]} client-id packet-identifier]
+  (r/foreign-select-one (keypath client-id (long packet-identifier)) held-state))
 
 (defn session
   "The record for `client-id`, or nil if it has never connected."
@@ -1664,6 +1707,9 @@
            :resume       (fn [client-id] (resume conn client-id))
            :enqueue!     (fn [client-id msg key] (enqueue! conn client-id msg key))
            :dequeue!     (fn [client-id keys] (dequeue! conn client-id keys))
+           :hold!        (fn [client-id pid msg] (hold! conn client-id pid msg))
+           :unhold!      (fn [client-id pids] (unhold! conn client-id pids))
+           :held         (fn [client-id pid] (held conn client-id pid))
            :queued       (fn [client-id limit] (queued conn client-id limit))
            :settled!     (fn [peer-id msg-keys]
                            (when-let [peer (get @(:brokers conn) peer-id)]

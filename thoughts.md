@@ -38,6 +38,28 @@ polls; its writes bounded like every other; publish, wait for what that
 wrote, then take it off; and a load run before a chaos run, since the
 PUBREC and PUBCOMP latency it adds is what widened every window.
 
+### The second attempt: `$$held`
+
+A PState of its own, client -> packet identifier -> message, written by two
+new session events, `:hold` and `:unhold`, on the client's own partition, and
+cleared with the session on a clean connect or its expiry. Through `record!`,
+so bounded by `appends-in-flight` like every session event. On a kept
+session's QoS 2 PUBLISH the broker holds it and the PUBREC waits for the
+depot only (:append-ack), which is milliseconds. On the PUBREL, where it was
+taken: published on the reader's thread as before, then once what that wrote
+has landed it is let go, and the PUBCOMP waits for the topology to have the
+letting go, not only the depot. A PUBREL sent again after a lost PUBCOMP read
+it before then and published it twice; `moving_in_test` caught that. A
+PUBREL elsewhere: a few point reads off the reader's thread, at 0, 250, 1000
+and 3000 ms, then published the same way, or answered when not there. A
+PUBLISH sent again (DUP) to a broker that never had it reads the held one and
+is taken as that. Left: a broker killed after what it published landed and
+before the letting go did publishes a second delivery from the PUBREL sent
+elsewhere. That window is one depot append.
+
+This changes the module: `bb scripts/rama.bb update` before the brokers.
+Then `chaos/load.edn chaos/qos2.edn` for what it costs, before a chaos run.
+
 ## 20261009
 
 ### Moving in on one broker loses nothing

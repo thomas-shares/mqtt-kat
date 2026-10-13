@@ -95,6 +95,8 @@
      {:event :enqueue      :client-id :messages :at     ; [[key message] ...], in order
                            [:if-kept?]}
      {:event :dequeue      :client-id :keys :at}
+     {:event :hold         :client-id :packet-identifier :message :at}
+     {:event :unhold       :client-id :packet-identifiers :at}
      {:event :retain       :topic :message :at}
      {:event :unretain     :topic :at}
      {:event :broker-up    :broker-id :incarnation :host :port :at}
@@ -512,6 +514,12 @@
     ;; message — its time and a random suffix — so they come back in the
     ;; order they were queued, and the same message queued twice is once.
     (declare-pstate s $$queued {String (map-schema String Object {:subindex? true})})
+    ;; client-id -> packet identifier -> a QoS 2 message the client
+    ;; published and has not yet released: held from its PUBLISH to its
+    ;; PUBREL, which can come to another broker than the PUBLISH did when the
+    ;; first went after its PUBREC (§4.4). Subindexed: one write to hold, one
+    ;; to let go, one point read to find.
+    (declare-pstate s $$held {String (map-schema Long Object {:subindex? true})})
     ;; client-id -> key -> when it was taken off its queue: for
     ;; taken-off-kept-millis, a key queued again stays off.
     (declare-pstate s $$taken-off {String (map-schema String Long {:subindex? true})})
@@ -619,6 +627,7 @@
         (local-select> [(keypath *client-id) (view count)] $$queued :> *dropped)
         (local-transform> [(keypath *client-id) NONE>] $$queued)
         (local-transform> [(keypath *client-id) NONE>] $$taken-off)
+        (local-transform> [(keypath *client-id) NONE>] $$held)
         (local-transform> [(keypath *client-id) NONE>] $$sessions)
         (count> (merge (session-deltas *current nil)
                        {"queued" (- *dropped) "expired" 1}))
@@ -796,6 +805,16 @@
         (local-transform> [(keypath *client-id *key) (termval *when)] $$taken-off)
         (count> (presence-delta "queued" *had nil))
 
+        ;; ── what a publisher has in flight at QoS 2 ────────────────────
+        (case> :hold)
+        (local-transform> [(keypath *client-id (get *record :packet-identifier))
+                           (termval (get *record :message))]
+                          $$held)
+
+        (case> :unhold)
+        (ops/explode (get *record :packet-identifiers) :> *pid)
+        (local-transform> [(keypath *client-id *pid) NONE>] $$held)
+
         ;; ── the sessions ───────────────────────────────────────────────
         (default>)
         ;; A :lost was decided on a sweep; the run it names may have announced
@@ -830,6 +849,8 @@
             ;; clean one's are discarded, here and below in the shards.
             (<<if *clean?
               (identity {} :> *kept)
+              ;; And what it had in flight as a publisher (§4.1).
+              (local-transform> [(keypath *client-id) NONE>] $$held)
               (else>)
               (identity *subs :> *kept))
             (local-transform> [(keypath *client-id)

@@ -18,6 +18,7 @@
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [mqttkat.bridge :as bridge]
             [mqttkat.client :as client]
+            [mqttkat.handlers :as h]
             [mqttkat.rama.cluster :as cluster]
             [mqttkat.test-util :as tu])
   (:import [org.mqttkat MqttHandler]))
@@ -350,11 +351,43 @@
                                           :retain? false :duplicate? false})
       (tu/expect! (:ch raw) :PUBREC 5000)
       ;; The broker that took it is gone, and what it held with it.
-      (swap! mqttkat.handlers/*inflight* dissoc [pub-id 7])
+      (swap! h/*inflight* dissoc [pub-id 7])
       (client/send-message (:client raw) {:packet-type :PUBREL :packet-identifier 7})
       (tu/expect! (:ch raw) :PUBCOMP 5000)
       (is (tu/wait-until #(= ["taken elsewhere"] @received) 5000)
           "acknowledged with a PUBCOMP, so it must have been published")
+      (is (tu/wait-until #(nil? (cluster/held *conn* pub-id 7)) 5000)
+          "and the cluster holds it no longer")
+      (testing "a PUBLISH sent again to a broker that never had it is that message, not a second"
+        (client/send-message (:client raw) {:packet-type :PUBLISH :topic topic :qos 2 :packet-identifier 8
+                                            :payload (.getBytes "sent twice" "UTF-8")
+                                            :retain? false :duplicate? false})
+        (tu/expect! (:ch raw) :PUBREC 5000)
+        (is (tu/wait-until #(some? (cluster/held *conn* pub-id 8)) 5000))
+        (swap! h/*inflight* dissoc [pub-id 8])
+        (client/send-message (:client raw) {:packet-type :PUBLISH :topic topic :qos 2 :packet-identifier 8
+                                            :payload (.getBytes "sent twice" "UTF-8")
+                                            :retain? false :duplicate? true})
+        (tu/expect! (:ch raw) :PUBREC 5000)
+        (client/send-message (:client raw) {:packet-type :PUBREL :packet-identifier 8})
+        (tu/expect! (:ch raw) :PUBCOMP 5000)
+        (testing "and a PUBREL sent again for it is answered, not published again"
+          (client/send-message (:client raw) {:packet-type :PUBREL :packet-identifier 8})
+          (tu/expect! (:ch raw) :PUBCOMP 6000))
+        (Thread/sleep 500)
+        (is (= ["taken elsewhere" "sent twice"] @received) "published once")
+        (is (tu/wait-until #(nil? (cluster/held *conn* pub-id 8)) 5000)))
+      (testing "a session that starts afresh lets go of what it held"
+        (client/send-message (:client raw) {:packet-type :PUBLISH :topic topic :qos 2 :packet-identifier 9
+                                            :payload (.getBytes "never released" "UTF-8")
+                                            :retain? false :duplicate? false})
+        (tu/expect! (:ch raw) :PUBREC 5000)
+        (is (tu/wait-until #(some? (cluster/held *conn* pub-id 9)) 5000))
+        (tu/close! raw)
+        (let [clean (tu/connect! "rel-pub" :id pub-id :clean-session? true)]
+          (try
+            (is (tu/wait-until #(nil? (cluster/held *conn* pub-id 9)) 5000))
+            (finally (tu/close! clean)))))
       (finally
         (tu/close! raw)
         (close! sub)))))
