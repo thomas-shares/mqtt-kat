@@ -1018,6 +1018,8 @@
   ;;  :hold!     (fn [client-id packet-identifier msg]) — optional, see
   ;;  :unhold!   (fn [client-id packet-identifiers])     qos-2-accept
   ;;  :held      (fn [client-id packet-identifier])
+  ;;  :claim!    (fn [client-id key msg]) — optional, see exactly-once-key
+  ;;  :queued-entry (fn [client-id key] -> msg or nil)
   ;;  :queued    (fn [client-id limit] -> [[key msg] ...]), the first `limit`
   ;;             queued now, oldest first
   ;;  :settled!  (fn [broker-id msg-keys])
@@ -1044,6 +1046,50 @@
    them decide the client is away it is on the client's queue once."
   []
   (format "%013d-%s" (System/currentTimeMillis) (subs (str (java.util.UUID/randomUUID)) 0 8)))
+
+(defn parse-topic-filters
+  "The topic filters in `s`, comma separated, blanks left out: nil for
+   none."
+  [s]
+  (when s
+    (seq (into [] (comp (map str/trim) (remove str/blank?)) (str/split s #",")))))
+
+(def exactly-once-filters
+  "The topic filters whose QoS 2 messages a cluster delivers exactly once
+   across broker failures: -Dmqttkat.exactlyOnceTopics=a/#,b/+/c, or
+   MQTTKAT_EXACTLY_ONCE_TOPICS, which reaches brokers started by
+   scripts/brokers.bb. None by default. See exactly-once-key."
+  (delay (parse-topic-filters (or (System/getProperty "mqttkat.exactlyOnceTopics")
+                                  (System/getenv "MQTTKAT_EXACTLY_ONCE_TOPICS")))))
+
+(defn exactly-once-topic?
+  "Whether QoS 2 messages on `topic` are delivered exactly once."
+  ([topic] (exactly-once-topic? @exactly-once-filters topic))
+  ([filters topic]
+   (boolean (and topic (some #(intent/filter-matches? % topic) filters)))))
+
+(defn- exactly-once-key
+  "The key a delivery of `msg` to the client at `key` is claimed under on
+   the cluster before it is sent, or nil when it is not: a QoS 2 message
+   with a message key, on a topic delivered exactly once, to a session that
+   outlives its connection, with a cluster to claim on.
+
+   Delivered live, a message went out under an identifier only this broker
+   knew. When it died before the client completed it, the message was
+   delivered again, from the cluster's queue or from the publisher's resend,
+   under another identifier, and the client, which tells a repeat by its
+   identifier (§4.3.3), took it twice. Claimed, the cluster has the
+   identifier before the client has the message, a second sender is refused
+   it (or given the same identifier), and the PUBREC is recorded before the
+   PUBREL goes: whoever resumes the session sends the same message again
+   under the same identifier, or the PUBREL, and never a new one."
+  [key msg]
+  (when (and (:claim! @session-source)
+             (= 2 (:qos msg))
+             (seq @exactly-once-filters)
+             (exactly-once-topic? (:topic msg))
+             (keep-session? (get @*clients* key)))
+    (or (::cluster-key msg) (::msg-key msg))))
 
 (def reconcile-window-millis
   "How long after a persistent client connects its live deliveries are also
@@ -2539,6 +2585,101 @@
       (log/warn "refusing a QoS 1/2 message from a" (name from) "for" client-id
                 "- its pending queue is full at" pending-limit "- counting the rest for" refused-log-ms "ms"))))
 
+(defonce ^:private claim-executor
+  ;; Where a claim's answer is acted on: off Rama's own threads, since it
+  ;; reads the queue back.
+  (java.util.concurrent.Executors/newVirtualThreadPerTaskExecutor))
+
+(declare taken-back! drain-pending! read-soon!)
+
+(defn- for-claim
+  "`msg` as the cluster's queue keeps it, in flight under
+   `packet-identifier`: as hand-over-unacknowledged! puts it there."
+  [msg packet-identifier]
+  (cond-> (assoc (select-keys msg [:topic :payload :qos :properties])
+                 :packet-identifier packet-identifier)
+    (::queued-at msg) (assoc :queued-at (::queued-at msg))))
+
+(defn- claimed!
+  "The cluster's answer to the claim on `k` for `msg`, in flight here under
+   `packet-identifier`: `entry`, what the client's queue there holds under
+   `k` now, nil when the client has completed it, ::unknown when it could
+   not be read.
+
+   Under this identifier, not yet released: sent, as it would have been at
+   once. Under another, or released: this identifier goes back, and the
+   message goes out as the entry says, under the identifier it names or as
+   its PUBREL (resend-handed-over!). That other sender was a broker that
+   died, or this one for a connection that has gone: the client is here
+   now, and the same identifier from two senders is one message to it.
+   Completed: not sent at all. Unread: sent, at least once, as before."
+  [key client-id k msg packet-identifier entry]
+  (let [mine?  (or (= ::unknown entry)
+                   (and (= packet-identifier (:packet-identifier entry))
+                        (not (:released? entry))))
+        here?  #(identical? msg (get-in (some-> (existing-outbound client-id) deref)
+                                        [:inflight packet-identifier]))]
+    (cond
+      ;; Gone from here meanwhile: a hand-over put it on the cluster's queue
+      ;; under this identifier, and the next resume sends it.
+      (not (and (live-key? key) (here?)))
+      (trace/trace! client-id msg "claimed, and gone from here meanwhile" k packet-identifier)
+
+      mine?
+      (let [sent? (send-publish! key msg packet-identifier)]
+        (trace/trace! client-id msg (if sent? "sent, claimed" "not sent, claimed: expired or too large")
+                      k packet-identifier)
+        (if sent?
+          (note-delivered! client-id msg)
+          (when (taken-back! client-id packet-identifier msg)
+            (settled! client-id (assoc msg ::cluster-key k))
+            (drain-pending! key client-id))))
+
+      :else
+      (when (taken-back! client-id packet-identifier msg)
+        (if entry
+          (do (trace/trace! client-id msg "claim refused: in flight under" k (:packet-identifier entry))
+              ;; Its identifier still taken here, or the window full: left
+              ;; on the cluster's queue, and read from there again. Not had,
+              ;; as it was when it was taken from there, or no read sent it.
+              (when-not (resend-handed-over! key client-id k entry)
+                (let [connect-id (get-in @*clients* [key :connect-id])]
+                  (swap! catching-up (fn [m] (if (= connect-id (get-in m [client-id :connect-id]))
+                                               (update-in m [client-id :had] dissoc k)
+                                               m)))
+                  (read-soon! client-id connect-id catch-up-again-millis))))
+          (do (trace/trace! client-id msg "claim refused: the client has completed it" k)
+              (note-delivered! client-id msg)))
+        (drain-pending! key client-id)))))
+
+(defn- send-claimed!
+  "send-publish!, for a delivery the cluster is first told of when it is to
+   be exactly once (exactly-once-key): then claimed there under
+   `packet-identifier`, and sent once the cluster has it, by claimed!, and
+   true at once, the identifier staying in flight meanwhile. A message sent
+   again (DUP) is not claimed again: its identifier is the one it had."
+  [key client-id msg packet-identifier]
+  (if-let [k (and (not (:duplicate? msg)) (exactly-once-key key msg))]
+    (let [{:keys [claim! queued-entry]} @session-source
+          answer (fn [e]
+                   (let [entry (if e
+                                 ::unknown
+                                 (try (queued-entry client-id k)
+                                      (catch Throwable t
+                                        (log/warn t "could not read the claim on" k "for" client-id)
+                                        ::unknown)))]
+                     (claimed! key client-id k msg packet-identifier entry)))
+          fut    (try (claim! client-id k (for-claim msg packet-identifier))
+                      (catch Throwable t
+                        (log/warn t "could not claim" k "for" client-id)
+                        (CompletableFuture/failedFuture t)))]
+      (trace/trace! client-id msg "claiming" k packet-identifier)
+      (.whenCompleteAsync ^CompletableFuture fut
+                          (reify BiConsumer (accept [_ _ e] (answer e)))
+                          ^java.util.concurrent.Executor claim-executor)
+      true)
+    (send-publish! key msg packet-identifier)))
+
 (declare deliver-now-or-queue!)
 
 (defn- deliver-or-queue!
@@ -2629,7 +2770,7 @@
       ;; messages that were discarded rather than sent and the subscriber
       ;; eventually stops being delivered to entirely.
       ;; Discarded as expired or too large counts as delivered: nobody will be.
-      (let [sent? (send-publish! key msg packet-identifier)]
+      (let [sent? (send-claimed! key client-id msg packet-identifier)]
         (trace/trace! client-id msg (if sent? "sent" "not sent: expired or too large") packet-identifier)
         (if sent?
           (note-delivered! client-id msg)
@@ -2709,7 +2850,7 @@
           ;; finds, so the identifier has to come back here as well — otherwise a
           ;; session that was away long enough returns to a window full of
           ;; messages it will never be sent.
-          (let [sent? (send-publish! key msg packet-identifier)]
+          (let [sent? (send-claimed! key client-id msg packet-identifier)]
             (trace/trace! client-id msg (if sent? "sent from pending" "not sent from pending: expired")
                           packet-identifier)
             (when-not sent?
@@ -2758,7 +2899,7 @@
   [key client-id]
   (when-let [[packet-identifier msg] (take-pending! client-id
                                                     (receive-maximum-of key))]
-    (when-not (send-publish! key msg packet-identifier)
+    (when-not (send-claimed! key client-id msg packet-identifier)
       (release-packet-identifier! client-id packet-identifier)))
   (when (<= (pending-count client-id) resume-threshold)
     (when-let [subscriber (connection-of key)]
@@ -3057,13 +3198,21 @@
    than the PUBLISH did, when the first went after its PUBREC (§4.4): with
    nothing held there, it was answered with a PUBCOMP and the message was
    published nowhere. A clean session's messages in flight end with its
-   connection, as its session does (§4.1)."
-  [client]
-  (boolean (and @hold-qos-2?
-                (:hold! @session-source)
-                client
-                (keep-session? client)
-                (not (bridge/bridge? (:client-id client))))))
+   connection, as its session does (§4.1).
+
+   Held on a topic delivered exactly once whether or not the rest are: the
+   publisher's resend after a broker died is otherwise a second message.
+   Without a topic, for a PUBREL, whenever the broker may hold any."
+  ([client] (held-on-cluster? client ::any))
+  ([client topic]
+   (boolean (and (:hold! @session-source)
+                 client
+                 (keep-session? client)
+                 (not (bridge/bridge? (:client-id client)))
+                 (or @hold-qos-2?
+                     (if (= ::any topic)
+                       (seq @exactly-once-filters)
+                       (exactly-once-topic? topic)))))))
 
 (defn- for-cluster
   "A received publish as the cluster can keep it: without the connection it
@@ -3091,7 +3240,7 @@
   (let [client    (get @*clients* client-key)
         client-id (:client-id client)
         local?    (contains? @*inflight* [client-id packet-identifier])
-        cluster?  (held-on-cluster? client)
+        cluster?  (held-on-cluster? client topic)
         {:keys [hold! held]} @session-source
         taken     (when (and cluster? duplicate? (not local?))
                     (try (held client-id packet-identifier)
@@ -3740,18 +3889,32 @@
   ;; the cluster's queue is done there.
   ;; Marked, too, so that a resume sends the PUBREL again rather than the
   ;; message, and a hand-over does not queue it (§4.4).
-  (let [client-id (:client-id (get @*clients* client-key))]
+  ;; A message delivered exactly once (exactly-once-key) stays on the
+  ;; cluster's queue until the PUBCOMP instead, released, and the PUBREL
+  ;; waits for the cluster to have that: a broker that died before the
+  ;; PUBCOMP left the client holding the identifier, and whoever resumed
+  ;; the session, with nothing to say so, sent another message under it.
+  (let [client-id (:client-id (get @*clients* client-key))
+        msg       (some-> (existing-outbound client-id) deref (get-in [:inflight packet-identifier]))
+        ;; Again on a PUBREC sent again: the PUBREL waits for it to land.
+        k         (when msg (exactly-once-key client-key msg))
+        write     (when k
+                    ((:claim! @session-source) client-id k
+                     (assoc (for-claim msg packet-identifier) :released? true)))]
     (when-let [a (existing-outbound client-id)]
       (let [[before _] (swap-vals! a (fn [state]
                                        (if (get-in state [:inflight packet-identifier])
                                          (update-in state [:inflight packet-identifier]
-                                                    assoc ::released? true)
+                                                    #(cond-> (assoc % ::released? true)
+                                                       k (assoc ::release-key k ::settle-on-pubcomp? true)))
                                          state)))]
         (when-let [msg (get-in before [:inflight packet-identifier])]
-          (settled! client-id msg)))))
-  (send-buffer [client-key]
-               (MqttPubRel/encode
-                {:packet-type :PUBREL :packet-identifier packet-identifier})))
+          (when-not (or k (::settle-on-pubcomp? msg))
+            (settled! client-id msg)))))
+    (once-done! write
+                #(send-buffer [client-key]
+                              (MqttPubRel/encode
+                               {:packet-type :PUBREL :packet-identifier packet-identifier})))))
 
 (defn qos-2-send
   ([keys topic msg] (qos-2-send keys topic msg false))
@@ -3946,10 +4109,13 @@
   #_(log/debug "received PUBCOMP:" (dissoc msg :client-key))
   (let [client-id (:client-id (get @*clients* client-key))
         released  (some-> (existing-outbound client-id) deref (get-in [:inflight packet-identifier]))]
-    ;; A PUBREL a hand-over left on the cluster's queue is done there now.
+    ;; A PUBREL a hand-over left on the cluster's queue is done there now,
+    ;; and so is a message delivered exactly once, kept there till now.
     (when-let [k (::release-key released)]
-      (when-let [{:keys [dequeue!]} @session-source]
-        (dequeue! client-id [k])))
+      (if (::settle-on-pubcomp? released)
+        (settled! client-id (assoc released ::cluster-key k))
+        (when-let [{:keys [dequeue!]} @session-source]
+          (dequeue! client-id [k]))))
     (if (release-packet-identifier! client-id packet-identifier)
       (drain-pending! client-key client-id)
       (log/debug "PUBCOMP from" client-id "for identifier" packet-identifier

@@ -95,6 +95,7 @@
      {:event :enqueue      :client-id :messages :at     ; [[key message] ...], in order
                            [:if-kept?]}
      {:event :dequeue      :client-id :keys :at}
+     {:event :claim        :client-id :key :message :at}
      {:event :hold         :client-id :packet-identifier :message :at}
      {:event :unhold       :client-id :packet-identifiers :at}
      {:event :retain       :topic :message :at}
@@ -772,6 +773,15 @@
               (case> (some? *taken))
               (count> {"queue-taken-off" 1})
 
+              ;; In flight under an identifier, by a hand-over or a claim:
+              ;; not put back as a message with none, which went out under
+              ;; a new one, nor as one not yet released once it is. Either
+              ;; the client took for a second message.
+              (case> (and> (some? (get *had :packet-identifier))
+                           (or> (nil? (get *message :packet-identifier))
+                                (and> (get *had :released?) (not (get *message :released?))))))
+              (count> {"queue-kept-in-flight" 1})
+
               (case> (or> *had (< *n queue-limit)))
               (local-transform> [(keypath *client-id *key) (termval *message)] $$queued)
               (count> (presence-delta "queued" *had true))
@@ -804,6 +814,34 @@
         (local-transform> [(keypath *client-id *key) NONE>] $$queued)
         (local-transform> [(keypath *client-id *key) (termval *when)] $$taken-off)
         (count> (presence-delta "queued" *had nil))
+
+        ;; ── a delivery claimed, for a topic delivered exactly once ─────
+        ;; A broker about to send `key` to the client under a packet
+        ;; identifier says so here first, and sends only if the entry then
+        ;; carries that identifier (mqttkat.handlers/send-claimed!): refused
+        ;; when the client has completed it ($$taken-off), or when it is in
+        ;; flight under another identifier already, which the client could
+        ;; not tell from a new message. The same identifier again is the
+        ;; same delivery: taken, unless it would undo a release (the PUBREC
+        ;; recorded, with :released?, before the PUBREL goes).
+        (case> :claim)
+        (get *record :key :> *key)
+        (get *record :message :> *message)
+        (local-select> [(keypath *client-id *key)] $$taken-off :> *taken)
+        (local-select> [(keypath *client-id *key)] $$queued :> *had)
+        (get *had :packet-identifier :> *had-id)
+        (<<cond
+          (case> (some? *taken))
+          (count> {"claim-refused" 1})
+
+          (case> (and> (some? *had-id)
+                       (or> (not= *had-id (get *message :packet-identifier))
+                            (and> (get *had :released?) (not (get *message :released?))))))
+          (count> {"claim-refused" 1})
+
+          (default>)
+          (local-transform> [(keypath *client-id *key) (termval *message)] $$queued)
+          (count> (presence-delta "queued" *had true)))
 
         ;; ── what a publisher has in flight at QoS 2 ────────────────────
         (case> :hold)

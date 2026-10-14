@@ -351,6 +351,10 @@
         lost-by-session (volatile! {})
         dup-by     (volatile! {})
         dup-resent (volatile! {})
+        ;; QoS 2 lost and repeated, on the topics the brokers deliver
+        ;; exactly once (:exactly-once, filters) and on the rest.
+        by-eo      (volatile! {})
+        eo?        (fn [m] (boolean (some #(match? % (:topic m)) (:exactly-once opts))))
         lost-resent (volatile! 0)
         lost       (volatile! 0)
         lost-sent  (volatile! {})
@@ -385,6 +389,8 @@
           ;; stays: which of the two lost it says much about where.
           (vswap! lost-by-session update (if (:persistent? (get clients client)) :kept :clean) (fnil inc 0))
           (vswap! lost inc)
+          (when (== 2 (long required))
+            (vswap! by-eo update-in [(eo? m) :lost] (fnil inc 0)))
           (when (pos? (long (:resends m 0))) (vswap! lost-resent inc))
           ;; When the lost ones were sent, by the second, and this client's
           ;; first and last: a loss throughout the run is another bug from one
@@ -442,6 +448,8 @@
               1 (when (> n 1) (bump! 3 (dec n)))
               (when (> n 1)
                 (vswap! dup-by update possible (fnil inc 0))
+                (when (== 2 (long possible))
+                  (vswap! by-eo update-in [(eo? m) :duplicate] (fnil inc 0)))
                 (when (pos? (long (:resends m 0)))
                   (vswap! dup-resent update possible (fnil inc 0)))
                 (add! {:kind :duplicate :client client :msg id :qos possible :times n
@@ -473,6 +481,7 @@
      :lost-by-session @lost-by-session
      :duplicate-by @dup-by
      :duplicate-resent @dup-resent
+     :qos2-by-exactly-once @by-eo
      :lost-resent @lost-resent
      :lost       @lost
      :lost-sent  @lost-sent
@@ -518,6 +527,7 @@
                                (update :lost-by-session #(merge-with + % (:lost-by-session r)))
                                (update :duplicate-by #(merge-with + % (:duplicate-by r)))
                                (update :duplicate-resent #(merge-with + % (:duplicate-resent r)))
+                               (update :qos2-by-exactly-once #(merge-with (partial merge-with +) % (:qos2-by-exactly-once r)))
                                (update :lost-resent + (:lost-resent r))
                                (update :lost-sent #(merge-with + % (:lost-sent r)))
                                (cond-> (pos? (long (:lost r)))
@@ -526,7 +536,7 @@
                          {:stats {:required 0 :delivered-required 0 :deliveries 0
                                   :qos1-repeats 0 :optional-delivered 0}
                           :counts {} :lost-by (sorted-map) :lost-route {} :lost-clients {}
-                          :lost-by-session {} :duplicate-by (sorted-map) :duplicate-resent (sorted-map) :lost-resent 0 :lost-sent {}
+                          :lost-by-session {} :duplicate-by (sorted-map) :duplicate-resent (sorted-map) :qos2-by-exactly-once {} :lost-resent 0 :lost-sent {}
                           :lost-spans {}}
                          (map vector clients per))
         counts   (atom (:counts merged))
@@ -558,6 +568,10 @@
      :duplicate-by (:duplicate-by merged)
      ;; Of those, the ones whose publisher had sent the message twice.
      :duplicate-resent (:duplicate-resent merged)
+     ;; {exactly-once? {:lost n :duplicate n}}: QoS 2 owed and lost, and
+     ;; delivered more than once, on the topics named in :exactly-once and
+     ;; on the rest. Both under false when none are named.
+     :qos2-by-exactly-once (:qos2-by-exactly-once merged)
      ;; How many of the lost were of a message its publisher sent twice.
      :lost-resent (:lost-resent merged)
      ;; The ten clients that lost the most: the report keeps only the first

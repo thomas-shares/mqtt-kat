@@ -488,6 +488,21 @@
           (> now deadline)                          (how :gave-up)
           :else                                     (recur last quiet-since))))))
 
+(defn exactly-once-filters
+  "The topic filters the brokers deliver QoS 2 on exactly once, for the
+   check to count those apart: :exactly-once under :check, a vector, or
+   else MQTTKAT_EXACTLY_ONCE_TOPICS, comma separated, as the brokers
+   started from the same shell by scripts/brokers.bb read it. The chaos
+   topics are chaos/<run-id>/t<n>, so chaos/+/t0,chaos/+/t1 names two."
+  [chk]
+  (or (:exactly-once chk)
+      (some->> (System/getenv "MQTTKAT_EXACTLY_ONCE_TOPICS")
+               (#(str/split % #","))
+               (map str/trim)
+               (remove str/blank?)
+               seq
+               vec)))
+
 (defn- summarise [result max-violations]
   (-> result
       (update :violations
@@ -602,7 +617,8 @@
           t0     (System/nanoTime)
           result (check/check snap {:subscribe-settle (* 1000 (long (:subscribe-settle-ms chk)))
                                     :clean-grace      (* 1000 (long (:clean-grace-ms chk)))
-                                    :max-violations   (:max-violations chk)})
+                                    :max-violations   (:max-violations chk)
+                                    :exactly-once     (exactly-once-filters chk)})
           _      (println (format "  checked in %.1f s" (/ (- (System/nanoTime) t0) 1e9)))
           path   (str (io/file dir (str run-id ".edn")))
           counters (apply merge-with + (map c/counters (:clients state)))]
@@ -630,7 +646,7 @@
                       (shutdown-agents)
                       (System/exit 2)))]
     (pp/pprint (select-keys result [:ok? :drain :stats :counts :lost-by :lost-route :lost-by-session
-                                    :lost-by-client :lost-span :lost-by-sent :duplicate-by :duplicate-resent :lost-resent :outages :published-by-qos :in-flight-at-kill :clients :report]))
+                                    :lost-by-client :lost-span :lost-by-sent :duplicate-by :duplicate-resent :qos2-by-exactly-once :lost-resent :outages :published-by-qos :in-flight-at-kill :clients :report]))
     (doseq [v (take 10 (:violations result))]
       (println " " (pr-str (dissoc v :context))))
     (shutdown-agents)

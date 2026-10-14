@@ -304,6 +304,22 @@ be down together). A QoS 1 publish sent twice may arrive twice; a QoS 2 one
 may not. Note that a weight map in a scenario merges over the defaults, so
 leaving QoS 0 out takes `{0 0, 1 1, 2 1}`.
 
+On a cluster, QoS 2 can be delivered exactly once across broker failures, for
+the topics you name: `-Dmqttkat.exactlyOnceTopics=a/#,b/+/c`, or
+`MQTTKAT_EXACTLY_ONCE_TOPICS`, which `scripts/brokers.bb` passes to the
+brokers it starts. Each delivery to a kept session is then recorded on the
+cluster under its packet identifier before it is sent, and its PUBREC before
+the PUBREL goes, so whichever broker resumes the session sends the same
+message under the same identifier, never a second one. The rest of the topics
+are unaffected. Set the same variable in the shell that runs `chaos.bb`, and
+the report's `:qos2-by-exactly-once` counts QoS 2 lost and duplicated on
+those topics apart from the rest. The chaos topics are `chaos/<run-id>/t<n>`:
+
+```
+export MQTTKAT_EXACTLY_ONCE_TOPICS=chaos/+/t0,chaos/+/t1,chaos/+/t2,chaos/+/t3,chaos/+/t4
+bb scripts/chaos.bb chaos/broker-kill.edn chaos/qos2.edn
+```
+
 By default a chaos client starts on broker `i mod N` and comes back to any
 broker that is up. `:setup :redirect` hands that to the brokers: the runner
 sets the cluster's redirect policy (`:round-robin` or `:load`) through broker

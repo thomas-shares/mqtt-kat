@@ -11,7 +11,7 @@
 (defn- run
   "The verdict on one subscription of client \"s\" to `filter` and the
    publishes and deliveries given. Times are in microseconds."
-  [{:keys [sub publishes deliveries persistent? sessions-lost events]
+  [{:keys [sub publishes deliveries persistent? sessions-lost events exactly-once]
     :or   {persistent? true}}]
   (check/check {:publishes     publishes
                 :subscriptions {"s" (if (map? sub) [sub] sub)}
@@ -19,7 +19,7 @@
                 :deliveries    {"s" deliveries}
                 :sessions-lost (or sessions-lost [])
                 :events        (vec events)}
-               {:subscribe-settle 100 :clean-grace 1000}))
+               {:subscribe-settle 100 :clean-grace 1000 :exactly-once exactly-once}))
 
 (def ^:private sub {:filter "t/1" :qos 2 :sub-sent 0 :from 10})
 
@@ -406,3 +406,17 @@
       (let [r (lost (assoc (msg 1 50000000 50000100) :pub-broker 3 :resends 1) events)]
         (is (= 1 (:lost-resent r)))
         (is (true? (:publisher-resent? (first (:violations r)))))))))
+
+;; QoS 2 lost and repeated are counted apart on the topics the brokers
+;; deliver exactly once, so that one run compares the two.
+(deftest qos-2-is-counted-by-whether-its-topic-is-delivered-exactly-once
+  (let [sub2 {:filter "t/+" :qos 2 :sub-sent 0 :from 10}
+        r    (fn [eo]
+               (run {:sub sub2 :exactly-once eo
+                     :publishes {[0 1] (msg 2 500 600)
+                                 [0 2] (assoc (msg 2 500 600) :topic "t/2")
+                                 [0 3] (assoc (msg 2 500 600) :topic "t/3")}
+                     :deliveries {[0 1] [{:at 650 :qos 2} {:at 700 :qos 2}]
+                                  [0 2] [{:at 650 :qos 2}]}}))]
+    (is (= {true {:duplicate 1} false {:lost 1}} (:qos2-by-exactly-once (r ["t/1"]))))
+    (is (= {false {:duplicate 1 :lost 1}} (:qos2-by-exactly-once (r nil))))))

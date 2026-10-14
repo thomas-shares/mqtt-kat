@@ -344,6 +344,13 @@
       :message   (assoc message :queued-at now)
       :at        now})))
 
+(defn ->claim
+  "The record claiming the delivery of `message` to `client-id` under `key`,
+   in flight under the :packet-identifier it carries, :released? once the
+   client has answered it with a PUBREC."
+  [client-id key message]
+  {:event :claim :client-id client-id :key key :message message :at (System/currentTimeMillis)})
+
 (defn ->hold
   "The record holding a QoS 2 `message` `client-id` published under
    `packet-identifier`, until its PUBREL."
@@ -810,6 +817,19 @@
   "Take `keys` off `client-id`'s queue. A future, as enqueue! returns."
   [conn client-id keys]
   (queue-op! conn client-id [:dequeue (vec keys)]))
+
+(defn claim!
+  "Claim the delivery of `message` to `client-id` under `key`: a future,
+   done once the topology has it, after which queued-entry says whether
+   the claim was taken. See :claim in mqttkat.rama.module, and
+   mqttkat.handlers/send-claimed!."
+  [conn client-id key message]
+  (record! conn (->claim client-id key message)))
+
+(defn queued-entry
+  "What `client-id`'s queue holds under `key`, or nil: one point read."
+  [{:keys [queued-state]} client-id key]
+  (r/foreign-select-one (keypath client-id key) queued-state))
 
 (defn hold!
   "Hold a QoS 2 message `client-id` published, until its PUBREL, wherever
@@ -1730,6 +1750,8 @@
            :hold!        (fn [client-id pid msg] (hold! conn client-id pid msg))
            :unhold!      (fn [client-id pids] (unhold! conn client-id pids))
            :held         (fn [client-id pid] (held conn client-id pid))
+           :claim!       (fn [client-id key msg] (claim! conn client-id key msg))
+           :queued-entry (fn [client-id key] (queued-entry conn client-id key))
            :queued       (fn [client-id limit] (queued conn client-id limit))
            :settled!     (fn [peer-id msg-keys]
                            (when-let [peer (get @(:brokers conn) peer-id)]

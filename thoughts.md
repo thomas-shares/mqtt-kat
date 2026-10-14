@@ -4,6 +4,61 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261014
 
+### Exactly once, for the topics that ask for it
+
+Holding a publisher's QoS 2 messages on the cluster stopped the losses, but
+not the duplicates: a chaos run with only QoS 2 still delivered some hundreds
+twice. A live delivery went out under a packet identifier only the broker
+sending it knew. When that broker died before the subscriber completed the
+exchange, the message reached the subscriber again, from the cluster's queue
+or from the publisher's resend, under another identifier. The subscriber
+tells a repeat by its identifier (§4.3.3), so it took the message twice.
+
+Now, for the topics named in `-Dmqttkat.exactlyOnceTopics=a/#,b/+/c` (or
+`MQTTKAT_EXACTLY_ONCE_TOPICS`, which `scripts/brokers.bb` passes on), a
+delivery to a kept session works like this:
+
+- It is claimed first. The message, under its message key and with the
+  identifier it will be sent under, goes on the subscriber's queue on the
+  cluster, and it is sent only once the cluster has it under that identifier.
+- The module refuses a claim when the subscriber has completed the message
+  (`$$taken-off`), or when the message is in flight under another identifier.
+  The broker that was refused gives its identifier back and sends what the
+  queue says instead, under the identifier the queue names, or as its PUBREL.
+  If the queue's identifier is still busy here, it waits on the queue for
+  another read. The same identifier from two senders is one message to the
+  subscriber.
+- The PUBREC is recorded before the PUBREL goes, as a release under the same
+  key. A broker that dies before the PUBCOMP leaves the next one the PUBREL to
+  send, not the message. A broker that sent another message under that
+  identifier would have the subscriber take it for the one it held.
+- The PUBCOMP takes the message off the queue, and `$$taken-off` refuses any
+  later claim or enqueue of it.
+- An enqueue no longer replaces an entry that is in flight under an
+  identifier with one that has none. That is how a copy queued by a broker
+  that took the subscriber for away was sent under a fresh identifier.
+- On those topics the publisher's side is held as well, whatever
+  `mqttkat.holdQos2` says, so a publisher's resend after a broker dies is the
+  same message.
+
+Other topics keep what they had: one Rama read and two writes per delivery is
+not something every topic should pay for. It is per broker for now, set at
+startup. How an administrator names the topics, and whether that belongs on
+the cluster, is for later.
+
+The chaos check counts QoS 2 losses and duplicates on these topics apart from
+the rest (`:qos2-by-exactly-once`), from the same variable or from
+`:check :exactly-once`. The chaos topics are `chaos/<run-id>/t<n>`, so
+`chaos/+/t0,...,chaos/+/t4` covers half of the ten.
+
+Not yet measured: what it costs under load, and whether a broker killed
+mid-run leaves duplicates on those topics. Two gaps I know of:
+
+- Claims are answered asynchronously, so two messages to one subscriber can
+  overtake each other.
+- A message whose claim was refused and whose identifier is busy waits for
+  the next read of the queue: two seconds, not at once.
+
 ### What holding QoS 2 costs
 
 After a Rama reset, with fresh brokers each time, `chaos/load.edn
