@@ -905,6 +905,23 @@
   (let [^String text (binding [*print-length* nil *print-level* nil] (pr-str m))]
     (.getBytes text "UTF-8")))
 
+(defonce ^:private partial-entries-seen (java.util.concurrent.atomic.AtomicBoolean. false))
+
+(defn- whole-entry
+  "A subscription entry from a shard, or nil when it is not a whole one: one
+   with no :topic-filter has nothing to file it under. The module wrote such
+   entries once — a connect or disconnect updating the entry of a filter the
+   shard no longer had (see :connect in mqttkat.rama.module) — and a broker
+   that met one threw on every change to its shard, and never started.
+   Taken as not there, with a warning the first time."
+  [e]
+  (if (or (nil? e) (:topic-filter e))
+    e
+    (do (when (.compareAndSet ^java.util.concurrent.atomic.AtomicBoolean partial-entries-seen false true)
+          (log/warn "a subscription entry with no topic filter, taken as not there:" (pr-str e)
+                    "- a Rama reset clears them"))
+        nil)))
+
 (defn- apply-shard-change!
   "Bring the copy of the cluster's subscriptions from what shard `old` held
    to what `new` holds.
@@ -932,7 +949,7 @@
                       (if (identical? ov nv)
                         acc
                         (reduce (fn [[t index touched :as acc] c]
-                                  (let [oe (get ov c) ne (get nv c)]
+                                  (let [oe (whole-entry (get ov c)) ne (whole-entry (get nv c))]
                                     (if (= oe ne)
                                       acc
                                       [(cond-> t

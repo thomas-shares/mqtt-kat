@@ -2,6 +2,22 @@
 
 In this file will go my thoughts and ramblings about this project and what I have done and what I might do next.
 
+## 20261014
+
+### A subscription entry with no filter stopped a broker starting
+
+A broker would not start: every change to a subscriptions shard threw a
+NullPointerException filing an entry under a nil topic filter. The entry was
+`{:connected? true :broker-id ...}` and nothing else. The module wrote it: a
+`:connect` marks the client's entry in each shard connected, and a
+`:disconnect` marks it not, by `keypath`, which makes the entry when it is not
+there. When the session record still named a filter the shard no longer had
+(the two are on different partitions), that made an entry of two keys. Weeks
+of chaos runs on one cluster with no reset had left some. Both now update
+only an entry that is there (`must`), and a broker takes an entry with no
+`:topic-filter` as not there, with one warning, so what is in a cluster
+already does not stop it. A Rama reset clears them.
+
 ## 20261013
 
 ### Holding QoS 2 on the cluster, tried and taken out

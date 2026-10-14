@@ -2318,3 +2318,15 @@
       (is (= (map #(str "k" %) (range 8)) (mapcat #(map first (:messages %)) (filter :messages rs)))
           "every message, in order")
       (is (:if-kept? (last rs))))))
+
+(deftest a-subscription-entry-with-no-filter-is-taken-as-not-there
+  ;; The module once wrote such entries, a connect or disconnect updating an
+  ;; entry its shard no longer had, and every broker watching the shard
+  ;; threw on them and could not start.
+  (let [conn  {:trie (atom (trie/make-trie))
+               :view (atom {:trie (trie/make-trie) :v 0 :index {}})}
+        whole {:filter "a/#" :topic-filter "a/#" :qos 1 :client-id "c1" :broker-id "b" :connected? true}
+        part  {:connected? true :broker-id "b"}]
+    (#'cluster/apply-shard-change! conn nil {"a/#" {"c1" whole "c2" part}})
+    (is (= #{"c1"} (set (map :client-id (cluster/matching-subscriptions conn "a/x"))))
+        "the whole one filed, the other left out, and nothing thrown")))

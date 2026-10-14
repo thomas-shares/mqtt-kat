@@ -892,8 +892,12 @@
               (local-transform> [(keypath *shard *filter *client-id) NONE>] $$subscriptions)
               (local-transform> [(keypath *shard *filter) (pred empty?) NONE>] $$subscriptions)
               (else>)
-              ;; Back, and possibly on another broker: the entries say so.
-              (local-transform> [(keypath *shard *filter *client-id)
+              ;; Back, and possibly on another broker: the entries say so —
+              ;; the ones there are. `must`, not keypath: an entry that is not
+              ;; there was made by keypath, with these two keys and no
+              ;; :topic-filter, and every broker watching the shard threw on
+              ;; it and could not start.
+              (local-transform> [(keypath *shard *filter) (must *client-id)
                                  (multi-path [:connected? (termval true)]
                                              [:broker-id (termval *b)])]
                                 $$subscriptions))
@@ -971,7 +975,8 @@
               (else>)
               ;; Still subscribed, not here: a publish that matches is for
               ;; the queue, not the wire.
-              (local-transform> [(keypath *shard *filter *client-id :connected?) (termval false)]
+              ;; The entry if it is there: see the :connect above.
+              (local-transform> [(keypath *shard *filter) (must *client-id) :connected? (termval false)]
                                 $$subscriptions))
             (local-select> [(keypath *shard *filter *client-id)] $$subscriptions :> *has)
             (count> (presence-delta "subscriptions" *had *has)))
