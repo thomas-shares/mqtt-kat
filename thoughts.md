@@ -4,6 +4,22 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261014
 
+### What holding QoS 2 costs
+
+After a Rama reset, with fresh brokers each time, `chaos/load.edn
+chaos/qos2.edn` (400 publishers, 1,600 subscribers, QoS 2 only, 3,000 a second
+asked for, which saturates three brokers either way):
+
+| | published | delivered | Rama enqueues | every promise kept |
+|---|---|---|---|---|
+| holding off (134652) | 156,987 | 23.28M | 8,067 | yes |
+| holding on (135313) | 130,631 | 21.58M | 16,881 | yes |
+
+About 17 % fewer publishes a second at saturation; nothing lost or duplicated
+either way. The subscribers that stopped at 170 s in the runs before the reset
+did not stop in either: whether the entries with no filter were behind that is
+not shown.
+
 ### A subscription entry with no filter stopped a broker starting
 
 A broker would not start: every change to a subscriptions shard threw a
