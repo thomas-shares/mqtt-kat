@@ -4,6 +4,29 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261014
 
+### The module outgrew a thread's stack
+
+The first chaos run with exactly-once set did not test it at all. The brokers
+were already running, started before the `export`, so none of them had the
+setting: its duplicates split evenly between the topics named and the rest.
+Then the two brokers the run killed never came back, and the runner could
+not read Rama's counts. Both failed with a StackOverflowError while the Rama
+module's topology compiled.
+
+That needs a little under 1 MB of stack, the JVM's default for a thread. The
+module before this change got in at 1 MB and failed at 896 KB, so it was on
+the edge already, and the claim branch pushed it over. lein runs with
+`-Xss4m`, which is why the tests never saw it. The fix has two parts:
+
+- The queue's and the claim's decisions are plain functions (`queue-verdict`,
+  `claim-verdict`), each with one `count>`, not a branch per outcome with its
+  own count. The module loads at 1 MB again.
+- `brokers.bb` and `chaos.bb` pass `-Xss4m`, as lein does.
+
+`brokers.bb start` now records the MQTTKAT_ settings each broker started
+with. A broker already running whose settings differ from the shell's gets
+a warning to stop it first.
+
 ### Exactly once, for the topics that ask for it
 
 Holding a publisher's QoS 2 messages on the cluster stopped the losses, but

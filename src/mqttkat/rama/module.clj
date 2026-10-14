@@ -200,6 +200,54 @@
   [counts at]
   (assoc (or counts {}) "at" (long at)))
 
+(defn- undoes-in-flight?
+  "Whether putting `message` on a queue where `had` is would undo what the
+   client was sent: `had` is in flight under an identifier, and `message`
+   names none, or another, or is not released where `had` is. Each of those
+   went out as a second message the client could not tell from the first."
+  [had message]
+  (let [id (:packet-identifier had)]
+    (boolean (and (some? id)
+                  (or (not= id (:packet-identifier message))
+                      (and (:released? had) (not (:released? message))))))))
+
+(defn queue-verdict
+  "What an :enqueue does with `message` under a key: \"put\" it on the
+   queue, or the counter that says why not. Not when the client has
+   completed it (`taken`): a write that reached the depot twice, or late,
+   or another broker's after the take-off, put back, sent QoS 2 messages
+   again to a client that had completed them, some forty times each. Nor
+   over an entry in flight under an identifier, a hand-over's or a claim's,
+   with one that has none, which went out under a new one, or with one not
+   yet released once it is. Nor past `limit`."
+  [taken had message n limit]
+  (cond
+    (some? taken)                       "queue-taken-off"
+    (and (some? (:packet-identifier had))
+         (or (nil? (:packet-identifier message))
+             (and (:released? had) (not (:released? message)))))
+                                        "queue-kept-in-flight"
+    (or had (< (long n) (long limit)))  "put"
+    :else                               "queue-refused"))
+
+(defn claim-verdict
+  "What a :claim does: \"put\" the message on the queue, in flight under
+   its identifier, or \"claim-refused\": the client has completed it
+   (`taken`), or it is in flight under another identifier already, or the
+   claim would undo its release (undoes-in-flight?)."
+  [taken had message]
+  (if (or (some? taken) (undoes-in-flight? had message))
+    "claim-refused"
+    "put"))
+
+(defn verdict-counts
+  "The counts a verdict moves: the queue's size for one \"put\", the
+   verdict's own counter otherwise."
+  [verdict had]
+  (if (= "put" verdict)
+    (presence-delta "queued" had true)
+    {verdict 1}))
+
 (defmacro ^:private count>
   "Add `deltas` to this task's `$$counts`. A macro, not a ramaop: a ramaop
    cannot see the topology's PStates. <<atomic keeps the three segments one
@@ -764,30 +812,13 @@
             (local-select> [(keypath *client-id) (view count)] $$queued :> *n)
             (local-select> [(keypath *client-id *key)] $$queued :> *had)
             (local-select> [(keypath *client-id *key)] $$taken-off :> *taken)
-            (<<cond
-              ;; The client has it: a write that reached the depot more than
-              ;; once — tried again after a timeout — or late, or another
-              ;; broker's, landing after the take-off. Put back, a chaos run
-              ;; sent QoS 2 messages again to a client that had completed
-              ;; them, some forty times each.
-              (case> (some? *taken))
-              (count> {"queue-taken-off" 1})
-
-              ;; In flight under an identifier, by a hand-over or a claim:
-              ;; not put back as a message with none, which went out under
-              ;; a new one, nor as one not yet released once it is. Either
-              ;; the client took for a second message.
-              (case> (and> (some? (get *had :packet-identifier))
-                           (or> (nil? (get *message :packet-identifier))
-                                (and> (get *had :released?) (not (get *message :released?))))))
-              (count> {"queue-kept-in-flight" 1})
-
-              (case> (or> *had (< *n queue-limit)))
-              (local-transform> [(keypath *client-id *key) (termval *message)] $$queued)
-              (count> (presence-delta "queued" *had true))
-
-              (default>)
-              (count> {"queue-refused" 1})))
+            ;; Decided in plain Clojure (queue-verdict): written out here
+            ;; as branches, each with its own count, the topology no longer
+            ;; compiled in a thread's default stack.
+            (queue-verdict *taken *had *message *n queue-limit :> *verdict)
+            (<<if (= *verdict "put")
+              (local-transform> [(keypath *client-id *key) (termval *message)] $$queued))
+            (count> (verdict-counts *verdict *had)))
           ;; Then, once, the broker it is connected on is told: it has
           ;; read its queue already, on the CONNECT, and this came after.
           (<<if (and> (get *session :connected?) (get *session :broker-id))
@@ -829,19 +860,10 @@
         (get *record :message :> *message)
         (local-select> [(keypath *client-id *key)] $$taken-off :> *taken)
         (local-select> [(keypath *client-id *key)] $$queued :> *had)
-        (get *had :packet-identifier :> *had-id)
-        (<<cond
-          (case> (some? *taken))
-          (count> {"claim-refused" 1})
-
-          (case> (and> (some? *had-id)
-                       (or> (not= *had-id (get *message :packet-identifier))
-                            (and> (get *had :released?) (not (get *message :released?))))))
-          (count> {"claim-refused" 1})
-
-          (default>)
-          (local-transform> [(keypath *client-id *key) (termval *message)] $$queued)
-          (count> (presence-delta "queued" *had true)))
+        (claim-verdict *taken *had *message :> *verdict)
+        (<<if (= *verdict "put")
+          (local-transform> [(keypath *client-id *key) (termval *message)] $$queued))
+        (count> (verdict-counts *verdict *had))
 
         ;; ── what a publisher has in flight at QoS 2 ────────────────────
         (case> :hold)

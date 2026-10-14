@@ -40,6 +40,14 @@
 (defn pid-file [n] (fs/path run-dir (str "broker-" n ".pid")))
 (defn log-file [n] (fs/path run-dir (str "broker-" n ".log")))
 
+(defn env-file [n] (fs/path run-dir (str "broker-" n ".env")))
+
+(defn mqttkat-env
+  "The MQTTKAT_ settings in this shell, which a broker started from it reads
+   (MQTTKAT_EXACTLY_ONCE_TOPICS, MQTTKAT_HOLD_QOS2, ...)."
+  []
+  (into (sorted-map) (filter #(str/starts-with? (key %) "MQTTKAT_")) (System/getenv)))
+
 (defn pid-of
   "The pid in broker-n's pid file, if the process is still there."
   [n]
@@ -84,7 +92,14 @@
         taken (remove port-free? [mqtt web])]
     (cond
       (pid-of n)
-      (println (format "broker-%d already running (pid %d)" n (pid-of n)))
+      (let [had (when (fs/exists? (env-file n))
+                  (read-string (slurp (str (env-file n)))))]
+        (println (format "broker-%d already running (pid %d)" n (pid-of n)))
+        ;; A setting exported after it started never reaches it: a chaos run
+        ;; asked for exactly-once delivery and ran without it.
+        (when (if had (not= had (mqttkat-env)) (seq (mqttkat-env)))
+          (println (format "  started with %s, not this shell's %s - `bb scripts/brokers.bb stop` first for those to apply"
+                           (if had (pr-str had) "settings not recorded") (pr-str (mqttkat-env))))))
 
       (seq taken)
       (println (format "broker-%d not started: port %s is in use — something else, or a broker this script does not know about (`ss -ltnp | grep %d`)"
@@ -95,7 +110,10 @@
             argv (concat ["java"
                           "--add-opens" "java.base/java.lang=ALL-UNNAMED"
                           "--enable-native-access=ALL-UNNAMED"
-                          (str "-Xmx" heap)]
+                          (str "-Xmx" heap)
+                          ;; As project.clj: the Rama module's topology is
+                          ;; compiled on load, and needs about 1m of stack.
+                          "-Xss4m"]
                          (rama-flags rama conductor)
                          [(str "-Dmqttkat.brokerId=broker-" n)
                           (str "-Dmqttkat.advertise=" advertise)
@@ -110,6 +128,7 @@
                         argv)
             pid  (.pid (:proc proc))]
         (spit (str (pid-file n)) (str pid))
+        (spit (str (env-file n)) (pr-str (mqttkat-env)))
         ;; Up when the console is listening: that is the last thing -main starts.
         (let [deadline (+ (System/currentTimeMillis) 60000)]
           (loop []

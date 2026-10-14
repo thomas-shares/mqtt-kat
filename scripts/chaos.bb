@@ -116,7 +116,7 @@
                                ""))
                     2)
                 ;; run
-                (let [status (apply sh! "java" (str "-Xmx" (:heap runner)) "--add-opens" "java.base/java.lang=ALL-UNNAMED"
+                (let [status (apply sh! "java" (str "-Xmx" (:heap runner)) "-Xss4m" "--add-opens" "java.base/java.lang=ALL-UNNAMED"
                                     "--enable-native-access=ALL-UNNAMED"
                                     "-cp" jar "clojure.main" "-m" "mqttkat.chaos.runner" paths)]
                   (println (case status
