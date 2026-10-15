@@ -488,6 +488,44 @@
         (println "  could not read the brokers' Rama latencies:" (or (ex-message t) (str t)))
         nil))))
 
+(defn- leftovers
+  "On an external Rama, what is still queued for `client-ids`: client-id ->
+   {:n how many, :kinds {kind n}, :first an entry}, a kind being :claimed
+   (in flight under an identifier, as a claim or a hand-over puts it),
+   :released (its PUBREC recorded) or :queued (a plain copy, waiting for a
+   read). Says whether what was left behind is deliveries never taken off
+   or messages never read back. Nil without Rama."
+  [cfg client-ids]
+  (when (and (seq client-ids) (= "external" (some-> (get-in cfg [:setup :brokers :rama]) name)))
+    (try
+      (let [open   (requiring-resolve 'com.rpl.rama/open-cluster-manager)
+            mname  (requiring-resolve 'com.rpl.rama/get-module-name)
+            pstate (requiring-resolve 'com.rpl.rama/foreign-pstate)
+            close  (requiring-resolve 'com.rpl.rama/close!)
+            select (eval '(fn [ps k] (com.rpl.rama/foreign-select [(com.rpl.rama.path/keypath k)
+                                                                   (com.rpl.rama.path/sorted-map-range-from-start 1000)
+                                                                   com.rpl.rama.path/ALL]
+                                                                  ps)))
+            module @(requiring-resolve 'mqttkat.rama.module/MqttKatModule)
+            c      (open {"conductor.host" (or (get-in cfg [:setup :brokers :conductor]) "localhost")})]
+        (try
+          (let [ps (pstate c (mname module) "$$queued")]
+            (into (sorted-map)
+                  (for [id client-ids
+                        :let [entries (select ps id)]
+                        :when (seq entries)]
+                    [id {:n     (count entries)
+                         :kinds (frequencies (map (fn [[_ m]] (cond (:released? m) :released
+                                                                    (:packet-identifier m) :claimed
+                                                                    :else :queued))
+                                                  entries))
+                         :first (let [[k m] (first entries)]
+                                  [k (dissoc m :payload :properties)])}])))
+          (finally (close c))))
+      (catch Throwable t
+        (println "  could not read what was left queued:" (or (ex-message t) (str t)))
+        nil))))
+
 (defn- drain!
   "Wait until nothing new has been acknowledged or delivered for :drain-ms,
    or :max-drain-ms has gone by. On an external Rama, until its queue
@@ -648,7 +686,9 @@
           _      (println (format "  checked in %.1f s" (/ (- (System/nanoTime) t0) 1e9)))
           path   (str (io/file dir (str run-id ".edn")))
           counters (apply merge-with + (map c/counters (:clients state)))
-          latencies (rama-latency (:cfg state))]
+          latencies (rama-latency (:cfg state))
+          ;; At most 1,000 a client: enough to say what kind they are.
+          left      (leftovers (:cfg state) (keys (:lost-by-client result)))]
       (run! c/close! (:clients state))
       (with-open [w (io/writer path)]
         (binding [*out* w]
@@ -662,7 +702,7 @@
                       :result   (summarise result (:max-violations chk))
                       :events   (:events snap)})))
       (assoc result :report path :run-id run-id :clients counters :drain @(:drain state)
-             :rama-latency latencies))))
+             :rama-latency latencies :left-queued left))))
 
 (defn -main [& paths]
   (when (empty? paths)
@@ -674,7 +714,7 @@
                       (shutdown-agents)
                       (System/exit 2)))]
     (pp/pprint (select-keys result [:ok? :drain :stats :counts :lost-by :lost-route :lost-by-session
-                                    :lost-by-client :lost-span :lost-by-sent :duplicate-by :duplicate-resent :qos2-by-exactly-once :lost-resent :outages :published-by-qos :in-flight-at-kill :clients :rama-latency :report]))
+                                    :lost-by-client :lost-span :lost-by-sent :duplicate-by :duplicate-resent :qos2-by-exactly-once :lost-resent :outages :published-by-qos :in-flight-at-kill :clients :rama-latency :left-queued :report]))
     (doseq [v (take 10 (:violations result))]
       (println " " (pr-str (dissoc v :context))))
     (shutdown-agents)

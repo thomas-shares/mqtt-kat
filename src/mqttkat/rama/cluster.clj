@@ -1356,6 +1356,16 @@
       {:brokers brokers :skip skip :queue queue :leaving leaving
        :holders holders :groups groups})))
 
+(def forward-ack?
+  "Whether a publisher's acknowledgement waits for each peer to take its
+   forwarded copy (taken-or-handed-back). Off unless
+   -Dmqttkat.forwardAck=true or MQTTKAT_FORWARD_ACK=true: on, the first
+   runs stalled every publisher for up to forward-taken-wait-millis at a
+   time and lost far more than it saved (thoughts.md, 20261015), and it
+   stays off until it is understood why."
+  (delay (= "true" (or (System/getProperty "mqttkat.forwardAck")
+                       (System/getenv "MQTTKAT_FORWARD_ACK")))))
+
 (def forward-taken-wait-millis
   "The longest a publisher's acknowledgement waits for a peer to take a
    forwarded copy (see taken-or-handed-back): a link neither acknowledged
@@ -1475,9 +1485,9 @@
                                     (queue-for holders true)))]
           (doseq [{:keys [client-id]} holders]
             (trace/trace! client-id traced "copy sent to" peer-id))
-          (let [[taken on-taken on-lost] (if on-lost
+          (let [[taken on-taken on-lost] (if (and on-lost @forward-ack?)
                                            (taken-or-handed-back on-lost)
-                                           [nil nil nil])]
+                                           [nil nil on-lost])]
             (handlers/hand-off! taken)
             (if-let [peer (get @brokers peer-id)]
               (bridge/send-to! broker-id peer-id peer group-keys topic

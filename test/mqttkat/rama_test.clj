@@ -890,8 +890,7 @@
                       (testing "QoS 1"
                         (client/send-message (:client pub) (publish-msg "bridge/t" "one" 1 11))
                         (tu/expect-eventually! (:ch pub) :PUBACK 5000)
-                        (is (= 2 (count (publishes)))
-                            "acknowledged once the peer has its copy, not before")
+                        (is (tu/wait-until #(= 2 (count (publishes)))))
                         (is (= 1 (:qos (second (publishes)))))
                         (is (some? (:packet-identifier (second (publishes)))))
                         (is (= "one" (tu/payload-str (tu/expect-eventually! (:ch local) :PUBLISH)))))

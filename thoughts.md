@@ -4,6 +4,28 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261015
 
+### The forwarded-copy wait made it worse, and is off for now
+
+With it, run 184748 (load, nothing killed) lost 471,704 messages, 201,376 of
+them on clean sessions. Run 190907 (broker-kill, 500 a second, Rama
+healthy: probes at 50 ms) stalled its publishers from ten seconds in,
+before anything was killed, in flat stretches of about thirty seconds,
+which is the cap. The duplicates in the load run are gone (claims and
+releases waited out).
+
+What I think couples it all: a broker stops reading a connection whose
+copies fill a subscriber's queue (`throttle-publisher!`), and for copies
+that came over a bridge, that connection is the whole bridge. Before, the
+sending broker's bridge queue took up the slack. With the wait, every
+publisher with a copy for that broker waits on its slowest subscriber. How
+that turns into losses on clean sessions I cannot see from the summaries.
+
+So `forward-ack?` now keeps it off unless `MQTTKAT_FORWARD_ACK=true`. The
+runner also prints `:left-queued`: for the clients that lost the most, what
+is still on their queue, by kind. That tells claims never taken off apart
+from copies nobody read back. Both runs ended with tens of thousands queued
+and every client connected.
+
 ### A forwarded copy is a hand-off
 
 The publisher's acknowledgement waited for the broker's writes to Rama, but
