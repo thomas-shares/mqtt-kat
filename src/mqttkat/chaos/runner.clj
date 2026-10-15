@@ -704,6 +704,33 @@
       (assoc result :report path :run-id run-id :clients counters :drain @(:drain state)
              :rama-latency latencies :left-queued left))))
 
+(defn traced
+  "For the first `n` violations of `kind` whose client `trace` follows, a
+   pattern as MQTTKAT_TRACE gives the brokers (see mqttkat.trace), every
+   trace line the brokers wrote about that message, from the logs in
+   `log-dir`, in time order. [violation lines] each; nil without `trace`."
+  [trace violations kind n log-dir]
+  (when-let [re (some-> trace str/trim not-empty re-pattern)]
+    (let [files (->> (.listFiles (io/file log-dir))
+                     (filter #(re-matches #"broker-\d+\.log" (.getName ^java.io.File %))))
+          vs    (->> violations
+                     (filter #(and (= kind (:kind %)) (:msg %) (re-find re (str (:client %)))))
+                     (take n))
+          needles (into {} (for [{:keys [client msg] :as v} vs
+                                 :let [[pub sq] msg]]
+                             [v [(str "trace " client " " pub ":" sq " ")
+                                 (str "trace - " pub ":" sq " ")]]))
+          found (into {} (map (fn [v] [v (java.util.ArrayList.)])) vs)]
+      (when (seq vs)
+        (doseq [^java.io.File f files]
+          (with-open [r (io/reader f)]
+            (doseq [line (line-seq r)
+                    [v ns] needles
+                    :when (some #(str/includes? line %) ns)]
+              (.add ^java.util.ArrayList (get found v) [line (.getName f)]))))
+        ;; By the line, which starts with its time, not by the file.
+        (for [v vs] [v (mapv (fn [[line f]] (str f " " line)) (sort-by first (vec (get found v))))])))))
+
 (defn -main [& paths]
   (when (empty? paths)
     (println "usage: clojure -m mqttkat.chaos.runner config.edn [more.edn ...]")
@@ -717,5 +744,14 @@
                                     :lost-by-client :lost-span :lost-by-sent :duplicate-by :duplicate-resent :qos2-by-exactly-once :lost-resent :outages :published-by-qos :in-flight-at-kill :clients :rama-latency :left-queued :report]))
     (doseq [v (take 10 (:violations result))]
       (println " " (pr-str (dissoc v :context))))
+    ;; What the brokers did with the first few lost messages, when asked
+    ;; to follow their subscribers: where each one's trail ends.
+    (doseq [[v lines] (traced (System/getenv "MQTTKAT_TRACE") (:violations result)
+                                   :lost 5 "logs/brokers")]
+      (println)
+      (println "  lost" (pr-str (select-keys v [:client :msg :topic :sent :acked :pub-broker :sub-broker])))
+      (if (seq lines)
+        (doseq [l lines] (println "   " l))
+        (println "    (no trace lines: not followed, or never reached a broker that was)")))
     (shutdown-agents)
     (System/exit (if (:ok? result) 0 1))))

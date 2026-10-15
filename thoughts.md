@@ -4,6 +4,26 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261015
 
+### Without the forwarded-copy wait: fewer losses, still too many
+
+Runs 213545 and 214031, broker-kill with the wait off, lost 9,853 and 4,233,
+against about 1,400 in 153258 and some twenty before exactly-once. The
+duplicates on the exactly-once topics were 23 and 42, not none.
+
+- **Not a queue nobody read:** `:left-queued` was empty for every client
+  that lost messages. The 82,812 still queued was the same after both runs,
+  so it was left from earlier runs (3.1.1 sessions do not expire).
+- **Not refusals or hand-backs:** the brokers logged no full-queue
+  refusals, and only a few dozen bridge hand-backs.
+- **A few subscribers lose for a long time:** `s0`, `s21` and `s3` lost
+  from 12 s to 180 s. That looks like a subscriber that stops being
+  delivered to, or takes new messages for ones it already holds, not a
+  burst at each kill.
+
+That is for a trace to say. The runner now prints, for the first five lost
+messages of the subscribers MQTTKAT_TRACE follows, every trace line the
+brokers wrote about them, in time order (`runner/traced`).
+
 ### The forwarded-copy wait made it worse, and is off for now
 
 With it, run 184748 (load, nothing killed) lost 471,704 messages, 201,376 of

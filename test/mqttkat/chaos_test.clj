@@ -420,3 +420,25 @@
                                   [0 2] [{:at 650 :qos 2}]}}))]
     (is (= {true {:duplicate 1} false {:lost 1}} (:qos2-by-exactly-once (r ["t/1"]))))
     (is (= {false {:duplicate 1 :lost 1}} (:qos2-by-exactly-once (r nil))))))
+
+;; What the brokers traced about a lost message, picked out of their logs.
+(deftest the-trace-of-a-lost-message-is-picked-out-of-the-logs
+  (let [dir (doto (java.io.File/createTempFile "traced" "") (.delete) (.mkdirs))]
+    (spit (java.io.File. dir "broker-1.log")
+          (str "10:00:01 trace - 3:7 q2 on t/1 arrived from p3\n"
+               "10:00:02 trace run-s4 3:7 q2 sent 12\n"
+               "10:00:02 trace run-s4 3:70 q2 sent 13\n"
+               "10:00:03 trace run-s5 3:7 q2 sent 14\n"))
+    (spit (java.io.File. dir "broker-2.log") "10:00:04 trace run-s4 3:7 q2 handed over\n")
+    (spit (java.io.File. dir "other.log") "10:00:05 trace run-s4 3:7 q2 not a broker's\n")
+    (let [lost [{:kind :lost :client "run-s4" :msg [3 7]}
+                {:kind :lost :client "run-s40" :msg [3 7]}
+                {:kind :duplicate :client "run-s4" :msg [3 7]}]
+          [[v lines] :as all] (runner/traced "-s4$" lost :lost 5 (str dir))]
+      (is (= 1 (count all)) "only the lost, and only clients the pattern follows")
+      (is (= "run-s4" (:client v)))
+      (is (= ["broker-1.log 10:00:01 trace - 3:7 q2 on t/1 arrived from p3"
+              "broker-1.log 10:00:02 trace run-s4 3:7 q2 sent 12"
+              "broker-2.log 10:00:04 trace run-s4 3:7 q2 handed over"]
+             lines)))
+    (is (nil? (runner/traced nil [{:kind :lost :client "x" :msg [1 1]}] :lost 5 (str dir))))))
