@@ -4,6 +4,41 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261015
 
+### Why losses went up with exactly-once, on every topic
+
+Run 220056: 10,019 lost, split about evenly between the exactly-once topics
+(3,636) and the rest (3,293), clean sessions as well as kept ones. They come
+in blocks a few seconds long just before a broker stops: `[102 107]` for
+`s55`, `s39`, `s9` and `s15`, before broker 1 stopped at 108 s, and 1,466
+at 10 s, before the first kill at 15.8 s. They are copies published on the
+broker that stopped, for subscribers on another.
+
+The chain, as I read it:
+
+1. An exactly-once message holds one of its subscriber's 128 window slots
+   for a claim (a Rama round trip), the delivery, the release (another
+   round trip), and the PUBREL and PUBCOMP. At this machine's 0.5 to 1 s per
+   round trip, and 5 s at worst, that is roughly 60 to 120 such messages a
+   second per subscriber, and fewer in a spike.
+2. A `+` subscriber in broker-kill is sent about 500 a second, half of them
+   exactly-once. It falls behind, and its pending queue passes
+   pause-threshold.
+3. Its broker then stops reading the connection those messages come in on
+   (`throttle-publisher!`). For copies from another broker, that is the
+   whole bridge, so every subscriber behind it waits.
+4. The bridge's queue grows on the sending broker. When that broker stops,
+   the queue, seconds of everyone's messages, goes with it. This is the gap
+   the forwarded-copy wait was meant to close.
+
+Before exactly-once, nothing held subscribers back like this, and the
+bridges stayed short. On a real Rama cluster, at a few milliseconds a round
+trip, the same window would take thousands a second.
+
+The trace printed nothing: the check keeps only the first 200 violations of
+each kind across all clients, and `s55`'s used them all. Clients followed by
+MQTTKAT_TRACE now keep theirs, and the runner says when none of the losing
+subscribers is followed.
+
 ### Without the forwarded-copy wait: fewer losses, still too many
 
 Runs 213545 and 214031, broker-kill with the wait off, lost 9,853 and 4,233,

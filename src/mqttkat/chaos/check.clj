@@ -512,10 +512,13 @@
         ;; report keeps the first max-violations over all clients.
         kept     (java.util.HashMap.)
         violations (java.util.ArrayList.)
+        ;; A client being followed (`:keep-client?`, see runner/traced)
+        ;; keeps its own, whatever the others used up.
+        keep-client? (or (:keep-client? opts) (constantly false))
         keep!    (fn [v]
                    (let [n (inc (long (.getOrDefault kept (:kind v) 0)))]
                      (.put kept (:kind v) n)
-                     (when (<= n (long max-violations))
+                     (when (or (<= n (long max-violations)) (keep-client? (:client v)))
                        (.add violations v))))
         merged   (reduce (fn [acc [client r]]
                            (run! keep! (:violations r))

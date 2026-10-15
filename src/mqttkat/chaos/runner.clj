@@ -682,7 +682,13 @@
           result (check/check snap {:subscribe-settle (* 1000 (long (:subscribe-settle-ms chk)))
                                     :clean-grace      (* 1000 (long (:clean-grace-ms chk)))
                                     :max-violations   (:max-violations chk)
-                                    :exactly-once     (exactly-once-filters chk)})
+                                    :exactly-once     (exactly-once-filters chk)
+                                    ;; The clients the brokers trace keep their
+                                    ;; violations: see traced.
+                                    :keep-client?     (if-let [re (some-> (System/getenv "MQTTKAT_TRACE")
+                                                                          str/trim not-empty re-pattern)]
+                                                        #(boolean (re-find re (str %)))
+                                                        (constantly false))})
           _      (println (format "  checked in %.1f s" (/ (- (System/nanoTime) t0) 1e9)))
           path   (str (io/file dir (str run-id ".edn")))
           counters (apply merge-with + (map c/counters (:clients state)))
@@ -746,6 +752,10 @@
       (println " " (pr-str (dissoc v :context))))
     ;; What the brokers did with the first few lost messages, when asked
     ;; to follow their subscribers: where each one's trail ends.
+    (when (and (System/getenv "MQTTKAT_TRACE")
+               (pos? (long (get-in result [:counts :lost] 0)))
+               (empty? (traced (System/getenv "MQTTKAT_TRACE") (:violations result) :lost 5 "logs/brokers")))
+      (println "  MQTTKAT_TRACE follows none of the subscribers that lost messages"))
     (doseq [[v lines] (traced (System/getenv "MQTTKAT_TRACE") (:violations result)
                                    :lost 5 "logs/brokers")]
       (println)

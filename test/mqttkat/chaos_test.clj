@@ -442,3 +442,20 @@
               "broker-2.log 10:00:04 trace run-s4 3:7 q2 handed over"]
              lines)))
     (is (nil? (runner/traced nil [{:kind :lost :client "x" :msg [1 1]}] :lost 5 (str dir))))))
+
+(deftest a-followed-clients-violations-are-kept-past-the-limit
+  (let [sub    {:filter "t/1" :qos 1 :sub-sent 0 :from 10}
+        run    (fn [keep]
+                 (check/check {:publishes     {[0 1] (msg 1 500 600)}
+                               :subscriptions {"a" [sub] "b" [sub] "c" [sub]}
+                               :clients       {"a" {:persistent? true} "b" {:persistent? true}
+                                               "c" {:persistent? true}}
+                               :deliveries    {"a" {} "b" {} "c" {}}
+                               :sessions-lost []
+                               :events        []}
+                              {:subscribe-settle 100 :clean-grace 1000 :max-violations 1
+                               :keep-client? keep}))
+        kept   (fn [r] (set (map :client (filter #(= :lost (:kind %)) (:violations r)))))]
+    (is (= 3 (get-in (run nil) [:counts :lost])))
+    (is (= 1 (count (kept (run nil)))) "one kept, of three")
+    (is (contains? (kept (run #{"c"})) "c") "and a followed client's, whichever came first")))
