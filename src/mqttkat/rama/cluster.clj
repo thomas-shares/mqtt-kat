@@ -45,6 +45,7 @@
             [mqttkat.events :as events]
             [mqttkat.handlers :as handlers]
             [mqttkat.intent :as intent]
+            [mqttkat.rama.latency :as latency]
             [mqttkat.rama.module :as module]
             [mqttkat.retained :as retained]
             [mqttkat.trace :as trace]
@@ -140,6 +141,8 @@
 
      :cluster        the InProcessCluster or cluster manager, for close!
      :events         depot client, for the session events
+     :queue-events   depot client, for what is queued, taken off and
+                     claimed: see queue-event?
      :sessions       PState client, client-id -> the last CONNECT, whether
                      it is still connected, a count, and its subscriptions
      :subscriptions  PState client, shard -> filter -> client-id -> entry
@@ -189,6 +192,7 @@
     {:cluster       cluster
      :module-name   module-name
      :events        (r/foreign-depot cluster module-name "*session-events")
+     :queue-events  (r/foreign-depot cluster module-name "*queue-events")
      :sessions      (r/foreign-pstate cluster module-name "$$sessions")
      :subscriptions (r/foreign-pstate cluster module-name "$$subscriptions")
      :brokers-state (r/foreign-pstate cluster module-name "$$brokers")
@@ -447,12 +451,28 @@
                                         "ms - sending this one past the bound")
                               false))))
 
+(def queue-event?
+  "The events the queues topology takes, on `*queue-events`: the rest go
+   to the sessions topology, on `*session-events`."
+  #{:enqueue :dequeue :claim})
+
+(defn- depot-for
+  "The depot `record` is appended to."
+  [conn record]
+  (if (queue-event? (:event record)) (:queue-events conn) (:events conn)))
+
+(defn- append!
+  "Append `record` to `depot`, timed (mqttkat.rama.latency)."
+  [depot record ack-level]
+  (latency/timed (latency/key-of (:event record) ack-level)
+                 (r/foreign-append-async! depot record ack-level)))
+
 (defn- append-record!
   "record!'s append, `permit?` saying whether it holds a permit to give back."
-  [events ^Semaphore append-permits permit? ack-level {:keys [event client-id broker-id] :as record}]
+  [depot ^Semaphore append-permits permit? ack-level {:keys [event client-id broker-id] :as record}]
   (let [^CompletableFuture fut
         (try
-          (r/foreign-append-async! events record ack-level)
+          (append! depot record ack-level)
           (catch Throwable t
             (when permit? (.release append-permits))
             (throw t)))]
@@ -486,11 +506,11 @@
    client can see. A failure is logged rather than thrown for the same reason
    — the session exists whether or not the record of it made it."
   ([conn record] (record! conn record nil))
-  ([{:keys [events ^Semaphore append-permits]} record
+  ([{:keys [^Semaphore append-permits] :as conn} record
     {:keys [wait? if-permitted? ack-level] :or {wait? true ack-level :ack}}]
    (let [permit? (take-permit! append-permits wait?)]
      (when (or permit? (not if-permitted?))
-       (append-record! events append-permits permit? ack-level record)))))
+       (append-record! (depot-for conn record) append-permits permit? ack-level record)))))
 
 ;; ── the queues, written in order and until they land ─────────────────────
 
@@ -766,7 +786,7 @@
         (try
           (.whenCompleteAsync (CompletableFuture/allOf
                                (into-array java.util.concurrent.CompletableFuture
-                                           (mapv #(r/foreign-append-async! (:events conn) % ack-level) records)))
+                                           (mapv #(append! (:queue-events conn) % ack-level) records)))
                               (reify BiConsumer (accept [_ v e] (done v e)))
                               ^java.util.concurrent.Executor @queue-executor)
           (catch Throwable e (done nil e)))))))
@@ -1705,7 +1725,10 @@
                                (when-not (get @(:brokers c) broker-id)
                                  (record! c (->broker-up advertised-host port) {:wait? false})))
                              (let [^CompletableFuture f
-                                   (record! c (->broker-stats (:stats broker-event)
+                                   ;; With how long its appends to Rama take, for
+                                   ;; the chaos runner: see mqttkat.rama.latency.
+                                   (record! c (->broker-stats (assoc (:stats broker-event)
+                                                                     :rama-latency (latency/summary))
                                                               (:detail broker-event)
                                                               (:samples broker-event))
                                             {:wait? false})]
@@ -1725,6 +1748,60 @@
    (see drop!), and either ends the link."
   [{:keys [brokers]} peer-id]
   (contains? @brokers peer-id))
+
+(def probe-every-millis
+  "How often each topology is timed with a probe: see probe!."
+  2000)
+
+(defonce ^:private probes-out
+  ;; depot key -> whether its probe is still on its way: one at a time
+  ;; each, so a topology minutes behind is not handed a probe every two
+  ;; seconds to be behind on as well.
+  (atom {}))
+
+(defn probe!
+  "Append a probe, a record that does nothing, at :ack to each depot, under
+   a random key so that over time every partition is sampled, and time it:
+   `probe/sessions@ack` and `probe/queues@ack` in mqttkat.rama.latency.
+   That is how far behind each topology is, with none of the broker's own
+   queueing in it."
+  [conn]
+  (doseq [[k depot] [[:sessions (:events conn)] [:queues (:queue-events conn)]]
+          :when depot
+          :let [[before _] (swap-vals! probes-out assoc k true)]
+          :when (not (get before k))]
+    (try
+      (let [^CompletableFuture f
+            (latency/timed (str "probe/" (name k) "@ack")
+                           (r/foreign-append-async! depot {:event :probe
+                                                           :key   (str (java.util.UUID/randomUUID))
+                                                           :at    (System/currentTimeMillis)}
+                                                    :ack))]
+        (.whenComplete f (reify BiConsumer (accept [_ _ _] (swap! probes-out dissoc k)))))
+      (catch Throwable t
+        (swap! probes-out dissoc k)
+        (log/debug t "could not probe" (name k))))))
+
+(defonce ^:private timing
+  ;; The ScheduledExecutorService that probes and logs, while attached.
+  (atom nil))
+
+(defn- start-timing! [conn]
+  (let [ex (java.util.concurrent.Executors/newSingleThreadScheduledExecutor
+            (reify java.util.concurrent.ThreadFactory
+              (newThread [_ r] (doto (Thread. ^Runnable r "rama-timing") (.setDaemon true)))))]
+    (.scheduleWithFixedDelay ex ^Runnable #(try (probe! conn) (catch Throwable _ nil))
+                             (long probe-every-millis) (long probe-every-millis) TimeUnit/MILLISECONDS)
+    (.scheduleWithFixedDelay ex ^Runnable #(try (latency/log-window!) (catch Throwable _ nil))
+                             (long latency/log-every-millis) (long latency/log-every-millis)
+                             TimeUnit/MILLISECONDS)
+    (when-let [^java.util.concurrent.ExecutorService old (first (reset-vals! timing ex))]
+      (.shutdownNow old))))
+
+(defn- stop-timing! []
+  (when-let [^java.util.concurrent.ExecutorService ex (first (reset-vals! timing nil))]
+    (.shutdownNow ex))
+  (reset! probes-out {}))
 
 (defn attach!
   "Make `conn` the broker's connection: record its session events, watch
@@ -1761,6 +1838,7 @@
                              (bridge/takeover! broker-id peer-id peer client-id connect-id)
                              (log/warn "no address for broker" peer-id
                                        "- cannot tell it to drop" client-id)))})
+  (start-timing! conn)
   (watch! conn))
 
 (defn detach!
@@ -1777,6 +1855,7 @@
   (reset! handlers/session-source nil)
   (bridge/close-all!)
   (events/forget! ::rama)
+  (stop-timing!)
   (reset! *connection* nil))
 
 (defn register!

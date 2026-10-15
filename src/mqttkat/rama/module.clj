@@ -2,8 +2,14 @@
   "The broker's Rama module: sessions, subscriptions, retained messages, the
    brokers, and what is queued for a session that is away.
 
-   Everything arrives on one depot, `*session-events`, and one stream
-   topology keeps every PState from it:
+   Two depots, each with a stream topology of its own. `*session-events`
+   and the `sessions` topology keep everything below but the queues:
+   `$$queued`, `$$taken-off` and `$$nudges` are the `queues` topology's,
+   from `*queue-events`, so that the QoS 1 and 2 traffic of a busy cluster
+   is not what the registry and the sessions wait behind. Both partition by
+   client id, so a client's queue is on the task its session is; the
+   sessions topology appends to the queues' depot from there when a session
+   connects, ends or expires, and the queues topology reads `$$sessions`.
 
    `$$sessions` — one record per client id: what it asked for the last time
    it connected, whether that connection is still up and on which broker,
@@ -90,12 +96,6 @@
                            [:session-expiry-interval]}   ; a DISCONNECT may change it
      {:event :subscribe    :connect-id :client-id :filter :entry :at}
      {:event :unsubscribe  :connect-id :client-id :filter :at}
-     {:event :enqueue      :client-id :key :message :at
-                           [:if-kept?]}                 ; only for a session that is kept
-     {:event :enqueue      :client-id :messages :at     ; [[key message] ...], in order
-                           [:if-kept?]}
-     {:event :dequeue      :client-id :keys :at}
-     {:event :claim        :client-id :key :message :at}
      {:event :hold         :client-id :packet-identifier :message :at}
      {:event :unhold       :client-id :packet-identifiers :at}
      {:event :retain       :topic :message :at}
@@ -111,6 +111,21 @@
                            :connect-id :client-id :broker-id :incarnation
                            :protocol-version :clean-session? :keep-alive
                            :session-expiry-interval :subscriptions :at}
+     {:event :probe        :key :at}                    ; does nothing: see
+                                                        ; mqttkat.rama.latency
+
+   And on `*queue-events`:
+
+     {:event :enqueue      :client-id :key :message :at
+                           [:if-kept?]}                 ; only for a session that is kept
+     {:event :enqueue      :client-id :messages :at     ; [[key message] ...], in order
+                           [:if-kept?]}
+     {:event :dequeue      :client-id :keys :at}
+     {:event :claim        :client-id :key :message :at}
+     {:event :connected    :client-id :broker-id :connect-id :at}  ; from the
+     {:event :disconnected :client-id :broker-id :at}              ; sessions
+     {:event :forget       :client-id :at}                         ; topology
+     {:event :probe        :key :at}
 
    `:filter` is the filter as the client sent it — `$share/g/a/#` for a
    shared subscription — and is unique per client. `:entry` is the broker's
@@ -193,6 +208,13 @@
   [k before after]
   {k (- (if (some? after) 1 0) (if (some? before) 1 0))})
 
+(defn merge-counts
+  "One task's counts from both topologies: the sessions' `$$counts` and the
+   queues' `$$queue-counts`. They count different things, so a sum is a
+   union, but a sum is right either way."
+  [a b]
+  (merge-with + (or a {}) (or b {})))
+
 (defn with-at
   "A task's counts as `$$rama-stats` holds them: stamped with when they were
    copied, so the console can work out a rate over the time that really
@@ -249,16 +271,18 @@
     {verdict 1}))
 
 (defmacro ^:private count>
-  "Add `deltas` to this task's `$$counts`. A macro, not a ramaop: a ramaop
-   cannot see the topology's PStates. <<atomic keeps the three segments one
-   block, and the vars are fresh each time so two uses never meet."
-  [deltas]
-  (let [task (symbol (str "*count-task" (gensym)))
-        old  (symbol (str "*count-old" (gensym)))]
-    `(<<atomic
-       (ops/current-task-id :> ~task)
-       (local-select> [(keypath ~task)] ~'$$counts :> ~old)
-       (local-transform> [(keypath ~task) (termval (add-counts ~old ~deltas))] ~'$$counts))))
+  "Add `deltas` to this task's `$$counts`, or to `pstate`, the queues
+   topology's `$$queue-counts`. A macro, not a ramaop: a ramaop cannot see
+   the topology's PStates. <<atomic keeps the three segments one block, and
+   the vars are fresh each time so two uses never meet."
+  ([deltas] `(count> ~'$$counts ~deltas))
+  ([pstate deltas]
+   (let [task (symbol (str "*count-task" (gensym)))
+         old  (symbol (str "*count-old" (gensym)))]
+     `(<<atomic
+        (ops/current-task-id :> ~task)
+        (local-select> [(keypath ~task)] ~pstate :> ~old)
+        (local-transform> [(keypath ~task) (termval (add-counts ~old ~deltas))] ~pstate)))))
 
 (def expiry-sweep-millis
   "How often parked sessions are checked for ones whose time has come.
@@ -529,9 +553,16 @@
   ;; client's events arrive in the order they were appended — there is only
   ;; one partition they can go to. That order is what lets a disconnect be
   ;; trusted to come after its connect, and an unsubscribe after its
-  ;; subscribe. One depot for every kind of event for that reason: two
-  ;; depots would give no order between them.
+  ;; subscribe. One depot for every event about a session for that reason:
+  ;; two would give no order between them. The queues have their own, and
+  ;; need no order against the sessions' beyond what the sessions topology
+  ;; appends to it itself, after the event it follows from.
   (declare-depot setup *session-events (hash-by partition-key))
+  ;; What is queued for sessions, on a depot and a topology of their own:
+  ;; see the queues topology below. Partitioned the same way, by client id,
+  ;; so a client's queue lives on the task its session does, and the
+  ;; sessions topology appends to it from that task.
+  (declare-depot setup *queue-events (hash-by partition-key))
   (if REPLACE-TICK-DEPOT
     (declare-depot setup *expiry-tick :random {:global? true})
     (declare-tick-depot setup *expiry-tick expiry-sweep-millis))
@@ -542,7 +573,8 @@
   ;; A stream topology, so a record is in the PStates by the time an append
   ;; with :ack returns. See the namespace doc for what stream's at-least-once
   ;; processing asks of the writes below.
-  (let [s (stream-topology topologies "sessions")]
+  (let [s (stream-topology topologies "sessions")
+        q (stream-topology topologies "queues")]
     (declare-pstate s $$sessions {String session-schema})
     (declare-pstate s $$subscriptions {Long (map-schema String (map-schema String Object))})
     (declare-pstate s $$retained {Long (map-schema String Object)})
@@ -558,23 +590,12 @@
     (declare-pstate s $$broker-history {String (map-schema Long Object {:subindex? true})})
     (declare-pstate s $$broker->clients {Object (set-schema String {:subindex? true})})
     (declare-pstate s $$dead-runs {String (set-schema Object {:subindex? true})})
-    ;; Subindexed, so a message is one write, a resume is one seek and a
-    ;; walk, and the count is free. Keyed by the name the broker gave the
-    ;; message — its time and a random suffix — so they come back in the
-    ;; order they were queued, and the same message queued twice is once.
-    (declare-pstate s $$queued {String (map-schema String Object {:subindex? true})})
     ;; client-id -> packet identifier -> a QoS 2 message the client
     ;; published and has not yet released: held from its PUBLISH to its
     ;; PUBREL, which can come to another broker than the PUBLISH did when the
     ;; first went after its PUBREC (§4.4). Subindexed: one write to hold, one
     ;; to let go, one point read to find.
     (declare-pstate s $$held {String (map-schema Long Object {:subindex? true})})
-    ;; client-id -> key -> when it was taken off its queue: for
-    ;; taken-off-kept-millis, a key queued again stays off.
-    (declare-pstate s $$taken-off {String (map-schema String Long {:subindex? true})})
-    ;; nudge-key -> client-id -> the last key queued for it while it was
-    ;; connected there. Not subindexed: a proxy watches each one whole.
-    (declare-pstate s $$nudges {String (map-schema String String)})
     ;; One entry per task, keyed by the task itself: the index for the
     ;; sessions on this task lives on this task, next to them, and the sweep
     ;; runs everywhere at once without a hop. Inside, a sorted map of due
@@ -586,6 +607,23 @@
     (declare-pstate s $$counts {Long (map-schema String Long)}
                     {:key-partitioner task-is-partition})
     (declare-pstate s $$rama-stats {String (map-schema Object Object)})
+
+    ;; The queues topology's. Subindexed, so a message is one write, a
+    ;; resume is one seek and a walk, and the count is free. Keyed by the
+    ;; name the broker gave the message — its time and a random suffix — so
+    ;; they come back in the order they were queued, and the same message
+    ;; queued twice is once.
+    (declare-pstate q $$queued {String (map-schema String Object {:subindex? true})})
+    ;; client-id -> key -> when it was taken off its queue: for
+    ;; taken-off-kept-millis, a key queued again stays off.
+    (declare-pstate q $$taken-off {String (map-schema String Long {:subindex? true})})
+    ;; nudge-key -> client-id -> the last key queued for it while it was
+    ;; connected there. Not subindexed: a proxy watches each one whole.
+    (declare-pstate q $$nudges {String (map-schema String String)})
+    ;; As $$counts, for what this topology counts: the sessions topology's
+    ;; stats tick adds them in, task by task.
+    (declare-pstate q $$queue-counts {Long (map-schema String Long)}
+                    {:key-partitioner task-is-partition})
 
     (<<sources s
       ;; ── the counts, gathered for the console ───────────────────────
@@ -599,7 +637,9 @@
         (System/currentTimeMillis :> *stats-now))
       (|all)
       (ops/current-task-id :> *stats-task)
-      (local-select> [(keypath *stats-task)] $$counts :> *mine)
+      (local-select> [(keypath *stats-task)] $$counts :> *mine-sessions)
+      (local-select> [(keypath *stats-task)] $$queue-counts :> *mine-queues)
+      (merge-counts *mine-sessions *mine-queues :> *mine)
       (identity stats-key :> *stats-key)
       (|hash *stats-key)
       (local-transform> [(keypath *stats-key *stats-task) (termval (with-at *mine *stats-now))]
@@ -673,13 +713,12 @@
       (<<if (and> (not (get *current :connected?))
                   (= *due-connect-id (get *current :connect-id)))
         (get *current :subscriptions {} :> *subs)
-        (local-select> [(keypath *client-id) (view count)] $$queued :> *dropped)
-        (local-transform> [(keypath *client-id) NONE>] $$queued)
-        (local-transform> [(keypath *client-id) NONE>] $$taken-off)
+        ;; Its queue, on the queues topology's partition for it: this one.
+        (depot-partition-append! *queue-events {:event :forget :client-id *client-id :at *now}
+                                 :append-ack)
         (local-transform> [(keypath *client-id) NONE>] $$held)
         (local-transform> [(keypath *client-id) NONE>] $$sessions)
-        (count> (merge (session-deltas *current nil)
-                       {"queued" (- *dropped) "expired" 1}))
+        (count> (merge (session-deltas *current nil) {"expired" 1}))
         (ops/explode (vec (keys *subs)) :> *filter)
         (shard-of *filter :> *shard)
         (|hash *shard)
@@ -801,69 +840,9 @@
         (local-transform> [(keypath *shard *topic) NONE>] $$retained)
         (count> (presence-delta "retained" *had nil))
 
-        ;; ── what is queued for a session that is away ──────────────────
-        (case> :enqueue)
-        (local-select> [(keypath *client-id)] $$sessions :> *session)
-        (<<if (enqueue-allowed? *record *session)
-          (<<atomic
-            ;; One at a time, in order, each counted against the limit as
-            ;; the one before it left the queue.
-            (ops/explode (enqueued *record) :> [*key *message])
-            (local-select> [(keypath *client-id) (view count)] $$queued :> *n)
-            (local-select> [(keypath *client-id *key)] $$queued :> *had)
-            (local-select> [(keypath *client-id *key)] $$taken-off :> *taken)
-            ;; Decided in plain Clojure (queue-verdict): written out here
-            ;; as branches, each with its own count, the topology no longer
-            ;; compiled in a thread's default stack.
-            (queue-verdict *taken *had *message *n queue-limit :> *verdict)
-            (<<if (= *verdict "put")
-              (local-transform> [(keypath *client-id *key) (termval *message)] $$queued))
-            (count> (verdict-counts *verdict *had)))
-          ;; Then, once, the broker it is connected on is told: it has
-          ;; read its queue already, on the CONNECT, and this came after.
-          (<<if (and> (get *session :connected?) (get *session :broker-id))
-            (nudge-key (get *session :broker-id) *client-id :> *nudge)
-            (first (last (enqueued *record)) :> *last-key)
-            (|hash *nudge)
-            (local-transform> [(keypath *nudge *client-id) (termval *last-key)] $$nudges)))
-
-        (case> :dequeue)
-        (get *record :at :> *at)
-        (taken-off-at *at :> *when)
-        ;; First forget what was taken off long enough ago, a few at a time:
-        ;; once a record, not once a key. A range read for each of a record's
-        ;; 256 keys tripled what a take-off cost, and at 3,000 messages a
-        ;; second Rama's batches of them no longer finished in their five
-        ;; seconds, and were tried again for ever.
-        (taken-off-before *at :> *before)
-        (<<atomic
-          (local-select> [(keypath *client-id) (sorted-map-range-to *before 16) MAP-KEYS]
-                         $$taken-off :> *old)
-          (local-transform> [(keypath *client-id *old) NONE>] $$taken-off))
-        (ops/explode (get *record :keys) :> *key)
-        (local-select> [(keypath *client-id *key)] $$queued :> *had)
-        (local-transform> [(keypath *client-id *key) NONE>] $$queued)
-        (local-transform> [(keypath *client-id *key) (termval *when)] $$taken-off)
-        (count> (presence-delta "queued" *had nil))
-
-        ;; ── a delivery claimed, for a topic delivered exactly once ─────
-        ;; A broker about to send `key` to the client under a packet
-        ;; identifier says so here first, and sends only if the entry then
-        ;; carries that identifier (mqttkat.handlers/send-claimed!): refused
-        ;; when the client has completed it ($$taken-off), or when it is in
-        ;; flight under another identifier already, which the client could
-        ;; not tell from a new message. The same identifier again is the
-        ;; same delivery: taken, unless it would undo a release (the PUBREC
-        ;; recorded, with :released?, before the PUBREL goes).
-        (case> :claim)
-        (get *record :key :> *key)
-        (get *record :message :> *message)
-        (local-select> [(keypath *client-id *key)] $$taken-off :> *taken)
-        (local-select> [(keypath *client-id *key)] $$queued :> *had)
-        (claim-verdict *taken *had *message :> *verdict)
-        (<<if (= *verdict "put")
-          (local-transform> [(keypath *client-id *key) (termval *message)] $$queued))
-        (count> (verdict-counts *verdict *had))
+        ;; A broker timing the topology (mqttkat.rama.cluster/probe!).
+        (case> :probe)
+        (identity nil :> *nothing1)
 
         ;; ── what a publisher has in flight at QoS 2 ────────────────────
         (case> :hold)
@@ -934,13 +913,11 @@
             (local-select> [(keypath *client-id)] $$sessions :> *after)
             (count> (session-deltas *current *after))
             ;; What was queued before this record and after the broker read
-            ;; the queue on the CONNECT: it read before saying so.
-            (local-select> [(keypath *client-id) (view count)] $$queued :> *waiting)
-            (<<if (pos? *waiting)
-              (nudge-key *b *client-id :> *nudge)
-              (|hash *nudge)
-              (local-transform> [(keypath *nudge *client-id) (termval (str "connect " *connect-id))]
-                                $$nudges))
+            ;; the queue on the CONNECT: it read before saying so. Asked of
+            ;; the queues topology, which has the queue.
+            (depot-partition-append! *queue-events {:event :connected :client-id *client-id
+                                                    :broker-id *b :connect-id *connect-id :at *at}
+                                     :append-ack)
             (run-key *b (get *record :incarnation) :> *run)
             (|hash *run)
             (local-transform> [(keypath *run) NONE-ELEM (termval *client-id)] $$broker->clients)
@@ -1019,9 +996,9 @@
               (local-transform> [(keypath *client-id) :lost? NONE>] $$sessions))
             (local-select> [(keypath *client-id)] $$sessions :> *after)
             (count> (session-deltas *current *after))
-            (nudge-key *b *client-id :> *nudge)
-            (|hash *nudge)
-            (local-transform> [(keypath *nudge *client-id) NONE>] $$nudges)
+            (depot-partition-append! *queue-events {:event :disconnected :client-id *client-id
+                                                    :broker-id *b :at *at}
+                                     :append-ack)
             (run-key *b (get *current :incarnation) :> *run)
             (|hash *run)
             (local-transform> [(keypath *run) (set-elem *client-id) NONE>] $$broker->clients)
@@ -1108,4 +1085,110 @@
             (count> (presence-delta "subscriptions" *had nil))
             ;; A filter nobody holds any more goes too, so the shard does not
             ;; fill with empty maps and a broker's copy does not either.
-            (local-transform> [(keypath *shard *filter) (pred empty?) NONE>] $$subscriptions)))))))
+            (local-transform> [(keypath *shard *filter) (pred empty?) NONE>] $$subscriptions)))))
+
+    (<<sources q
+      ;; ── the queues ─────────────────────────────────────────────────
+      ;; Their own depot and topology, apart from the sessions': at a few
+      ;; thousand QoS 1 and 2 messages a second, every one queued, taken
+      ;; off or claimed here, and the registry and the sessions waited
+      ;; behind them on one topology. Reads $$sessions, the other
+      ;; topology's, for whether a session is kept and where it is.
+      (source> *queue-events :> {:keys [*event *client-id *at] :as *record})
+      (count> $$queue-counts (event-count *event))
+      (<<switch *event
+
+        ;; ── what is queued for a session that is away ──────────────────
+        (case> :enqueue)
+        (local-select> [(keypath *client-id)] $$sessions :> *session)
+        (<<if (enqueue-allowed? *record *session)
+          (<<atomic
+            ;; One at a time, in order, each counted against the limit as
+            ;; the one before it left the queue.
+            (ops/explode (enqueued *record) :> [*key *message])
+            (local-select> [(keypath *client-id) (view count)] $$queued :> *n)
+            (local-select> [(keypath *client-id *key)] $$queued :> *had)
+            (local-select> [(keypath *client-id *key)] $$taken-off :> *taken)
+            ;; Decided in plain Clojure (queue-verdict): written out here
+            ;; as branches, each with its own count, the topology no longer
+            ;; compiled in a thread's default stack.
+            (queue-verdict *taken *had *message *n queue-limit :> *verdict)
+            (<<if (= *verdict "put")
+              (local-transform> [(keypath *client-id *key) (termval *message)] $$queued))
+            (count> $$queue-counts (verdict-counts *verdict *had)))
+          ;; Then, once, the broker it is connected on is told: it has
+          ;; read its queue already, on the CONNECT, and this came after.
+          (<<if (and> (get *session :connected?) (get *session :broker-id))
+            (nudge-key (get *session :broker-id) *client-id :> *nudge)
+            (first (last (enqueued *record)) :> *last-key)
+            (|hash *nudge)
+            (local-transform> [(keypath *nudge *client-id) (termval *last-key)] $$nudges)))
+
+        (case> :dequeue)
+        (get *record :at :> *at)
+        (taken-off-at *at :> *when)
+        ;; First forget what was taken off long enough ago, a few at a time:
+        ;; once a record, not once a key. A range read for each of a record's
+        ;; 256 keys tripled what a take-off cost, and at 3,000 messages a
+        ;; second Rama's batches of them no longer finished in their five
+        ;; seconds, and were tried again for ever.
+        (taken-off-before *at :> *before)
+        (<<atomic
+          (local-select> [(keypath *client-id) (sorted-map-range-to *before 16) MAP-KEYS]
+                         $$taken-off :> *old)
+          (local-transform> [(keypath *client-id *old) NONE>] $$taken-off))
+        (ops/explode (get *record :keys) :> *key)
+        (local-select> [(keypath *client-id *key)] $$queued :> *had)
+        (local-transform> [(keypath *client-id *key) NONE>] $$queued)
+        (local-transform> [(keypath *client-id *key) (termval *when)] $$taken-off)
+        (count> $$queue-counts (presence-delta "queued" *had nil))
+
+        ;; ── a delivery claimed, for a topic delivered exactly once ─────
+        ;; A broker about to send `key` to the client under a packet
+        ;; identifier says so here first, and sends only if the entry then
+        ;; carries that identifier (mqttkat.handlers/send-claimed!): refused
+        ;; when the client has completed it ($$taken-off), or when it is in
+        ;; flight under another identifier already, which the client could
+        ;; not tell from a new message. The same identifier again is the
+        ;; same delivery: taken, unless it would undo a release (the PUBREC
+        ;; recorded, with :released?, before the PUBREL goes).
+        (case> :claim)
+        (get *record :key :> *key)
+        (get *record :message :> *message)
+        (local-select> [(keypath *client-id *key)] $$taken-off :> *taken)
+        (local-select> [(keypath *client-id *key)] $$queued :> *had)
+        (claim-verdict *taken *had *message :> *verdict)
+        (<<if (= *verdict "put")
+          (local-transform> [(keypath *client-id *key) (termval *message)] $$queued))
+        (count> $$queue-counts (verdict-counts *verdict *had))
+
+        ;; ── what the sessions topology asks of a client's queue ────────
+        ;; Expired: the queue goes with the session.
+        (case> :forget)
+        (local-select> [(keypath *client-id) (view count)] $$queued :> *dropped)
+        (local-transform> [(keypath *client-id) NONE>] $$queued)
+        (local-transform> [(keypath *client-id) NONE>] $$taken-off)
+        (count> $$queue-counts {"queued" (- *dropped)})
+
+        ;; Connected on a broker: nudged there if anything is waiting,
+        ;; queued after the broker read the queue on the CONNECT.
+        (case> :connected)
+        (local-select> [(keypath *client-id) (view count)] $$queued :> *waiting)
+        (<<if (pos? *waiting)
+          (nudge-key (get *record :broker-id) *client-id :> *nudge)
+          (|hash *nudge)
+          (local-transform> [(keypath *nudge *client-id)
+                             (termval (str "connect " (get *record :connect-id)))]
+                            $$nudges))
+
+        ;; Gone from it: nothing more to nudge there.
+        (case> :disconnected)
+        (nudge-key (get *record :broker-id) *client-id :> *nudge)
+        (|hash *nudge)
+        (local-transform> [(keypath *nudge *client-id) NONE>] $$nudges)
+
+        (case> :probe)
+        (identity nil :> *nothing2)
+
+        (default>)
+        (identity nil :> *nothing3)))))

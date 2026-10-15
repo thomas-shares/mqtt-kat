@@ -1779,7 +1779,9 @@
                         (is (= cluster/broker-id (:id me)))
                         (is (= "here:1883" (:address me)))
                         (is (false? (:stale me)))
-                        (is (= {:clients 3 :in 10 :out 20 :version "v"} (:stats me)))
+                        (is (= {:clients 3 :in 10 :out 20 :version "v"} (dissoc (:stats me) :rama-latency)))
+                        (is (map? (:rama-latency (:stats me)))
+                            "with how long its appends to Rama took, for the chaos runner")
                         (is (str/includes? (console/brokers-page) cluster/broker-id)
                             "and the page shows it"))
                       (testing "a report from a run that is not the announced one is ignored"

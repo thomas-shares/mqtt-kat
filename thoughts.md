@@ -2,6 +2,57 @@
 
 In this file will go my thoughts and ramblings about this project and what I have done and what I might do next.
 
+## 20261015
+
+### The queues get a topology of their own, and every append is timed
+
+The run after the exactly-once change lost some forty thousand messages,
+clean sessions as well as kept ones, on topics named and not, from the first
+seconds, before anything was killed. The load run before it never got going:
+no client was redirected, as if the brokers could not see each other. One
+depot and one stream topology took everything: the registry, the sessions,
+the subscriptions, holds, and every QoS 1 and 2 message queued, taken off or
+claimed. My guess is that the queue traffic is what the registry and the
+sessions were waiting behind. A guess, so first a way to see it.
+
+**Measured.** Every append a broker makes is timed by what it was and what it
+waited for: `enqueue@ack`, `hold@append-ack`, `claim@ack` (in
+`mqttkat.rama.latency`). Every two seconds each broker also sends each
+topology a probe, a record that does nothing, at `:ack`, under a random key
+so that every partition is sampled in turn. `probe/sessions@ack` and
+`probe/queues@ack` are then how far behind each topology is, with none of
+the broker's own load in the number.
+
+- Each broker logs the last ten seconds as count, p50, p99 and max.
+- It also reports the totals since it started to the registry.
+- The chaos runner prints those totals per broker at the end, as
+  `:rama-latency`.
+
+**Split.** `*queue-events` is a second depot, also partitioned by client id,
+with a stream topology `queues` that owns `$$queued`, `$$taken-off` and
+`$$nudges` and takes `:enqueue`, `:dequeue` and `:claim`. The sessions
+topology keeps the rest, `$$held` included, so holds still answer at `:ack`.
+
+- **Where the sessions topology touched the queues:** a connect's nudge, a
+  disconnect's, and an expired session's queue. It now appends `:connected`,
+  `:disconnected` and `:forget` to the queues' depot, from the client's own
+  task, after the event they follow from. That is all the order between the
+  two that anything needs.
+- **Reads go the other way:** the queues topology reads `$$sessions` for
+  whether a session is kept and where it is connected. Reading another
+  topology's PState works.
+- **Counts:** the queues' go into `$$queue-counts`, and the sessions
+  topology's stats tick adds them in, so the console and the runner see one
+  set.
+
+A PState cannot move between topologies in a module update, so this needs a
+Rama reset, not `rama.bb update`.
+
+Stream, not microbatch, for now. Microbatch would give the queues more
+throughput, but a claim's verdict would then come a batch later, and
+nothing waits on `:ack` for a microbatch topology. Whether it is worth that
+is for the numbers above to say.
+
 ## 20261014
 
 ### The module outgrew a thread's stack

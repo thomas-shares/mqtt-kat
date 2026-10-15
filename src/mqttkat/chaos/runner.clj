@@ -462,6 +462,32 @@
         (println "  the drain cannot read Rama's counts, and ends on the clients alone:" (ex-message t))
         nil))))
 
+(defn- rama-latency
+  "On an external Rama, how long each broker's appends to it took over its
+   life, as it last reported them to the registry: broker-id ->
+   {\"enqueue@ack\" [count p50 p99 max] ...}, in ms, the probes'
+   (\"probe/sessions@ack\", \"probe/queues@ack\") being how far behind each
+   topology was. See mqttkat.rama.latency. Nil without one."
+  [cfg]
+  (when (= "external" (some-> (get-in cfg [:setup :brokers :rama]) name))
+    (try
+      (let [open   (requiring-resolve 'com.rpl.rama/open-cluster-manager)
+            mname  (requiring-resolve 'com.rpl.rama/get-module-name)
+            pstate (requiring-resolve 'com.rpl.rama/foreign-pstate)
+            select (eval '(fn [ps k] (com.rpl.rama/foreign-select-one (com.rpl.rama.path/keypath k) ps)))
+            module @(requiring-resolve 'mqttkat.rama.module/MqttKatModule)
+            key    @(requiring-resolve 'mqttkat.rama.module/registry-key)
+            close  (requiring-resolve 'com.rpl.rama/close!)
+            c      (open {"conductor.host" (or (get-in cfg [:setup :brokers :conductor]) "localhost")})]
+        (try
+          (into (sorted-map)
+                (for [[b entry] (select (pstate c (mname module) "$$brokers") key)]
+                  [b (get-in entry [:stats :rama-latency])]))
+          (finally (close c))))
+      (catch Throwable t
+        (println "  could not read the brokers' Rama latencies:" (or (ex-message t) (str t)))
+        nil))))
+
 (defn- drain!
   "Wait until nothing new has been acknowledged or delivered for :drain-ms,
    or :max-drain-ms has gone by. On an external Rama, until its queue
@@ -621,7 +647,8 @@
                                     :exactly-once     (exactly-once-filters chk)})
           _      (println (format "  checked in %.1f s" (/ (- (System/nanoTime) t0) 1e9)))
           path   (str (io/file dir (str run-id ".edn")))
-          counters (apply merge-with + (map c/counters (:clients state)))]
+          counters (apply merge-with + (map c/counters (:clients state)))
+          latencies (rama-latency (:cfg state))]
       (run! c/close! (:clients state))
       (with-open [w (io/writer path)]
         (binding [*out* w]
@@ -634,7 +661,8 @@
                       :drain    @(:drain state)
                       :result   (summarise result (:max-violations chk))
                       :events   (:events snap)})))
-      (assoc result :report path :run-id run-id :clients counters :drain @(:drain state)))))
+      (assoc result :report path :run-id run-id :clients counters :drain @(:drain state)
+             :rama-latency latencies))))
 
 (defn -main [& paths]
   (when (empty? paths)
@@ -646,7 +674,7 @@
                       (shutdown-agents)
                       (System/exit 2)))]
     (pp/pprint (select-keys result [:ok? :drain :stats :counts :lost-by :lost-route :lost-by-session
-                                    :lost-by-client :lost-span :lost-by-sent :duplicate-by :duplicate-resent :qos2-by-exactly-once :lost-resent :outages :published-by-qos :in-flight-at-kill :clients :report]))
+                                    :lost-by-client :lost-span :lost-by-sent :duplicate-by :duplicate-resent :qos2-by-exactly-once :lost-resent :outages :published-by-qos :in-flight-at-kill :clients :rama-latency :report]))
     (doseq [v (take 10 (:violations result))]
       (println " " (pr-str (dissoc v :context))))
     (shutdown-agents)
