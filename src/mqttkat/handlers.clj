@@ -2603,8 +2603,7 @@
 (defn- claimed!
   "The cluster's answer to the claim on `k` for `msg`, in flight here under
    `packet-identifier`: `entry`, what the client's queue there holds under
-   `k` now, nil when the client has completed it, ::unknown when it could
-   not be read.
+   `k` now, nil when the client has completed it.
 
    Under this identifier, not yet released: sent, as it would have been at
    once. Under another, or released: this identifier goes back, and the
@@ -2612,11 +2611,10 @@
    its PUBREL (resend-handed-over!). That other sender was a broker that
    died, or this one for a connection that has gone: the client is here
    now, and the same identifier from two senders is one message to it.
-   Completed: not sent at all. Unread: sent, at least once, as before."
+   Completed: not sent at all."
   [key client-id k msg packet-identifier entry]
-  (let [mine?  (or (= ::unknown entry)
-                   (and (= packet-identifier (:packet-identifier entry))
-                        (not (:released? entry))))
+  (let [mine?  (and (= packet-identifier (:packet-identifier entry))
+                    (not (:released? entry)))
         here?  #(identical? msg (get-in (some-> (existing-outbound client-id) deref)
                                         [:inflight packet-identifier]))]
     (cond
@@ -2652,6 +2650,35 @@
               (note-delivered! client-id msg)))
         (drain-pending! key client-id)))))
 
+(def claim-retry-millis
+  "How long a claim, or its release, that failed waits before it is made
+   again: the first wait, and the longest it grows to."
+  [200 5000])
+
+(defn- until-landed!
+  "Call `write`, a function returning a write's future, and wait for it,
+   again after each failure for as long as `wanted?` says, waiting longer
+   each time. Whether it landed. Blocks: for claim-executor's virtual
+   threads.
+
+   Waited out, not taken as done. A claim that timed out was sent anyway,
+   and a release that did let the PUBREL go: with Rama ten seconds behind,
+   the cluster then still had the message in flight, unreleased, after
+   the client had completed it, and the next read of the queue sent it
+   again under its identifier, which the client had let go. A load run
+   with no broker killed delivered 1,767 messages twice that way."
+  [what write wanted?]
+  (loop [delay-ms (long (first claim-retry-millis))]
+    (let [ok? (try @(write) true
+                   (catch Throwable t
+                     (log/debug t "could not" what "- trying again in" delay-ms "ms")
+                     false))]
+      (cond
+        ok?            true
+        (not (wanted?)) false
+        :else          (do (Thread/sleep delay-ms)
+                           (recur (min (* 2 delay-ms) (long (second claim-retry-millis)))))))))
+
 (defn- send-claimed!
   "send-publish!, for a delivery the cluster is first told of when it is to
    be exactly once (exactly-once-key): then claimed there under
@@ -2661,22 +2688,22 @@
   [key client-id msg packet-identifier]
   (if-let [k (and (not (:duplicate? msg)) (exactly-once-key key msg))]
     (let [{:keys [claim! queued-entry]} @session-source
-          answer (fn [e]
-                   (let [entry (if e
-                                 ::unknown
-                                 (try (queued-entry client-id k)
-                                      (catch Throwable t
-                                        (log/warn t "could not read the claim on" k "for" client-id)
-                                        ::unknown)))]
-                     (claimed! key client-id k msg packet-identifier entry)))
-          fut    (try (claim! client-id k (for-claim msg packet-identifier))
-                      (catch Throwable t
-                        (log/warn t "could not claim" k "for" client-id)
-                        (CompletableFuture/failedFuture t)))]
+          here? #(and (live-key? key)
+                      (identical? msg (get-in (some-> (existing-outbound client-id) deref)
+                                              [:inflight packet-identifier])))]
       (trace/trace! client-id msg "claiming" k packet-identifier)
-      (.whenCompleteAsync ^CompletableFuture fut
-                          (reify BiConsumer (accept [_ _ e] (answer e)))
-                          ^java.util.concurrent.Executor claim-executor)
+      (.execute ^java.util.concurrent.Executor claim-executor
+                ^Runnable
+                (fn []
+                  (when (until-landed! (str "claim " k " for " client-id)
+                                       #(claim! client-id k (for-claim msg packet-identifier))
+                                       here?)
+                    (let [entry (volatile! nil)]
+                      (when (until-landed! (str "read the claim on " k " for " client-id)
+                                           #(CompletableFuture/completedFuture
+                                             (vreset! entry (queued-entry client-id k)))
+                                           here?)
+                        (claimed! key client-id k msg packet-identifier @entry))))))
       true)
     (send-publish! key msg packet-identifier)))
 
@@ -3897,10 +3924,7 @@
   (let [client-id (:client-id (get @*clients* client-key))
         msg       (some-> (existing-outbound client-id) deref (get-in [:inflight packet-identifier]))
         ;; Again on a PUBREC sent again: the PUBREL waits for it to land.
-        k         (when msg (exactly-once-key client-key msg))
-        write     (when k
-                    ((:claim! @session-source) client-id k
-                     (assoc (for-claim msg packet-identifier) :released? true)))]
+        k         (when msg (exactly-once-key client-key msg))]
     (when-let [a (existing-outbound client-id)]
       (let [[before _] (swap-vals! a (fn [state]
                                        (if (get-in state [:inflight packet-identifier])
@@ -3911,10 +3935,22 @@
         (when-let [msg (get-in before [:inflight packet-identifier])]
           (when-not (or k (::settle-on-pubcomp? msg))
             (settled! client-id msg)))))
-    (once-done! write
-                #(send-buffer [client-key]
-                              (MqttPubRel/encode
-                               {:packet-type :PUBREL :packet-identifier packet-identifier})))))
+    (let [pubrel! #(send-buffer [client-key]
+                                (MqttPubRel/encode
+                                 {:packet-type :PUBREL :packet-identifier packet-identifier}))]
+      (if-not k
+        (pubrel!)
+        ;; Only once the release has landed, however long that takes: see
+        ;; until-landed!. While the connection lasts; once it has gone, its
+        ;; hand-over put the release on the queue itself.
+        (.execute ^java.util.concurrent.Executor claim-executor
+                  ^Runnable
+                  (fn []
+                    (when (until-landed! (str "release " k " for " client-id)
+                                         #((:claim! @session-source) client-id k
+                                           (assoc (for-claim msg packet-identifier) :released? true))
+                                         #(live-key? client-key))
+                      (pubrel!))))))))
 
 (defn qos-2-send
   ([keys topic msg] (qos-2-send keys topic msg false))

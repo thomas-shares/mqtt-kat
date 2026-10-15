@@ -4,6 +4,47 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261015
 
+### What the first measured runs said
+
+Load run 152221: exactly-once on half the topics, 3,000 a second asked, no
+broker killed.
+
+- **No losses**, and the brokers saw each other: clients were redirected.
+- **But 1,767 duplicates**, all on the exactly-once topics, with nothing
+  killed. Those were mine (below).
+- **Published:** 75,752, against 93,841 with holding alone and about 157,000
+  with neither.
+- **Rama was behind on both topologies:** the probes' p99 was 10 s on
+  `sessions` as well as on `queues`.
+- **Claims took seconds:** `claim@ack` had a p50 of 2 s and a max at the
+  10 s timeout.
+
+So the split did not isolate the sessions. The two topologies run on the
+same tasks and threads, and a task works through both in turn. A second
+topology only gives the queues a depot and an order of their own. Rama on
+this one machine is simply out of capacity.
+
+**The duplicates.** A claim that timed out, at those 10 s, was sent anyway
+("at least once"). A release that timed out let the PUBREL go. Either way
+the cluster still had the message in flight and unreleased after the
+client had completed it. The next read of the queue then sent it again
+under its identifier, which the client had already let go. Now both are
+made again until they land (`until-landed!`), and nothing goes on an
+unknown. That costs time under load, and it is the price of the promise.
+
+Chaos run 153258, broker-kill:
+
+- Exactly-once topics: 371 duplicates and 695 lost. Other topics: 2,305
+  duplicates and 716 lost.
+- The losses were blocks of about 375 per subscriber, in the second or
+  three before a broker was stopped. They were published on the broker
+  that went and owed to subscribers on another.
+- Forwarded copies are not hand-offs: the publisher's PUBACK does not wait
+  for the peer to have its copy. Whatever was still in the bridge's queue
+  died with the broker.
+- It was always so. Exactly-once makes it worse: subscribers' windows are
+  held for the length of a claim, so the bridges back up further.
+
 ### The queues get a topology of their own, and every append is timed
 
 The run after the exactly-once change lost some forty thousand messages,

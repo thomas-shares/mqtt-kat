@@ -147,6 +147,33 @@
     (testing "and the PUBCOMP takes it off"
       (is (empty? completed)))))
 
+(deftest a-claim-or-release-that-fails-is-made-again-before-anything-is-sent
+  ;; The first claim and the first release fail, as an append does that
+  ;; times out with Rama behind: neither the message nor the PUBREL may go
+  ;; until the one made again has landed.
+  (let [topic    (tu/topic "eo")
+        real     (:claim! @h/session-source)
+        failures (atom {:claim 1 :release 1})
+        attempts (atom [])]
+    (swap! h/session-source assoc :claim!
+           (fn [client-id k msg]
+             (let [kind (if (:released? msg) :release :claim)]
+               (swap! attempts conj kind)
+               (if (pos? (long (get @failures kind)))
+                 (do (swap! failures update kind dec)
+                     (java.util.concurrent.CompletableFuture/failedFuture
+                      (ex-info "ack-timeout" {})))
+                 (real client-id k msg)))))
+    (try
+      (let [{:keys [pid publishes releases sent released completed]} (delivered [topic] topic)]
+        (is (= [:claim :claim :release :release] @attempts))
+        (is (= 1 (count publishes)))
+        (is (= [pid] releases))
+        (is (= pid (:packet-identifier (second (first sent)))))
+        (is (:released? (second (first released))))
+        (is (empty? completed)))
+      (finally (swap! h/session-source assoc :claim! real)))))
+
 (deftest a-delivery-on-any-other-topic-is-not
   (let [topic (tu/topic "eo")
         {:keys [pid publishes releases sent released completed]}
