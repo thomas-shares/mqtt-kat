@@ -4,6 +4,32 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261015
 
+### A subscriber behind no longer holds up the bridge
+
+A kept session that falls behind on copies from another broker no longer
+pauses the bridge they come over. Past pause-threshold, each further copy
+goes to the session's queue in the cluster, under its message key
+(`overflow?` and `overflow!` in mqttkat.handlers).
+
+- **For the sending broker:** the copy is a hand-off, so that broker is told
+  it is safe once the cluster has it, and its hold on the copy is let go
+  then.
+- **For the subscriber:** once its pending queue is back under
+  resume-threshold, its queue in the cluster is read again
+  (`drain-pending!`), instead of waiting for a nudge that came while there
+  was no room.
+- **What still pauses:** a clean session still holds the bridge up, since it
+  has no queue to go to. A local publisher is still paused for its own
+  subscribers: that is back-pressure on the one connection that caused it.
+
+The cost is order. Copies read back from the cluster can arrive after later
+ones that went straight to the pending queue. The cluster's queue already
+did that to sessions on the move.
+
+The test (moving-in, `a-subscriber-behind-does-not-hold-up-the-bridge`)
+fails without the change: the bridge's next copy is never read, and nothing
+reaches the cluster.
+
 ### Why losses went up with exactly-once, on every topic
 
 Run 220056: 10,019 lost, split about evenly between the exactly-once topics

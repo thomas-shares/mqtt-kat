@@ -2787,6 +2787,51 @@
   (and (not (live-key? key))
        (taken-back! client-id packet-identifier msg)))
 
+(defonce ^:private overflowed
+  ;; client-id -> true: a kept session some of whose messages from a bridge
+  ;; went to the cluster's queue instead of its pending queue here (see
+  ;; overflow!), so that its queue there is read again once it has caught
+  ;; up (drain-pending!).
+  (java.util.concurrent.ConcurrentHashMap.))
+
+(defn- overflow?
+  "Whether `msg`, for the kept session at `key` whose pending queue here is
+   at pause-threshold, goes to the cluster's queue rather than holding up
+   `publisher-key`: when that is another broker's bridge, with a message key
+   to queue it under.
+
+   A bridge carries every message from its broker for every subscriber
+   here. Paused for one that had fallen behind (throttle-publisher!), it
+   held all of them back, and the backlog waited on the other broker, in
+   its memory alone: a broker that stopped took seconds of everyone's
+   messages with it. Exactly-once subscribers fall behind easily, each
+   message holding a window slot for two round trips to Rama, and a chaos
+   run lost thousands that way, on every topic and every kind of session.
+   A clean session still holds the bridge up: it has no queue to go to."
+  [key msg publisher-key]
+  (boolean (and (:enqueue! @session-source)
+                (::msg-key msg)
+                (keep-session? (get @*clients* key))
+                (bridge/bridge? (:client-id (get @*clients* publisher-key))))))
+
+(defn- overflow!
+  "Put `msg` on `client-id`'s queue in the cluster, under its message key,
+   instead of the pending queue here: see overflow?. A hand-off, so the
+   broker that sent it is told it is safe once the cluster has it; and a
+   hold for that broker let go then, as a hand-over lets it go."
+  [client-id msg]
+  (let [k   (::msg-key msg)
+        fut (hand-off! ((:enqueue! @session-source)
+                        client-id
+                        (cond-> (select-keys msg [:topic :payload :qos :properties])
+                          (::queued-at msg) (assoc :queued-at (::queued-at msg)))
+                        k))]
+    (trace/trace! client-id msg "overflowed to the cluster's queue" k)
+    (.put ^java.util.concurrent.ConcurrentHashMap overflowed client-id true)
+    (once-done! fut #(when-let [origin (::origin msg)]
+                       (release-origin-hold! origin k client-id)))
+    true))
+
 (defn- deliver-now-or-queue!
   [key client-id msg publisher-key]
   (if-let [packet-identifier (acquire-packet-identifier! client-id msg
@@ -2804,6 +2849,9 @@
           (note-delivered! client-id msg)
           (release-packet-identifier! client-id packet-identifier))
         true))
+    (if (and (>= (long (pending-count client-id)) (long pause-threshold))
+             (overflow? key msg publisher-key))
+      (overflow! client-id msg)
     (let [held? (queue-pending! client-id msg)]
       (if (and held? (left-meanwhile? key client-id nil msg))
         (do (trace/trace! client-id msg "not held: its connection has left")
@@ -2815,9 +2863,12 @@
             (note-delivered! client-id msg)
             (do (.increment ^LongAdder MqttStat/droppedMessages)
                 (note-refused! client-id publisher-key)))
-          (when (>= (pending-count client-id) pause-threshold)
+          ;; Not a bridge for a kept session: what comes after this goes
+          ;; to the cluster's queue instead (overflow?).
+          (when (and (>= (pending-count client-id) pause-threshold)
+                     (not (overflow? key msg publisher-key)))
             (throttle-publisher! key publisher-key client-id))
-          held?)))))
+          held?))))))
 
 (declare flush-pending!)
 
@@ -2931,7 +2982,13 @@
       (release-packet-identifier! client-id packet-identifier)))
   (when (<= (pending-count client-id) resume-threshold)
     (when-let [subscriber (connection-of key)]
-      (.ackDrained subscriber))))
+      (.ackDrained subscriber))
+    ;; Caught up after some of its messages went to the cluster's queue:
+    ;; read them back now, rather than waiting for a nudge that may have
+    ;; come while there was no room for them (see overflow!).
+    (when (.remove ^java.util.concurrent.ConcurrentHashMap overflowed client-id)
+      (when-let [connect-id (get-in @*clients* [key :connect-id])]
+        (read-soon! client-id connect-id 0)))))
 
 #_(defn send-message [keys msg]
     (log/debug "sending message  from  clj" (:packet-type msg) " " (:packet-identifier msg))

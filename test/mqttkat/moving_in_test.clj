@@ -399,3 +399,88 @@
       (finally
         (tu/close! raw)
         (close! sub)))))
+
+(deftest a-subscriber-behind-does-not-hold-up-the-bridge
+  ;; A kept session that falls behind on copies from another broker: past
+  ;; pause-threshold they go to its queue on the cluster rather than
+  ;; pausing the bridge, which would hold back every subscriber behind it
+  ;; and leave the backlog on the other broker (handlers/overflow?). Read
+  ;; back once it has caught up.
+  (with-redefs [h/pause-threshold 3 h/resume-threshold 1]
+    (let [id       (tu/client-id "behind")
+          topic    (tu/topic "behind")
+          n        20
+          got      (atom [])
+          acking?  (atom false)
+          sub-c    (atom nil)
+          ack!     #(client/send-message @sub-c {:packet-type :PUBACK :packet-identifier %
+                                                 :protocol-version 5})
+          unacked  (atom [])
+          connack  (promise)
+          suback   (promise)
+          _        (reset! sub-c (client/client
+                                  tu/host tu/port
+                                  (MqttHandler.
+                                   ^clojure.lang.IFn
+                                   (fn [msg _]
+                                     (case (:packet-type msg)
+                                       :CONNACK (deliver connack msg)
+                                       :SUBACK  (deliver suback msg)
+                                       :PUBLISH (do (swap! got conj (tu/payload-str msg))
+                                                    (if @acking?
+                                                      (ack! (:packet-identifier msg))
+                                                      (swap! unacked conj (:packet-identifier msg))))
+                                       nil))
+                                   1)))
+          pubacks  (atom 0)
+          y-c      (atom nil)
+          y-ack    (promise)]
+      (try
+        (client/send-message @sub-c {:packet-type :CONNECT :protocol-name "MQTT" :protocol-version 5
+                                     :keep-alive 100 :clean-session? false :client-id id
+                                     :properties {:session-expiry-interval 3600 :receive-maximum 1}})
+        (is (some? (deref connack 5000 nil)))
+        (client/send-message @sub-c {:packet-type :SUBSCRIBE :packet-identifier 1 :protocol-version 5
+                                     :topics [{:qos 1 :topic-filter topic}]})
+        (is (some? (deref suback 5000 nil)))
+        (reset! y-c (client/client
+                     tu/host tu/port
+                     (MqttHandler.
+                      ^clojure.lang.IFn
+                      (fn [msg _]
+                        (case (:packet-type msg)
+                          :CONNACK (deliver y-ack msg)
+                          :PUBACK  (swap! pubacks inc)
+                          nil))
+                      1)))
+        (client/send-message @y-c {:packet-type :CONNECT :protocol-name "MQTT" :protocol-version 5
+                                   :keep-alive 100 :clean-session? true
+                                   :client-id (str bridge/client-id-prefix (tu/client-id "peer-o"))})
+        (is (some? (deref y-ack 5000 nil)))
+        (dotimes [i n]
+          (client/send-message @y-c {:packet-type :PUBLISH :protocol-version 5 :topic topic :qos 1
+                                     :packet-identifier (inc i) :retain? false :duplicate? false
+                                     :payload (.getBytes (str i) "UTF-8")
+                                     :properties {:user-properties
+                                                  [[bridge/msg-key-property (h/new-message-key)]]}}))
+        (is (tu/wait-until #(= n @pubacks) 10000)
+            "every copy is taken: the bridge is not held up by the one subscriber")
+        (is (= 1 (count @got)) "which has had one, its window")
+        ;; One more, now that the subscriber is behind: a bridge paused for
+        ;; it would not be read, and this would never be taken.
+        (client/send-message @y-c {:packet-type :PUBLISH :protocol-version 5 :topic topic :qos 1
+                                   :packet-identifier (inc n) :retain? false :duplicate? false
+                                   :payload (.getBytes (str n) "UTF-8")
+                                   :properties {:user-properties
+                                                [[bridge/msg-key-property (h/new-message-key)]]}})
+        (is (tu/wait-until #(= (inc n) @pubacks) 5000)
+            "and a copy after it is read and taken as well")
+        (is (tu/wait-until #(<= (- n 1 3) (count (cluster/queued *conn* id))) 10000)
+            "and has the rest past the threshold on its queue in the cluster")
+        (reset! acking? true)
+        (run! ack! @unacked)
+        (is (tu/wait-until #(= (set (map str (range (inc n)))) (set @got)) 15000)
+            "all of which it is sent once it catches up")
+        (finally
+          (try (client/close @sub-c) (catch Exception _ nil))
+          (try (client/close @y-c) (catch Exception _ nil)))))))
