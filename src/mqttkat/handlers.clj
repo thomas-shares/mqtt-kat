@@ -1241,9 +1241,10 @@
 
 (defn hand-off!
   "Note `fut`, a write of the message being published to somewhere that
-   outlives this broker, so its acknowledgement waits for it. Returns `fut`.
-   Outside a publish, nothing waits: a write a lost bridge copy makes later
-   is for a message its publisher was told of long ago."
+   outlives this broker, so its acknowledgement waits for it: a write to
+   Rama, or a copy forwarded to another broker, until that broker has it
+   (mqttkat.rama.cluster/taken-or-handed-back). Returns `fut`. Outside a
+   publish, nothing waits."
   [fut]
   (when (and fut *hand-offs*)
     (.add ^java.util.List *hand-offs* fut))

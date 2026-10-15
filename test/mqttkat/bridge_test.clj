@@ -519,3 +519,43 @@
         (reset! bridge/peer-alive? nil)
         (reset! bridge/peer-address nil)
         (try (.close ss) (catch Exception _ nil))))))
+
+;; What the publisher's acknowledgement waits for, on a cluster: the peer
+;; having the copy (mqttkat.rama.cluster/taken-or-handed-back).
+(deftest a-copy-is-taken-when-the-peer-acknowledges-it
+  (testing "QoS 1: on its PUBACK, and only its own"
+    (let [p     (peer connack-2)
+          taken (atom #{})]
+      (try
+        (doseq [i (range 2)]
+          (bridge/send-to! "me" "peer-30" {:host "127.0.0.1" :port (:port p)} [] (str "t/" i)
+                           {:qos 1 :payload (.getBytes (str i)) :properties {}
+                            :on-lost #(throw (AssertionError. "not lost"))
+                            :on-taken #(swap! taken conj i)}))
+        (is (tu/wait-until #(= 2 (count (publishes p)))))
+        (Thread/sleep 200)
+        (is (= #{} @taken) "not before the peer says so")
+        (answer! p (MqttPubAck/encode {:packet-type :PUBACK :protocol-version 5
+                                       :packet-identifier (:packet-identifier (first (publishes p)))
+                                       :reason-code 0}))
+        (is (tu/wait-until #(= #{0} @taken)))
+        (finally (bridge/drop! "peer-30") (.stop ^MqttServer (:server p) 100)))))
+
+  (testing "QoS 2: on a PUBREC that takes it; one that refuses it is a loss"
+    (let [p     (peer connack-2)
+          taken (atom #{})
+          lost  (atom #{})]
+      (try
+        (doseq [i (range 2)]
+          (bridge/send-to! "me" "peer-31" {:host "127.0.0.1" :port (:port p)} [] (str "t/" i)
+                           {:qos 2 :payload (.getBytes (str i)) :properties {}
+                            :on-lost #(swap! lost conj i)
+                            :on-taken #(swap! taken conj i)}))
+        (is (tu/wait-until #(= 2 (count (publishes p)))))
+        (let [[a b] (map :packet-identifier (publishes p))]
+          (answer! p (MqttPubRec/encode {:packet-type :PUBREC :protocol-version 5
+                                         :packet-identifier a :reason-code 0}))
+          (answer! p (MqttPubRec/encode {:packet-type :PUBREC :protocol-version 5
+                                         :packet-identifier b :reason-code 0x87})))
+        (is (tu/wait-until #(and (= #{0} @taken) (= #{1} @lost))))
+        (finally (bridge/drop! "peer-31") (.stop ^MqttServer (:server p) 100))))))

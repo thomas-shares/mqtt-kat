@@ -1356,6 +1356,41 @@
       {:brokers brokers :skip skip :queue queue :leaving leaving
        :holders holders :groups groups})))
 
+(def forward-taken-wait-millis
+  "The longest a publisher's acknowledgement waits for a peer to take a
+   forwarded copy (see taken-or-handed-back): a link neither acknowledged
+   nor given up on in this long is one the publisher should not be held
+   by. The link gives up on a peer far sooner than this on its own."
+  30000)
+
+(defn- taken-or-handed-back
+  "For a QoS 1 or 2 copy forwarded to another broker: [future on-taken
+   on-lost], `on-lost` wrapping `lost`. The future completes once the peer
+   has taken the copy, or once it was handed back and what `lost` wrote to
+   the cluster in its place has landed. It is a hand-off, so the
+   publisher's acknowledgement waits for it.
+
+   Until it was, a copy forwarded to a live subscriber on another broker
+   was in this broker's memory alone, waiting in the bridge's queue, when
+   the publisher was told it was safe. A broker killed then took it with
+   it: a chaos run lost blocks of some 375 messages per subscriber, all
+   published in the second or three before their broker was stopped."
+  [lost]
+  (let [taken (CompletableFuture.)]
+    (.completeOnTimeout taken nil (long forward-taken-wait-millis) TimeUnit/MILLISECONDS)
+    [taken
+     #(.complete taken nil)
+     (fn []
+       (let [writes (java.util.ArrayList.)]
+         (try
+           (binding [handlers/*hand-offs* writes]
+             (lost))
+           (finally
+             (if (.isEmpty writes)
+               (.complete taken nil)
+               (.whenComplete (CompletableFuture/allOf (into-array CompletableFuture writes))
+                              (reify BiConsumer (accept [_ _ _] (.complete taken nil)))))))))]))
+
 (defn forward-publish!
   "What the bridge's forwarder does when this broker is attached: `plan`,
    carried out at the addresses the registry has. A broker the registry
@@ -1440,12 +1475,17 @@
                                     (queue-for holders true)))]
           (doseq [{:keys [client-id]} holders]
             (trace/trace! client-id traced "copy sent to" peer-id))
-          (if-let [peer (get @brokers peer-id)]
-            (bridge/send-to! broker-id peer-id peer group-keys topic
-                             (assoc msg :on-lost on-lost :on-undelivered on-undelivered
-                                        :view-v (:v plan) :not-served served))
-            (do (log/warn "no address for broker" peer-id "- queuing" topic "for its sessions")
-                (when on-lost (on-lost)))))))
+          (let [[taken on-taken on-lost] (if on-lost
+                                           (taken-or-handed-back on-lost)
+                                           [nil nil nil])]
+            (handlers/hand-off! taken)
+            (if-let [peer (get @brokers peer-id)]
+              (bridge/send-to! broker-id peer-id peer group-keys topic
+                               (assoc msg :on-lost on-lost :on-undelivered on-undelivered
+                                          :on-taken on-taken
+                                          :view-v (:v plan) :not-served served))
+              (do (log/warn "no address for broker" peer-id "- queuing" topic "for its sessions")
+                  (when on-lost (on-lost))))))))
     (when (pos? qos)
       ;; Not for whoever this broker delivered to live, as the plan says
       ;; above: that client has it, and queuing too would deliver twice on

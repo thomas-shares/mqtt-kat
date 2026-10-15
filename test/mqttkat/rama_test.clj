@@ -31,7 +31,7 @@
             [mqttkat.web.console :as console]
             [mqttkat.web.state :as state])
   (:import [org.mqttkat MqttHandler]
-           [org.mqttkat.packages MqttConnAck MqttPubRec]
+           [org.mqttkat.packages MqttConnAck MqttPubAck MqttPubRec]
            [org.mqttkat.server MqttServer]))
 
 (use-fixtures :once tu/broker-fixture)
@@ -90,8 +90,9 @@
 
 (defn- peer-broker
   "Another broker, as far as the bridge can tell: a listener that keeps every
-   packet it is sent and answers a QoS 2 publish with the PUBREC the bridge
-   has to complete. Returns {:server :port :received}."
+   packet it is sent, acknowledges a QoS 1 publish, and answers a QoS 2 one
+   with the PUBREC the bridge has to complete. Returns {:server :port
+   :received}."
   []
   (let [received (atom [])
         server   (atom nil)
@@ -106,6 +107,10 @@
                                           (MqttConnAck/encode {:packet-type :CONNACK :protocol-version 5
                                                                :session-present? false :reason-code 0
                                                                :properties {:receive-maximum 128}})))
+                    (when (and (= :PUBLISH packet-type) (= 1 (long (or qos 0))))
+                      (.sendMessageBuffer ^MqttServer @server [client-key]
+                                          (MqttPubAck/encode {:packet-type       :PUBACK
+                                                              :packet-identifier packet-identifier})))
                     (when (and (= :PUBLISH packet-type) (= 2 (long (or qos 0))))
                       (.sendMessageBuffer ^MqttServer @server [client-key]
                                           (MqttPubRec/encode {:packet-type       :PUBREC
@@ -884,8 +889,9 @@
 
                       (testing "QoS 1"
                         (client/send-message (:client pub) (publish-msg "bridge/t" "one" 1 11))
-                        (tu/expect-eventually! (:ch pub) :PUBACK)
-                        (is (tu/wait-until #(= 2 (count (publishes)))))
+                        (tu/expect-eventually! (:ch pub) :PUBACK 5000)
+                        (is (= 2 (count (publishes)))
+                            "acknowledged once the peer has its copy, not before")
                         (is (= 1 (:qos (second (publishes)))))
                         (is (some? (:packet-identifier (second (publishes)))))
                         (is (= "one" (tu/payload-str (tu/expect-eventually! (:ch local) :PUBLISH)))))
@@ -2332,3 +2338,22 @@
     (#'cluster/apply-shard-change! conn nil {"a/#" {"c1" whole "c2" part}})
     (is (= #{"c1"} (set (map :client-id (cluster/matching-subscriptions conn "a/x"))))
         "the whole one filed, the other left out, and nothing thrown")))
+
+(deftest a-forwarded-copy-is-waited-for-until-taken-or-handed-back
+  (let [taken-or-handed-back #'cluster/taken-or-handed-back]
+    (testing "taken: done at once"
+      (let [[f on-taken _] (taken-or-handed-back (fn []))]
+        (is (not (.isDone ^java.util.concurrent.CompletableFuture f)))
+        (on-taken)
+        (is (.isDone ^java.util.concurrent.CompletableFuture f))))
+    (testing "handed back: done once what was written in its place has landed"
+      (let [write (java.util.concurrent.CompletableFuture.)
+            [f _ on-lost] (taken-or-handed-back #(h/hand-off! write))]
+        (on-lost)
+        (is (not (.isDone ^java.util.concurrent.CompletableFuture f)))
+        (.complete write nil)
+        (is (tu/wait-until #(.isDone ^java.util.concurrent.CompletableFuture f) 1000))))
+    (testing "handed back with nothing written: done at once"
+      (let [[f _ on-lost] (taken-or-handed-back (fn []))]
+        (on-lost)
+        (is (.isDone ^java.util.concurrent.CompletableFuture f))))))

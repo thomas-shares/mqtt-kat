@@ -510,6 +510,15 @@
        (catch Throwable t
          (log/warn t "bridge to" peer-id "could not hand back a message it lost"))))))
 
+(defn- taken!
+  "The peer has taken the message `entry` was for: its `:on-taken`, if it
+   has one, is told. Never throws, as lost! does not."
+  [peer-id entry]
+  (when-let [f (:on-taken entry)]
+    (try (f)
+         (catch Throwable t
+           (log/warn t "bridge to" peer-id "could not say a message was taken")))))
+
 (defn- on-packet
   "What the peer sends back. A bridge subscribes to nothing, so this is its
    CONNACK and acknowledgements.
@@ -524,7 +533,8 @@
    messages written and not yet done with. A PUBACK, or a PUBREC accepting
    the message, says the peer has it: from then on it is the peer's to
    deliver, and its :hold, if it has one, waits in `awaiting` until the peer
-   says its subscribers have it too. A QoS 2 message stays in `inflight`,
+   says its subscribers have it too; its :on-taken is called, which is what
+   the publisher's acknowledgement waits for (see send-to!). A QoS 2 message stays in `inflight`,
    :released?, until its PUBCOMP, so that a link that comes back to the
    peer's session sends its PUBREL again (see resume-inflight!). A PUBREC
    refusing it says the peer will not, and the message is lost here after
@@ -541,7 +551,10 @@
                      (reset! present (boolean session-present?))
                      ;; §3.2.2.3.3: absent means 65,535.
                      (deliver window (Semaphore. (int (or (:receive-maximum properties) 65535))))))
-      :PUBACK  (do (await! peer-id (:hold (settle!))) (release!))
+      :PUBACK  (let [entry (settle!)]
+                 (await! peer-id (:hold entry))
+                 (taken! peer-id entry)
+                 (release!))
       :PUBCOMP (do (settle!) (release!))
       :PUBREC  (if (>= code 0x80)
                  (let [entry (settle!)]
@@ -551,7 +564,8 @@
                    (when-let [entry (when packet-identifier (.get inflight (int packet-identifier)))]
                      (when-not (:released? entry)
                        (.put inflight (int packet-identifier) (assoc entry :released? true))
-                       (await! peer-id (:hold entry))))
+                       (await! peer-id (:hold entry))
+                       (taken! peer-id entry)))
                    (try
                      (client/send-message c {:packet-type :PUBREL :packet-identifier packet-identifier})
                      (catch IOException e
@@ -653,7 +667,7 @@
   "Send one queued message: a slot in the peer's window first for QoS 1 and
    2 (§4.9), then the write. A peer that frees no slot for window-wait-ms
    has stopped acknowledging, which ends the link."
-  [{:keys [^AtomicInteger ids ^ConcurrentHashMap inflight] :as link} client ^Semaphore window {:keys [qos packet on-lost hold]}]
+  [{:keys [^AtomicInteger ids ^ConcurrentHashMap inflight] :as link} client ^Semaphore window {:keys [qos packet on-lost hold on-taken]}]
   (let [qos (long qos)
         id  (when (pos? qos) (next-packet-id ids))]
     ;; Off the queue and not yet written while it waits for a slot: if the
@@ -692,7 +706,8 @@
     ;; With the packet, for a link that comes back to the peer's session to
     ;; send again.
     (when id
-      (.put inflight (int id) {:on-lost on-lost :hold hold :packet (assoc packet :packet-identifier id)}))
+      (.put inflight (int id) {:on-lost on-lost :hold hold :on-taken on-taken
+                               :packet (assoc packet :packet-identifier id)}))
     (try
       (client/send-message client (cond-> packet id (assoc :packet-identifier id)))
       (catch IOException e
@@ -914,17 +929,19 @@
    past queue-pause-at. Not sent at all — the peer was unreachable a moment
    ago, or its link is queue-limit behind — it is handed straight back
    through `on-lost`. At the front of the queue rather than the back when
-   `front?`."
+   `front?`. `on-taken` is called once the peer has it: see send-to!."
   ([my-id peer-id peer qos packet publisher on-lost]
-   (enqueue! my-id peer-id peer qos packet publisher on-lost nil false))
+   (enqueue! my-id peer-id peer qos packet publisher on-lost nil false nil))
   ([my-id peer-id peer qos packet publisher on-lost hold]
-   (enqueue! my-id peer-id peer qos packet publisher on-lost hold false))
+   (enqueue! my-id peer-id peer qos packet publisher on-lost hold false nil))
   ([my-id peer-id peer qos packet publisher on-lost hold front?]
+   (enqueue! my-id peer-id peer qos packet publisher on-lost hold front? nil))
+  ([my-id peer-id peer qos packet publisher on-lost hold front? on-taken]
    (if-let [{:keys [^LinkedBlockingDeque queue] :as link} (link! my-id peer-id peer)]
      (if (>= (.size queue) (long queue-limit))
        (do (.increment ^LongAdder MqttStat/droppedMessages)
            (lost! peer-id on-lost :queue-full))
-       (let [item {:qos qos :packet packet :on-lost on-lost :hold hold}]
+       (let [item {:qos qos :packet packet :on-lost on-lost :hold hold :on-taken on-taken}]
          (if front? (.putFirst queue item) (.put queue item))
          ;; The link may have ended between being looked up and this put —
          ;; a peer refusing the connection ends it within a millisecond —
@@ -974,7 +991,10 @@
    the peer is unreachable, or goes before acknowledging it.
    `:on-undelivered`, with a `:msg-key`, is called if the peer takes the
    message but goes before saying its subscribers have it (see `awaiting`).
-   `:view-v` is the version of this broker's view the copy was planned at,
+   `:on-taken`, of no arguments, is called once the peer has acknowledged
+   a QoS 1 or 2 message, with a PUBACK or a PUBREC taking it: from then on
+   the message lives on there, and between this and :on-lost the sender
+   hears one way or the other what became of it. `:view-v` is the version of this broker's view the copy was planned at,
    and `:not-served` the clients that view has on the peer that this broker
    delivered to itself (see mqttkat.intent).
 
@@ -984,7 +1004,7 @@
    properties travel; the receiving broker strips them for its 3.1.1
    subscribers as it does for any publish."
   [my-id peer-id peer group-keys topic {:keys [qos payload properties publisher on-lost on-undelivered groups-only? msg-key
-                                               view-v not-served]}]
+                                               view-v not-served on-taken]}]
   (let [qos (long (or qos 0))]
     (enqueue! my-id peer-id peer qos
               {:packet-type      :PUBLISH
@@ -1009,7 +1029,9 @@
               ;; there is nothing to hand back.
               (when (pos? qos) on-lost)
               (when (and (pos? qos) msg-key on-undelivered)
-                {:msg-key msg-key :on-undelivered on-undelivered}))))
+                {:msg-key msg-key :on-undelivered on-undelivered})
+              false
+              (when (pos? qos) on-taken))))
 
 (defn takeover!
   "Tell `peer-id` that `client-id` has connected here, so the connection it

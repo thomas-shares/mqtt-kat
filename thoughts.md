@@ -4,6 +4,35 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261015
 
+### A forwarded copy is a hand-off
+
+The publisher's acknowledgement waited for the broker's writes to Rama, but
+not for the copies it forwarded to other brokers over the bridges. A copy
+for a live subscriber on another broker sat in the bridge's queue, in this
+broker's memory alone, while the publisher was told the message was safe. A
+broker stopped then took the queue with it: the broker-kill run lost blocks
+of about 375 messages per subscriber, all from the second or three before.
+
+Now each QoS 1 or 2 copy forwarded to a peer comes with a future, noted as
+a hand-off (`taken-or-handed-back` in mqttkat.rama.cluster), which completes
+when either:
+
+- the peer has taken the copy (`:on-taken` in mqttkat.bridge, on a PUBACK,
+  or a PUBREC accepting it); or
+- the copy was handed back, and what `:on-lost` wrote to the cluster in its
+  place, the queued copies for the sessions it was for, has landed.
+
+From either point the message lives somewhere other than this broker. A
+peer that dies after taking it was covered already: the copy waits in
+`awaiting` until the peer says its subscribers have it, and is queued for
+them if it does not.
+
+The cost is a broker-to-broker round trip on each acknowledgement, and more
+when a bridge is behind. That is back-pressure the publishers ought to feel:
+it was the bridge's backlog that was lost. The wait is capped at 30 s
+(`forward-taken-wait-millis`), well past the point where the link gives up
+on a peer by itself.
+
 ### What the first measured runs said
 
 Load run 152221: exactly-once on half the topics, 3,000 a second asked, no
