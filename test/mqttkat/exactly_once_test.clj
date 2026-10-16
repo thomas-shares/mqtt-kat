@@ -238,3 +238,79 @@
           (is (= 1 (count (filter #(= "b" (tu/payload-str %)) @publishes))))
           (is (tu/wait-until #(empty? (cluster/queued *conn* id)) 5000) "and both are done")
           (finally (try (client/close (:client again)) (catch Exception _ nil))))))))
+
+(deftest the-publisher-is-told-only-once-the-claim-has-landed
+  ;; The claim is a hand-off: a broker that died with it still on its way
+  ;; had the message in its memory alone, and the publisher was told it was
+  ;; safe and its hold let go.
+  (let [topic (tu/topic "eo")
+        id    (tu/client-id "eo-sub")
+        real  (:claim! @h/session-source)
+        go    (java.util.concurrent.CompletableFuture.)
+        sub   (answering (atom []))]
+    (with-redefs [h/exactly-once-filters (delay [topic])]
+      (swap! h/session-source assoc :claim!
+             (fn [client-id k msg]
+               (if (:released? msg)
+                 (real client-id k msg)
+                 (.thenCompose go (reify java.util.function.Function
+                                    (apply [_ _] (real client-id k msg)))))))
+      (try
+        ((:send! sub) {:packet-type :CONNECT :protocol-name "MQTT" :protocol-version 4
+                       :keep-alive 100 :clean-session? false :client-id id})
+        (is (some? (deref (:connack sub) 5000 nil)))
+        ((:send! sub) {:packet-type :SUBSCRIBE :packet-identifier 1 :topics [{:qos 2 :topic-filter topic}]})
+        (is (some? (deref (:suback sub) 5000 nil)))
+        (is (tu/wait-until #(seq (cluster/matching-subscriptions *conn* topic)) 10000))
+        (let [done (future (publish-qos-2! topic "held"))]
+          (Thread/sleep 1500)
+          (is (not (realized? done)) "no PUBCOMP while the claim is on its way")
+          (.complete go nil)
+          (is (some? (deref done 10000 nil)) "and one once it has landed"))
+        (finally
+          (swap! h/session-source assoc :claim! real)
+          (try (client/close (:client sub)) (catch Exception _ nil)))))))
+
+(deftest an-exactly-once-message-with-no-slot-waits-on-the-cluster
+  ;; Not in this broker's memory, where a broker that died took it.
+  (let [topic     (tu/topic "eo")
+        id        (tu/client-id "eo-sub")
+        got       (atom [])
+        acking?   (atom false)
+        unacked   (atom [])
+        c         (atom nil)
+        connack   (promise)
+        suback    (promise)
+        send!     #(client/send-message @c (assoc % :protocol-version 5))
+        on        (fn [msg _]
+                    (case (:packet-type msg)
+                      :CONNACK (deliver connack msg)
+                      :SUBACK  (deliver suback msg)
+                      :PUBLISH (do (swap! got conj (tu/payload-str msg))
+                                   (if @acking?
+                                     (send! {:packet-type :PUBREC :packet-identifier (:packet-identifier msg)})
+                                     (swap! unacked conj (:packet-identifier msg))))
+                      :PUBREL  (send! {:packet-type :PUBCOMP :packet-identifier (:packet-identifier msg)})
+                      nil))]
+    (reset! c (client/client tu/host tu/port (MqttHandler. ^clojure.lang.IFn on 1)))
+    (with-redefs [h/exactly-once-filters (delay [topic])]
+      (try
+        (send! {:packet-type :CONNECT :protocol-name "MQTT" :keep-alive 100 :clean-session? false
+                :client-id id :properties {:session-expiry-interval 3600 :receive-maximum 1}})
+        (is (some? (deref connack 5000 nil)))
+        (send! {:packet-type :SUBSCRIBE :packet-identifier 1 :topics [{:qos 2 :topic-filter topic}]})
+        (is (some? (deref suback 5000 nil)))
+        (is (tu/wait-until #(seq (cluster/matching-subscriptions *conn* topic)) 10000))
+        (doseq [p ["a" "b" "c"]] (is (some? (publish-qos-2! topic p))))
+        (is (tu/wait-until #(= 1 (count @got)) 5000) "one sent: the window")
+        (let [queued (cluster/queued *conn* id)]
+          (is (= 3 (count queued)) "all three on the cluster")
+          (is (= 2 (count (remove (comp :packet-identifier second) queued)))
+              "two of them waiting, the third in flight under its identifier"))
+        (reset! acking? true)
+        (run! #(send! {:packet-type :PUBREC :packet-identifier %}) @unacked)
+        (is (tu/wait-until #(= #{"a" "b" "c"} (set @got)) 15000) "all sent once there is room")
+        (Thread/sleep 1000)
+        (is (= 3 (count @got)) "once each")
+        (is (tu/wait-until #(empty? (cluster/queued *conn* id)) 10000) "and none left")
+        (finally (try (client/close @c) (catch Exception _ nil)))))))

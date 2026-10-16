@@ -4,6 +4,40 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261016
 
+### What the trace said: the claim was not a hand-off
+
+Run 105511, the forwarded-copy wait on, the logs kept this time:
+
+- 2,320 lost: 1,334 on the exactly-once topics, 986 on the rest.
+- 11 duplicates on the exactly-once topics.
+
+**A lost message, `0:797` for `s40`.** Broker 1 logged "claiming" and
+"sent" at 10:57:48.019, the second the run killed it, and nothing after.
+"Sent" is logged when the claim begins, not when the message goes out. The
+claim never landed, and the message had been in broker 1's memory alone.
+The claim was not a hand-off, so the cluster could let the publisher's
+hold go before the claim existed. The publisher's PUBREL, sent again to
+another broker, then found nothing to publish. A message waiting for a
+window slot was no better: in the pending queue, in memory alone.
+
+**Now:**
+
+- The claim is a hand-off. The publisher's PUBACK or PUBCOMP, and the
+  unhold before it, wait for the claim to land.
+- An exactly-once message with no window slot goes to the cluster's queue,
+  as an overflow does, and is claimed when it is read back with a slot to
+  go in.
+
+**The duplicates were not exactly-once deliveries.** `s43`'s trace has
+"sent" and no "claiming": a clean session, which exactly-once does not
+cover. The check counted by topic alone. It now counts only kept sessions,
+and so does the runner's trace of duplicates.
+
+The 986 on the other topics are the old gap of the same shape: a message
+in a dying broker's memory, in a kept session's window or pending queue,
+whose publisher was already told. The publisher's hand-offs only ever
+covered the sessions that were away.
+
 ### The trace was there, and the restarts wiped it
 
 Run 093553 had the forwarded-copy wait on and every subscriber traced:

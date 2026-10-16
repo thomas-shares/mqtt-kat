@@ -2689,6 +2689,14 @@
   [key client-id msg packet-identifier]
   (if-let [k (and (not (:duplicate? msg)) (exactly-once-key key msg))]
     (let [{:keys [claim! queued-entry]} @session-source
+          ;; A hand-off: the publisher is not told the message is safe, nor
+          ;; its hold on the cluster let go, before the claim has landed.
+          ;; Sent ahead of it, a broker that died with the claim still on
+          ;; its way had the message in its memory alone, and the publisher
+          ;; sending its PUBREL again elsewhere found nothing held to
+          ;; publish again. Given up on, too, when the connection goes: the
+          ;; hand-over has the message then.
+          landed (hand-off! (CompletableFuture.))
           here? #(and (live-key? key)
                       (identical? msg (get-in (some-> (existing-outbound client-id) deref)
                                               [:inflight packet-identifier])))]
@@ -2696,15 +2704,17 @@
       (.execute ^java.util.concurrent.Executor claim-executor
                 ^Runnable
                 (fn []
-                  (when (until-landed! (str "claim " k " for " client-id)
-                                       #(claim! client-id k (for-claim msg packet-identifier))
-                                       here?)
-                    (let [entry (volatile! nil)]
-                      (when (until-landed! (str "read the claim on " k " for " client-id)
-                                           #(CompletableFuture/completedFuture
-                                             (vreset! entry (queued-entry client-id k)))
-                                           here?)
-                        (claimed! key client-id k msg packet-identifier @entry))))))
+                  (let [ok? (until-landed! (str "claim " k " for " client-id)
+                                           #(claim! client-id k (for-claim msg packet-identifier))
+                                           here?)]
+                    (.complete landed nil)
+                    (when ok?
+                      (let [entry (volatile! nil)]
+                        (when (until-landed! (str "read the claim on " k " for " client-id)
+                                             #(CompletableFuture/completedFuture
+                                               (vreset! entry (queued-entry client-id k)))
+                                             here?)
+                          (claimed! key client-id k msg packet-identifier @entry)))))))
       true)
     (send-publish! key msg packet-identifier)))
 
@@ -2816,9 +2826,10 @@
 
 (defn- overflow!
   "Put `msg` on `client-id`'s queue in the cluster, under its message key,
-   instead of the pending queue here: see overflow?. A hand-off, so the
-   broker that sent it is told it is safe once the cluster has it; and a
-   hold for that broker let go then, as a hand-over lets it go."
+   instead of the pending queue here: see overflow?, and an exactly-once
+   message with no window slot free (deliver-now-or-queue!). A hand-off,
+   so whoever sent it is told it is safe once the cluster has it; and a
+   hold for the broker that sent it let go then, as a hand-over lets it go."
   [client-id msg]
   (let [k   (::msg-key msg)
         fut (hand-off! ((:enqueue! @session-source)
@@ -2849,8 +2860,13 @@
           (note-delivered! client-id msg)
           (release-packet-identifier! client-id packet-identifier))
         true))
-    (if (and (>= (long (pending-count client-id)) (long pause-threshold))
-             (overflow? key msg publisher-key))
+    (if (or (and (>= (long (pending-count client-id)) (long pause-threshold))
+                 (overflow? key msg publisher-key))
+            ;; An exactly-once message waits on the cluster, not here: held
+            ;; here, it was in this broker's memory alone, the publisher
+            ;; told it was safe, and a broker that died took it with it.
+            ;; It is claimed when it is read back, with a slot to go in.
+            (and (::msg-key msg) (exactly-once-key key msg)))
       (overflow! client-id msg)
     (let [held? (queue-pending! client-id msg)]
       (if (and held? (left-meanwhile? key client-id nil msg))

@@ -419,7 +419,16 @@
                      :deliveries {[0 1] [{:at 650 :qos 2} {:at 700 :qos 2}]
                                   [0 2] [{:at 650 :qos 2}]}}))]
     (is (= {true {:duplicate 1} false {:lost 1}} (:qos2-by-exactly-once (r ["t/1"]))))
-    (is (= {false {:duplicate 1 :lost 1}} (:qos2-by-exactly-once (r nil))))))
+    (is (= {false {:duplicate 1 :lost 1}} (:qos2-by-exactly-once (r nil))))
+    (testing "and only for a kept session: a clean one is promised nothing past its connection"
+      (is (= {false {:duplicate 1 :lost 1}}
+             (:qos2-by-exactly-once
+              (run {:sub sub2 :exactly-once ["t/1"] :persistent? false
+                    :publishes {[0 1] (msg 2 500 600)
+                                [0 2] (assoc (msg 2 500 600) :topic "t/2")
+                                [0 3] (assoc (msg 2 500 600) :topic "t/3")}
+                    :deliveries {[0 1] [{:at 650 :qos 2} {:at 700 :qos 2}]
+                                 [0 2] [{:at 650 :qos 2}]}})))))))
 
 ;; What the brokers traced about a lost message, picked out of their logs.
 (deftest the-trace-of-a-lost-message-is-picked-out-of-the-logs

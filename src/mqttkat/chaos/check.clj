@@ -352,9 +352,12 @@
         dup-by     (volatile! {})
         dup-resent (volatile! {})
         ;; QoS 2 lost and repeated, on the topics the brokers deliver
-        ;; exactly once (:exactly-once, filters) and on the rest.
+        ;; exactly once (:exactly-once, filters) and on the rest. Only to a
+        ;; kept session: a clean one's ends with its connection, and the
+        ;; brokers promise it nothing past that.
         by-eo      (volatile! {})
-        eo?        (fn [m] (boolean (some #(match? % (:topic m)) (:exactly-once opts))))
+        kept?      (boolean (:persistent? (get clients client)))
+        eo?        (fn [m] (and kept? (boolean (some #(match? % (:topic m)) (:exactly-once opts)))))
         lost-resent (volatile! 0)
         lost       (volatile! 0)
         lost-sent  (volatile! {})

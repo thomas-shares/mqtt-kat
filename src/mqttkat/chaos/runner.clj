@@ -767,6 +767,7 @@
     ;; once, which should be none.
     (let [eo   (exactly-once-filters nil)
           dups (filter #(and (= :duplicate (:kind %)) (:topic %)
+                             (get-in % [:session :persistent?])
                              (some (fn [f] (check/matches? f (:topic %))) eo))
                        (:violations result))]
       (doseq [[v lines] (traced (System/getenv "MQTTKAT_TRACE") dups :duplicate 3 "logs/brokers")]
