@@ -1248,35 +1248,41 @@
                         (finally
                           (tu/close! pub)))))
 
-                  (testing "a live copy a kept session has no room for waits here, and is not written to the cluster"
-                    ;; It was, for a while, so that a broker killed with it
-                    ;; waiting did not lose it. Under load that was a Rama
-                    ;; append and a take-off for every message to every slow
-                    ;; persistent subscriber: Rama refused them by the
-                    ;; hundred thousand, connects timed out, and a load run
-                    ;; with no chaos at all lost messages.
-                    (let [sub (tu/connect-v5! "held-back" :id "held-back" :clean-session? false
-                                              :properties {:session-expiry-interval 3600
-                                                           :receive-maximum 1})
-                          pub (tu/connect! "held-back-pub" :ordered? true)]
-                      (try
-                        (tu/send-v5! sub (subscribe-msg "held/#" 1 1 :version 5))
-                        (tu/expect-eventually! (:ch sub) :SUBACK)
-                        (client/send-message (:client pub) (publish-msg "held/t" "sent" 1 51 :version 4))
-                        (tu/expect-eventually! (:ch pub) :PUBACK)
-                        (let [first-got (tu/expect-eventually! (:ch sub) :PUBLISH)]
-                          (is (= "sent" (tu/payload-str first-got)))
-                          (client/send-message (:client pub) (publish-msg "held/t" "held" 1 52 :version 4))
-                          (tu/expect-eventually! (:ch pub) :PUBACK)
-                          (Thread/sleep 200)
-                          (is (empty? (cluster/queued conn "held-back")))
-                          (tu/send-v5! sub {:packet-type :PUBACK :packet-identifier (:packet-identifier first-got)})
-                          (let [got (tu/expect-eventually! (:ch sub) :PUBLISH)]
-                            (is (= "held" (tu/payload-str got)) "and sent once the window has room")
-                            (tu/send-v5! sub {:packet-type :PUBACK :packet-identifier (:packet-identifier got)}))
-                          (is (nil? (tu/take! (:ch sub) 300)) "once"))
-                        (finally
-                          (tu/close! sub pub)))))
+                  (testing "a live copy a kept session has no room for waits on the cluster, not here"
+                    ;; Here, it was in this broker's memory alone, its
+                    ;; publisher told it was safe: a broker that died took
+                    ;; it with it (handlers/overflow?). Here it was, for a
+                    ;; while, because writing it was too much for Rama under
+                    ;; load; MQTTKAT_WAIT_ON_CLUSTER=false still does that.
+                    (doseq [[on? where] [[true "on the cluster"] [false "here"]]]
+                      (testing where
+                        (with-redefs [h/wait-on-cluster? (delay on?)]
+                          (let [id  (tu/client-id "held-back")
+                                sub (tu/connect-v5! "held-back" :id id :clean-session? false
+                                                    :properties {:session-expiry-interval 3600
+                                                                 :receive-maximum 1})
+                                pub (tu/connect! "held-back-pub" :ordered? true)]
+                            (try
+                              (tu/send-v5! sub (subscribe-msg "held/#" 1 1 :version 5))
+                              (tu/expect-eventually! (:ch sub) :SUBACK)
+                              (client/send-message (:client pub) (publish-msg "held/t" "sent" 1 51 :version 4))
+                              (tu/expect-eventually! (:ch pub) :PUBACK)
+                              (let [first-got (tu/expect-eventually! (:ch sub) :PUBLISH)]
+                                (is (= "sent" (tu/payload-str first-got)))
+                                (client/send-message (:client pub) (publish-msg "held/t" "held" 1 52 :version 4))
+                                (tu/expect-eventually! (:ch pub) :PUBACK)
+                                (Thread/sleep 200)
+                                (is (= (if on? ["held"] [])
+                                       (mapv (comp #(String. ^bytes % "UTF-8") :payload second)
+                                             (cluster/queued conn id))))
+                                (tu/send-v5! sub {:packet-type :PUBACK :packet-identifier (:packet-identifier first-got)})
+                                (let [got (tu/expect-eventually! (:ch sub) :PUBLISH 5000)]
+                                  (is (= "held" (tu/payload-str got)) "and sent once the window has room")
+                                  (tu/send-v5! sub {:packet-type :PUBACK :packet-identifier (:packet-identifier got)}))
+                                (is (nil? (tu/take! (:ch sub) 300)) "once")
+                                (is (tu/wait-until #(empty? (cluster/queued conn id)) 5000) "and taken off"))
+                              (finally
+                                (tu/close! sub pub))))))))
 
                   (testing "a version 5 session back from the cluster is answered in version 5, and stays kept"
                     ;; adopt-session! parks what the cluster has, which is the

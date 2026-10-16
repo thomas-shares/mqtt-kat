@@ -2696,7 +2696,7 @@
           ;; sending its PUBREL again elsewhere found nothing held to
           ;; publish again. Given up on, too, when the connection goes: the
           ;; hand-over has the message then.
-          landed (hand-off! (CompletableFuture.))
+          ^CompletableFuture landed (hand-off! (CompletableFuture.))
           here? #(and (live-key? key)
                       (identical? msg (get-in (some-> (existing-outbound client-id) deref)
                                               [:inflight packet-identifier])))]
@@ -2804,32 +2804,54 @@
   ;; up (drain-pending!).
   (java.util.concurrent.ConcurrentHashMap.))
 
-(defn- overflow?
-  "Whether `msg`, for the kept session at `key` whose pending queue here is
-   at pause-threshold, goes to the cluster's queue rather than holding up
-   `publisher-key`: when that is another broker's bridge, with a message key
-   to queue it under.
+(def wait-on-cluster?
+  "Whether every QoS 1 or 2 message for a kept session with no window slot
+   free waits on the cluster's queue (overflow?). On unless
+   -Dmqttkat.waitOnCluster=false or MQTTKAT_WAIT_ON_CLUSTER=false: it was
+   tried once before, and at 3,000 messages a second the writes for slow
+   persistent subscribers were most of what Rama was asked to do, it
+   refused them by the hundred thousand, and a load run lost messages. The
+   queues are batched per client and have a topology of their own since;
+   off, only what overflow? names besides goes there."
+  (delay (not= "false" (or (System/getProperty "mqttkat.waitOnCluster")
+                           (System/getenv "MQTTKAT_WAIT_ON_CLUSTER")))))
 
-   A bridge carries every message from its broker for every subscriber
-   here. Paused for one that had fallen behind (throttle-publisher!), it
-   held all of them back, and the backlog waited on the other broker, in
-   its memory alone: a broker that stopped took seconds of everyone's
-   messages with it. Exactly-once subscribers fall behind easily, each
-   message holding a window slot for two round trips to Rama, and a chaos
-   run lost thousands that way, on every topic and every kind of session.
-   A clean session still holds the bridge up: it has no queue to go to."
-  [key msg publisher-key]
+(defn- overflow?
+  "Whether `msg`, for the client at `key` with no window slot free, waits on
+   the cluster's queue rather than in its pending queue here: a QoS 1 or 2
+   message with a message key to queue it under, for a session that
+   outlives its connection, on a cluster.
+
+   Held here, it was in this broker's memory alone, and its publisher had
+   been told it was safe: a broker that died took it with it, and the
+   session resumed elsewhere never had it. A chaos run's losses on the
+   topics not delivered exactly once were nearly all of these, \"pending:
+   window full\" the last the trace said of them. It took the bridge with
+   it, too: a subscriber behind paused the connection its copies came in on
+   (throttle-publisher!), which for copies from another broker is the
+   bridge, so every subscriber behind it waited and the backlog sat on the
+   other broker. A clean session still waits here, and still pauses its
+   publisher: it has no queue to go to. Retained messages replayed have no
+   message key, and wait here as well: the cluster keeps them anyway.
+
+   With wait-on-cluster? off, only an exactly-once message (exactly-once-
+   key), and a copy from another broker once pause-threshold are waiting
+   here, so that the bridge is not paused."
+  [key msg client-id publisher-key]
   (boolean (and (:enqueue! @session-source)
                 (::msg-key msg)
+                (pos? (long (or (:qos msg) 0)))
                 (keep-session? (get @*clients* key))
-                (bridge/bridge? (:client-id (get @*clients* publisher-key))))))
+                (or @wait-on-cluster?
+                    (exactly-once-key key msg)
+                    (and (>= (long (pending-count client-id)) (long pause-threshold))
+                         (bridge/bridge? (:client-id (get @*clients* publisher-key))))))))
 
 (defn- overflow!
   "Put `msg` on `client-id`'s queue in the cluster, under its message key,
-   instead of the pending queue here: see overflow?, and an exactly-once
-   message with no window slot free (deliver-now-or-queue!). A hand-off,
-   so whoever sent it is told it is safe once the cluster has it; and a
-   hold for the broker that sent it let go then, as a hand-over lets it go."
+   instead of the pending queue here: see overflow?. A hand-off, so whoever
+   sent it is told it is safe once the cluster has it; and a hold for the
+   broker that sent it let go then, as a hand-over lets it go."
   [client-id msg]
   (let [k   (::msg-key msg)
         fut (hand-off! ((:enqueue! @session-source)
@@ -2860,13 +2882,9 @@
           (note-delivered! client-id msg)
           (release-packet-identifier! client-id packet-identifier))
         true))
-    (if (or (and (>= (long (pending-count client-id)) (long pause-threshold))
-                 (overflow? key msg publisher-key))
-            ;; An exactly-once message waits on the cluster, not here: held
-            ;; here, it was in this broker's memory alone, the publisher
-            ;; told it was safe, and a broker that died took it with it.
-            ;; It is claimed when it is read back, with a slot to go in.
-            (and (::msg-key msg) (exactly-once-key key msg)))
+    ;; An exactly-once message is claimed when it is read back, with a
+    ;; slot to go in.
+    (if (overflow? key msg client-id publisher-key)
       (overflow! client-id msg)
     (let [held? (queue-pending! client-id msg)]
       (if (and held? (left-meanwhile? key client-id nil msg))
@@ -2879,10 +2897,7 @@
             (note-delivered! client-id msg)
             (do (.increment ^LongAdder MqttStat/droppedMessages)
                 (note-refused! client-id publisher-key)))
-          ;; Not a bridge for a kept session: what comes after this goes
-          ;; to the cluster's queue instead (overflow?).
-          (when (and (>= (pending-count client-id) pause-threshold)
-                     (not (overflow? key msg publisher-key)))
+          (when (>= (pending-count client-id) pause-threshold)
             (throttle-publisher! key publisher-key client-id))
           held?))))))
 

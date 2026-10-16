@@ -4,6 +4,37 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261016
 
+### Exactly once held; now the waiting messages everywhere
+
+Run 111704 (broker-kill, the claim a hand-off, the forwarded-copy wait on):
+
+- **Exactly-once topics, kept sessions:** nothing lost, nothing delivered
+  twice.
+- **The other topics:** 602 lost and 779 duplicates, the duplicates allowed
+  there.
+- **Where the losses were:** 448 of them were `s12`'s. Each one's trace
+  ended at "pending: window full" on broker 3, in the second broker 3 was
+  killed. These were messages waiting for a slot in a dying broker's
+  memory, their publishers told already.
+
+So every QoS 1 or 2 message for a kept session with no window slot free
+now waits on the cluster's queue, as the exactly-once ones and the bridge's
+overflow already did (`overflow?`). It is read back once the subscriber
+has room. That costs a Rama write and a take-off only while a subscriber is
+behind.
+
+This was tried once before, and undone: at 3,000 a second, the writes for
+slow persistent subscribers were most of what Rama was asked for, Rama
+refused them by the hundred thousand, and a load run lost messages. Since
+then the queue writes are batched per client and the queues have their own
+topology, but the load run is where to look. `MQTTKAT_WAIT_ON_CLUSTER=false`
+puts it back as it was, keeping the exactly-once messages and the bridge's
+overflow on the cluster.
+
+What is still lost when a broker dies: a message sent to a kept session and
+not yet acknowledged, up to 128 per subscriber. Only exactly-once covers
+that, at its price.
+
 ### What the trace said: the claim was not a hand-off
 
 Run 105511, the forwarded-copy wait on, the logs kept this time:
