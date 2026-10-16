@@ -85,7 +85,13 @@
     (do (println "--rama should be external, in-process or none, not" mode)
         (System/exit 2))))
 
-(defn start-one! [n {:keys [port http conductor advertise heap rama]}]
+(defn start-one!
+  "Start broker `n`. Its log is appended to, not started afresh, unless
+   `fresh?`: a chaos run restarts the brokers it kills, and every line a
+   broker wrote before was gone, the trace of a message lost before the
+   last restart with it. Only what this run of it writes is looked at to
+   tell whether it is up."
+  [n {:keys [port http conductor advertise heap rama]} fresh?]
   (let [mqtt  (+ port (dec n))
         web   (+ http (dec n))
         log   (str (log-file n))
@@ -106,7 +112,9 @@
                        n (str/join " and " taken) (first taken)))
 
       :else
-      (let [_    (fs/delete-if-exists log)
+      (let [_    (when fresh? (fs/delete-if-exists log))
+            _    (spit log (format "==== broker-%d starting at %s%n" n (java.time.Instant/now)) :append true)
+            from (fs/size log)
             argv (concat ["java"
                           "--add-opens" "java.base/java.lang=ALL-UNNAMED"
                           "--enable-native-access=ALL-UNNAMED"
@@ -123,8 +131,8 @@
                           ;; connection thread stalled a whole broker once.
                           "-Djdk.tracePinnedThreads=full"
                           "-jar" jar (str mqtt) (str web)])
-            proc (apply p/process {:out :write :out-file (fs/file log)
-                                   :err :write :err-file (fs/file log)}
+            proc (apply p/process {:out :append :out-file (fs/file log)
+                                   :err :append :err-file (fs/file log)}
                         argv)
             pid  (.pid (:proc proc))]
         (spit (str (pid-file n)) (str pid))
@@ -132,7 +140,8 @@
         ;; Up when the console is listening: that is the last thing -main starts.
         (let [deadline (+ (System/currentTimeMillis) 60000)]
           (loop []
-            (let [text (if (fs/exists? log) (slurp log) "")]
+            (let [all  (if (fs/exists? log) (slurp log) "")
+                  text (subs all (min (long from) (count all)))]
               (cond
                 (not (.isAlive (:proc proc)))
                 (println (format "broker-%d died on start - see %s" n log))
@@ -158,8 +167,12 @@
     (println "no" jar "- run `lein uberjar` first")
     (System/exit 1))
   (fs/create-dirs run-dir)
-  (doseq [i (range 1 (inc n))]
-    (start-one! i opts)))
+  ;; Fresh logs when none is running: a new run. Otherwise this is a
+  ;; restart, of brokers a chaos run stopped, and what they wrote before
+  ;; is kept.
+  (let [fresh? (empty? (running))]
+    (doseq [i (range 1 (inc n))]
+      (start-one! i opts fresh?))))
 
 (defn signal! [n signal]
   (if-let [pid (pid-of n)]

@@ -4,6 +4,32 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261016
 
+### The trace was there, and the restarts wiped it
+
+Run 093553 had the forwarded-copy wait on and every subscriber traced:
+
+- **No stalls.** The publishers' acknowledgements kept climbing all run.
+- **Lost:** 1,785. Most were `s3`'s (1,317), a kept `+` session on broker
+  1, between 54 and 148 s, published on broker 2.
+- **The copies were taken.** They were acknowledged after about 4 s, so
+  broker 1 had taken them, and then neither delivered them nor left them on
+  the cluster's queue (`:left-queued` was empty).
+- **Exactly-once duplicates:** 7.
+
+It is one run against one, and these losses are not the bridge's gap, so
+whether the wait helps is still open.
+
+The trace had nothing for any of them, and not because nothing was
+followed. `brokers.bb start` deleted a broker's log before starting it, and
+a chaos run restarts the brokers it kills through that same command. By the
+end, each log held only what its broker wrote after its last restart.
+Broker 1 restarted at 138 s; `s3`'s last loss was at 148 s.
+
+Now a broker's log is started afresh only when no broker is running (a new
+run), and appended to otherwise, with a line marking each start. Whether a
+broker is up is judged on what that start wrote, not on an old "http status
+page" further up.
+
 ### Isolated bridges: from ten thousand lost to 361
 
 Broker-kill run 092535, the bridges isolated, the forwarded-copy wait off:
