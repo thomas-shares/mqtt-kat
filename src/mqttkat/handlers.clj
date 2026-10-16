@@ -4245,6 +4245,12 @@
     ;; A PUBREL a hand-over left on the cluster's queue is done there now,
     ;; and so is a message delivered exactly once, kept there till now.
     (when-let [k (::release-key released)]
+      ;; Had, from now: a read of the queue made before the take-off lands
+      ;; leaves it alone. One made before even its release had landed found
+      ;; it still in flight, unreleased, under an identifier the client has
+      ;; just let go, and sent it again under it: a second delivery, with
+      ;; nothing killed. A load run had 35.
+      (note-had! client-id k)
       (if (::settle-on-pubcomp? released)
         (settled! client-id (assoc released ::cluster-key k))
         (when-let [{:keys [dequeue!]} @session-source]

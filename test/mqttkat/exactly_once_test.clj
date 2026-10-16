@@ -314,3 +314,47 @@
         (is (= 3 (count @got)) "once each")
         (is (tu/wait-until #(empty? (cluster/queued *conn* id)) 10000) "and none left")
         (finally (try (client/close @c) (catch Exception _ nil)))))))
+
+(deftest a-stale-read-does-not-send-again-what-the-client-has-completed
+  ;; A read of the queue made before the release landed has the message in
+  ;; flight, unreleased, under an identifier the client has since completed
+  ;; and let go: acted on after the PUBCOMP, it went out again under it, a
+  ;; second delivery with nothing killed. The take-off is held back here,
+  ;; so that only what the PUBCOMP notes itself keeps it out.
+  (let [topic     (tu/topic "eo")
+        id        (tu/client-id "eo-sub")
+        publishes (atom [])
+        releases  (atom [])
+        sub       (subscriber publishes releases)
+        send!     #(client/send-message (:client sub) %)
+        real      (:dequeue! @h/session-source)]
+    ;; Connected long enough ago that the live delivery is not reconciled
+    ;; with the queue, and so not noted as had when it is sent.
+    (with-redefs [h/exactly-once-filters   (delay [topic])
+                  h/reconcile-window-millis 0]
+      (swap! h/session-source assoc :dequeue! (fn [_ _] (java.util.concurrent.CompletableFuture.)))
+      (try
+        (send! {:packet-type :CONNECT :protocol-name "MQTT" :protocol-version 4
+                :keep-alive 100 :clean-session? false :client-id id})
+        (is (some? (deref (:connack sub) 5000 nil)))
+        (send! {:packet-type :SUBSCRIBE :packet-identifier 1 :topics [{:qos 2 :topic-filter topic}]})
+        (is (some? (deref (:suback sub) 5000 nil)))
+        (is (tu/wait-until #(seq (cluster/matching-subscriptions *conn* topic)) 10000))
+        (is (some? (publish-qos-2! topic "once")))
+        (is (tu/wait-until #(seq @publishes) 10000))
+        (let [pid   (:packet-identifier (first @publishes))
+              [k e] (first (cluster/queued *conn* id))
+              stale (dissoc e :released?)]
+          (is (= pid (:packet-identifier e)))
+          (send! {:packet-type :PUBREC :packet-identifier pid})
+          (is (tu/wait-until #(seq @releases) 10000))
+          (send! {:packet-type :PUBCOMP :packet-identifier pid})
+          (Thread/sleep 300)
+          (let [key        (h/live-connection id)
+                connect-id (get-in @h/*clients* [key :connect-id])]
+            (h/deliver-queued! id connect-id [[k stale]] #{}))
+          (Thread/sleep 1000)
+          (is (= 1 (count @publishes)) "not sent again"))
+        (finally
+          (swap! h/session-source assoc :dequeue! real)
+          (try (client/close (:client sub)) (catch Exception _ nil)))))))

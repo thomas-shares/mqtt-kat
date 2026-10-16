@@ -4,6 +4,35 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261016
 
+### The load run, clean but for 35, and the 35
+
+Load run 141814, default settings (exactly-once on half the topics, the
+forwarded-copy wait on, waiting on the cluster off):
+
+- **Lost:** nothing.
+- **Published:** 70,436, against 75,752 for the last good exactly-once
+  load run.
+- **Rama** caught up within the drain.
+- **But 35 duplicates on the exactly-once topics**, kept sessions, with
+  nothing killed.
+
+The chaos client keeps a persistent session's QoS 2 identifiers across a
+reconnect, so these were the broker's. The race:
+
+1. A read of the client's queue on the cluster is made while the release
+   of a message has not landed yet. It finds the message in flight,
+   unreleased, under identifier P.
+2. The client sends its PUBCOMP for P, and the broker lets P go.
+3. The read is then acted on. P is not in use here any more, so
+   `resend-handed-over!` sends the message again under it, and the client,
+   having completed P, takes it for a new one.
+
+A read leaves alone the keys in `catching-up`'s `:had`. A delivery reached
+those only once its take-off landed, seconds later with Rama behind, unless
+it was a live one reconciled shortly after a connect. Now the PUBCOMP notes
+the key there itself. The test holds the take-off back, hands
+`deliver-queued!` such a stale entry, and fails without the change.
+
 ### Waiting on the cluster broke the load run again: now opt-in
 
 Load run 132801, with every waiting message for a kept session on the
