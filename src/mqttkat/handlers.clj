@@ -2806,15 +2806,16 @@
 
 (def wait-on-cluster?
   "Whether every QoS 1 or 2 message for a kept session with no window slot
-   free waits on the cluster's queue (overflow?). On unless
-   -Dmqttkat.waitOnCluster=false or MQTTKAT_WAIT_ON_CLUSTER=false: it was
-   tried once before, and at 3,000 messages a second the writes for slow
-   persistent subscribers were most of what Rama was asked to do, it
-   refused them by the hundred thousand, and a load run lost messages. The
-   queues are batched per client and have a topology of their own since;
-   off, only what overflow? names besides goes there."
-  (delay (not= "false" (or (System/getProperty "mqttkat.waitOnCluster")
-                           (System/getenv "MQTTKAT_WAIT_ON_CLUSTER")))))
+   free waits on the cluster's queue (overflow?), so that a broker that dies
+   does not take it with it. Off unless -Dmqttkat.waitOnCluster=true or
+   MQTTKAT_WAIT_ON_CLUSTER=true. On, it closed the broker-kill run's last
+   losses, and broke the load run as it did the first time it was tried: at
+   3,000 a second nearly every subscriber is behind, nearly every message
+   went to Rama and back, Rama fell minutes behind, and a run with nothing
+   killed lost 494,118 messages that were written and never read back in
+   time. Off, only what overflow? names besides goes there."
+  (delay (= "true" (or (System/getProperty "mqttkat.waitOnCluster")
+                       (System/getenv "MQTTKAT_WAIT_ON_CLUSTER")))))
 
 (defn- overflow?
   "Whether `msg`, for the client at `key` with no window slot free, waits on
@@ -2897,7 +2898,14 @@
             (note-delivered! client-id msg)
             (do (.increment ^LongAdder MqttStat/droppedMessages)
                 (note-refused! client-id publisher-key)))
-          (when (>= (pending-count client-id) pause-threshold)
+          ;; Not a bridge, for a kept session: what comes after this from
+          ;; it goes to the cluster's queue (overflow?), and the bridge
+          ;; carries every other subscriber's messages too.
+          (when (and (>= (pending-count client-id) pause-threshold)
+                     (not (and (::msg-key msg)
+                               (:enqueue! @session-source)
+                               (keep-session? (get @*clients* key))
+                               (bridge/bridge? (:client-id (get @*clients* publisher-key))))))
             (throttle-publisher! key publisher-key client-id))
           held?))))))
 

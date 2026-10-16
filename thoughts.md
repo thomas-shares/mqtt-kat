@@ -4,6 +4,30 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261016
 
+### Waiting on the cluster broke the load run again: now opt-in
+
+Load run 132801, with every waiting message for a kept session on the
+cluster:
+
+- **Lost:** 494,118, with nothing killed.
+- **Rama:** 390,447 enqueues and 72,519 take-offs. `enqueue@ack` had a p50
+  of 5 s, and the probes' p99 was 5 to 10 s.
+- **The drain:** gave up after 1,140 s, with messages still arriving.
+- **What was left:** about a thousand messages per losing client still on
+  their queues, mostly plain copies, written and never read back.
+
+At 3,000 a second nearly every subscriber is behind, so nearly every
+message went to Rama, back, and off again, and Rama fell minutes behind:
+the first attempt over again. The queues' own topology and per-client
+batching did not change that. It is off by default now
+(`MQTTKAT_WAIT_ON_CLUSTER=true` turns it on). The exactly-once messages,
+and a kept session's copies from a bridge past pause-threshold, still go
+to the cluster.
+
+So the price of closing the dying broker's memory is Rama's capacity. On
+this one machine, it can be paid only for the topics that ask for it. That
+is what exactly-once is for.
+
 ### Exactly once held; now the waiting messages everywhere
 
 Run 111704 (broker-kill, the claim a hand-off, the forwarded-copy wait on):

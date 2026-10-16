@@ -1248,12 +1248,12 @@
                         (finally
                           (tu/close! pub)))))
 
-                  (testing "a live copy a kept session has no room for waits on the cluster, not here"
+                  (testing "a live copy a kept session has no room for waits on the cluster when asked, else here"
                     ;; Here, it was in this broker's memory alone, its
                     ;; publisher told it was safe: a broker that died took
-                    ;; it with it (handlers/overflow?). Here it was, for a
-                    ;; while, because writing it was too much for Rama under
-                    ;; load; MQTTKAT_WAIT_ON_CLUSTER=false still does that.
+                    ;; it with it (handlers/overflow?). Only with
+                    ;; MQTTKAT_WAIT_ON_CLUSTER=true: under load, writing it
+                    ;; was too much for Rama, and by default it waits here.
                     (doseq [[on? where] [[true "on the cluster"] [false "here"]]]
                       (testing where
                         (with-redefs [h/wait-on-cluster? (delay on?)]
