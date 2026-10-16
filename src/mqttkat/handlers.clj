@@ -1803,10 +1803,22 @@
           [before _]
           (swap-vals! catching-up
                       (fn [m] (cond
+                                ;; A new connection reads afresh. Left as the
+                                ;; old one had them, a read under way for it
+                                ;; or one a nudge had scheduled was never
+                                ;; ended or begun, both being for the old
+                                ;; connect-id, and every read and nudge after
+                                ;; waited on them for as long as the client
+                                ;; stayed: a load run left 57,454 messages on
+                                ;; the queues of clients that were connected,
+                                ;; Rama idle, nothing reading them.
                                 (contains? m client-id)
-                                (update m client-id assoc
-                                        :connect-id connect-id
-                                        :reconcile-until (+ now (long (last catch-up-reads-millis))))
+                                (update m client-id
+                                        #(cond-> (assoc %
+                                                        :connect-id connect-id
+                                                        :reconcile-until (+ now (long (last catch-up-reads-millis))))
+                                           (not= connect-id (:connect-id %))
+                                           (assoc :reading? false :again? false :scheduled? false)))
                                 (kept?) (assoc m client-id {:connect-id connect-id :had {}})
                                 :else   m)))]
       (when (contains? before client-id)

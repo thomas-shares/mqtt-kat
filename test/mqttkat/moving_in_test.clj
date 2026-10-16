@@ -484,3 +484,25 @@
         (finally
           (try (client/close @sub-c) (catch Exception _ nil))
           (try (client/close @y-c) (catch Exception _ nil)))))))
+
+(deftest a-reconnect-during-a-read-does-not-stop-the-reads-after-it
+  ;; A read under way, or scheduled by a nudge, for the connection before
+  ;; this one: it is never ended or begun as that connection's, and the
+  ;; reads for this one waited on it for ever. A message put on the queue
+  ;; now must still be read and sent.
+  (let [id       (tu/client-id "rewired")
+        topic    (tu/topic "rewired")
+        received (atom [])
+        c        (connect! (client received) id false)]
+    (try
+      (is (some? (deref (:connack c) 5000 nil)))
+      ((:send! c) {:packet-type :SUBSCRIBE :packet-identifier 1 :topics [{:qos 1 :topic-filter topic}]})
+      (is (some? (deref (:suback c) 5000 nil)))
+      (let [connect-id (get-in @h/*clients* [(h/live-connection id) :connect-id])]
+        (swap! @#'h/catching-up assoc id
+               {:connect-id "the-connection-before" :had {} :reading? true :scheduled? true})
+        (h/catch-up! id connect-id))
+      @(cluster/enqueue! *conn* id {:topic topic :qos 1 :payload (.getBytes "queued" "UTF-8")}
+                         (h/new-message-key))
+      (is (tu/wait-until #(= ["queued"] @received) 10000) "read and sent")
+      (finally (close! c)))))

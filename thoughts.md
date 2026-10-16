@@ -4,6 +4,36 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261016
 
+### Queues nobody read: a reconnect wedged the reads
+
+Load runs 144903 and 152413 (the second after a Rama reset) lost 518,615
+and 88,821. Both ended with tens of thousands of messages on the queues of
+clients that were connected, the drain giving up after nearly twenty
+minutes with Rama idle, its probes at 50 ms.
+
+- **Who lost:** a handful of subscribers lost thousands each, the rest tens.
+  The ones with thousands were wildcard subscribers taking exactly-once
+  topics among the rest: subscribers that fall behind, whose messages go to
+  the cluster's queue to wait.
+- **That they fall behind is capacity.** That nothing read their queues back
+  once the load stopped is not.
+
+A client's reads of its queue are kept in `catching-up`, one at a time:
+`:reading?` while one is under way, `:scheduled?` once a nudge has asked
+for one. `begin-read!` and `end-read!` touch those only for the connect-id
+they were begun for. A client that reconnected meanwhile (the redirects at
+the start, the drops under load) had `catch-up!` put the new connect-id in
+and leave the flags as they were. The old read's end then changed nothing,
+`:reading?` stayed true, and every read for the new connection only marked
+itself to be done again, while every nudge was taken as already scheduled.
+That held for as long as the client stayed connected.
+
+Now `catch-up!` starts a new connection's reading afresh. The test wedges a
+client that way, puts a message on its queue, and fails without the change.
+
+It does not touch the duplicate on a publisher's resend, a message given a
+second key by the broker that took the resend. That is next.
+
 ### The load run, clean but for 35, and the 35
 
 Load run 141814, default settings (exactly-once on half the topics, the
