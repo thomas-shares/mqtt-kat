@@ -2,6 +2,28 @@
 
 In this file will go my thoughts and ramblings about this project and what I have done and what I might do next.
 
+## 20261016
+
+### Isolated bridges: from ten thousand lost to 361
+
+Broker-kill run 092535, the bridges isolated, the forwarded-copy wait off:
+
+- **Lost:** 361, against 10,019 the run before. They were all one
+  subscriber's (`s32`, kept, `+`, on broker 3), published on broker 1
+  between 94 and 97 s. Broker 3 had come back at 93.6 s with that one
+  client on it, and broker 1 was killed at 99.9 s. So it was the copies
+  still in broker 1's bridge to broker 3, which was new and catching up,
+  when broker 1 went: the forwarded-copy gap once more, now a few seconds
+  of one link rather than of every link.
+- **Duplicates on the exactly-once topics:** 6, against 254 on the rest. It
+  should be none. Duplicate reports now carry their topic, and the runner
+  prints the trace of the first three on an exactly-once topic for a
+  followed client.
+
+The forwarded-copy wait went wrong because a slow subscriber paused the
+bridge it waited on. That coupling is gone now, so the wait deserves
+another run (`MQTTKAT_FORWARD_ACK=true`): it is what closes this last gap.
+
 ## 20261015
 
 ### A subscriber behind no longer holds up the bridge

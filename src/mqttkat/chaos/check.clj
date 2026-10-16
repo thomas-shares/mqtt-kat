@@ -453,6 +453,7 @@
                 (when (pos? (long (:resends m 0)))
                   (vswap! dup-resent update possible (fnil inc 0)))
                 (add! {:kind :duplicate :client client :msg id :qos possible :times n
+                       :topic (:topic m)
                        :at at :brokers brokers
                        :session (select-keys (get clients client) [:persistent? :mqtt5? :filter :sub-qos])
                        :sent (:sent m) :acked (:acked m) :pub-broker (:pub-broker m)

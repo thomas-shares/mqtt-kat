@@ -763,5 +763,17 @@
       (if (seq lines)
         (doseq [l lines] (println "   " l))
         (println "    (no trace lines: not followed, or never reached a broker that was)")))
+    ;; And of the first few delivered twice on a topic delivered exactly
+    ;; once, which should be none.
+    (let [eo   (exactly-once-filters nil)
+          dups (filter #(and (= :duplicate (:kind %)) (:topic %)
+                             (some (fn [f] (check/matches? f (:topic %))) eo))
+                       (:violations result))]
+      (doseq [[v lines] (traced (System/getenv "MQTTKAT_TRACE") dups :duplicate 3 "logs/brokers")]
+        (println)
+        (println "  delivered twice, exactly once" (pr-str (select-keys v [:client :msg :topic :sent :acked :at :brokers])))
+        (if (seq lines)
+          (doseq [l lines] (println "   " l))
+          (println "    (no trace lines)"))))
     (shutdown-agents)
     (System/exit (if (:ok? result) 0 1))))
