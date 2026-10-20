@@ -78,9 +78,13 @@
   ;; `lein test :sim` sweeps seeds of the simulation (mqttkat.sim.*) and
   ;; fails on any run that breaks doc/guarantees.md: the bar a design has
   ;; to clear, not a regression test.
-  :test-selectors {:default     (complement (some-fn :performance :sim))
-                   :performance :performance
-                   :sim         :sim
+  ;;
+  ;; `lein test :known-failure` runs the tests that confirm a bug not yet
+  ;; fixed: each says which, and is left out of `lein test` until it is.
+  :test-selectors {:default       (complement (some-fn :performance :sim :known-failure))
+                   :performance   :performance
+                   :sim           :sim
+                   :known-failure :known-failure
                    :portable    :portable
                    ;; What CI runs against Mosquitto: the portable tests less
                    ;; the ones Mosquitto is known to fail, each of which says

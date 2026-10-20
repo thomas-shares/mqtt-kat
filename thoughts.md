@@ -69,6 +69,19 @@ Ways out, cheapest first:
 - **Design A,** where an identifier is a position in a durable log and
   there is no counter in memory to lose.
 
+**Confirmed against the code** (`mqttkat.orphaned-identifier-test`).
+
+1. A kept session is recorded on a dead broker, listed and refusing.
+2. The session resumes here holding identifier 1.
+3. One QoS 2 message is published.
+
+It went out as `[[1 "after"]]`, on an ordinary topic and on an
+exactly-once one alike, and the client dropped it. The claim on the
+exactly-once topic does not help: it records the identifier this broker
+chose, not the one the client holds. The test is tagged `:known-failure`,
+left out of `lein test` until it is fixed, and run with
+`lein test :known-failure`.
+
 The simulation also has a `:sim` test selector that sweeps 20 seeds and
 fails on any violation. It fails today, on this.
 
