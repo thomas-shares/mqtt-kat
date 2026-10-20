@@ -4,6 +4,48 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261020
 
+### Forward-ack on receipt, in the code
+
+What the code already had was closer to safe than the simulation's
+`:receipt`. Once a peer has taken a copy, the broker that sent it keeps it
+in `awaiting` until the peer says its subscribers have it, and queues it on
+the cluster if the peer dies first (`on-undelivered`). So a copy is lost on
+the bridge only when the broker it came from dies before the peer takes
+it. `forward-ack?` closes that gap; it was off because of how a peer took a
+copy:
+
+- **QoS 2:** its PUBREC to a bridge goes at once, since a bridge is never
+  held on the cluster.
+- **QoS 1:** its PUBACK waited for the peer's own writes to Rama, which is
+  `:full`.
+- **And worse:** a subscriber behind on the peer paused the connection its
+  copies came in on (`throttle-publisher!`). For a copy, that connection
+  is the bridge, so every publisher on the other broker waited on that
+  subscriber, up to the 30 s cap. Isolating the bridges stopped that for
+  kept sessions; a clean session still paused it.
+
+**Now:**
+
+1. `publish-keyed` sends a bridge's PUBACK as the copy arrives.
+2. `deliver-now-or-queue!` never pauses a bridge. A kept session behind
+   overflows to the cluster's queue, as before. A clean one is refused
+   once its pending queue is full, and counted, which
+   `doc/guarantees.md` already allows.
+3. `forward-ack?` is on by default. `MQTTKAT_FORWARD_ACK=false` turns it
+   off.
+
+**Tests** (`mqttkat.forward-ack-test`), each failing before:
+
+- A bridge's QoS 1 copy is acknowledged while the write it caused here
+  has not landed. A client's publish still waits for it.
+- A clean subscriber that answers nothing, past `pause-threshold`, does
+  not stop the bridge. Before, the copies after the pause went unread,
+  and only 133 of 153 were acknowledged.
+
+**What the runs should show:** no stalls of about 30 s, and none of the
+bridge-backlog losses from a broker killed with its bridge queue full.
+That is the first thing to check in a load run with this on.
+
 ### The two races, fixed in the code
 
 Each started with a test that failed on the code as it was.

@@ -3096,14 +3096,15 @@
             (note-delivered! client-id msg)
             (do (.increment ^LongAdder MqttStat/droppedMessages)
                 (note-refused! client-id publisher-key)))
-          ;; Not a bridge, for a kept session: what comes after this from
-          ;; it goes to the cluster's queue (overflow?), and the bridge
-          ;; carries every other subscriber's messages too.
+          ;; Never a bridge: it carries every other subscriber's messages
+          ;; too, and the publishers on the broker it comes from wait for
+          ;; it to take their copies (forward-ack?). Paused by one clean
+          ;; session here that was behind, it held every one of them up for
+          ;; thirty seconds at a time. What comes after this from it waits
+          ;; on the cluster's queue for a kept session (overflow?), and is
+          ;; refused for a clean one once its pending queue is full.
           (when (and (>= (pending-count client-id) pause-threshold)
-                     (not (and (::msg-key msg)
-                               (:enqueue! @session-source)
-                               (keep-session? (get @*clients* key))
-                               (bridge/bridge? (:client-id (get @*clients* publisher-key))))))
+                     (not (bridge/bridge? (:client-id (get @*clients* publisher-key)))))
             (throttle-publisher! key publisher-key client-id))
           held?))))))
 
@@ -3992,7 +3993,14 @@
                #(let [live (qos-1 keys topic msg false)]
                   (queue-for-offline-sessions! topic msg live)
                   (forward-to-brokers! plan topic msg live))))
-            (once-handed-off! held #(send-buffer [(:client-key msg)] ack))))
+            ;; A copy from another broker's bridge is acknowledged as it
+            ;; arrives: that broker keeps it until the sessions here have
+            ;; it (delivering-for-origin), and queues it for them if this
+            ;; one dies first, so waiting on the writes here as well only
+            ;; held up its publisher (mqttkat.rama.cluster/forward-ack?).
+            (if (bridge/bridge? (:client-id (get @*clients* (:client-key msg))))
+              (send-buffer [(:client-key msg)] ack)
+              (once-handed-off! held #(send-buffer [(:client-key msg)] ack)))))
       ;; Not for QoS 2: that message is not published until its PUBREL
       ;; arrives (§4.3.3), so it is kept for offline sessions there — and
       ;; routed there, for the same reason: the subscribers are whoever

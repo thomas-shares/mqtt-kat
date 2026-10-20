@@ -328,6 +328,13 @@ releases the dead broker's blocks with PUBRELs, so that no later message is
 given an identifier the client still holds and dropped as a repeat. Off with
 `-Dmqttkat.leases=false` or `MQTTKAT_LEASES=false`, to compare.
 
+A publisher's acknowledgement on a cluster also waits for each other broker
+to take the copies forwarded to it. The broker taking a copy acknowledges it
+as it arrives, and never stops reading a bridge for a subscriber that is
+behind: the broker that sent the copy keeps it until that broker's
+subscribers have it, and queues it for them if that broker dies. Off with
+`-Dmqttkat.forwardAck=false` or `MQTTKAT_FORWARD_ACK=false`.
+
 By default a chaos client starts on broker `i mod N` and comes back to any
 broker that is up. `:setup :redirect` hands that to the brokers: the runner
 sets the cluster's redirect policy (`:round-robin` or `:load`) through broker

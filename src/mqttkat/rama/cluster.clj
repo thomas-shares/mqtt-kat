@@ -1397,13 +1397,21 @@
 
 (def forward-ack?
   "Whether a publisher's acknowledgement waits for each peer to take its
-   forwarded copy (taken-or-handed-back). Off unless
-   -Dmqttkat.forwardAck=true or MQTTKAT_FORWARD_ACK=true: on, the first
-   runs stalled every publisher for up to forward-taken-wait-millis at a
-   time and lost far more than it saved (thoughts.md, 20261015), and it
-   stays off until it is understood why."
-  (delay (= "true" (or (System/getProperty "mqttkat.forwardAck")
-                       (System/getenv "MQTTKAT_FORWARD_ACK")))))
+   forwarded copy (taken-or-handed-back). On unless
+   -Dmqttkat.forwardAck=false or MQTTKAT_FORWARD_ACK=false.
+
+   Off, a copy waiting on a bridge was in this broker's memory alone when
+   its publisher was told it was safe, and lost when the broker died; the
+   simulation found it lost on exactly-once topics too (thoughts.md,
+   20261020). The first runs with it on stalled every publisher for thirty
+   seconds at a time (20261015): a peer took a copy only once its own
+   writes for it had landed, and a slow subscriber there paused the bridge
+   it came on. A peer now takes a copy as it arrives, and never pauses a
+   bridge (mqttkat.handlers/publish-keyed, deliver-now-or-queue!): the
+   simulation's :receipt, as safe as waiting for the writes and half the
+   cost of it or less."
+  (delay (not= "false" (or (System/getProperty "mqttkat.forwardAck")
+                           (System/getenv "MQTTKAT_FORWARD_ACK")))))
 
 (def forward-taken-wait-millis
   "The longest a publisher's acknowledgement waits for a peer to take a
