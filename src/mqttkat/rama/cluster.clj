@@ -895,6 +895,18 @@
   [conn client-id connect-id block blocks]
   (record! conn (->lease client-id connect-id block blocks) {:wait? false}))
 
+(defn barrier!
+  "Append a record that does nothing (:probe) to `client-id`'s partition of
+   the session events: a future, done once the topology has processed it,
+   and so everything appended there before it. A partition is processed in
+   order. What another broker held for the client before it died, at
+   :append-ack, can then be read, or is not there to be read
+   (mqttkat.handlers/release-from-cluster!)."
+  [conn client-id]
+  (record! conn {:event :probe :client-id client-id :key (str (java.util.UUID/randomUUID))
+                 :at (System/currentTimeMillis)}
+           {:wait? false}))
+
 (defn lease
   "`client-id`'s lease, or nil: see $$leases in mqttkat.rama.module."
   [{:keys [leases-state]} client-id]
@@ -1905,6 +1917,7 @@
            :hold!        (fn [client-id pid msg] (hold! conn client-id pid msg))
            :unhold!      (fn [client-id pids] (unhold! conn client-id pids))
            :held         (fn [client-id pid] (held conn client-id pid))
+           :barrier!     (fn [client-id] (barrier! conn client-id))
            :lease!       (fn [client-id connect-id block blocks]
                            (lease! conn client-id connect-id block blocks))
            :claim!       (fn [client-id key msg] (claim! conn client-id key msg))

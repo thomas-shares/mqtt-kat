@@ -62,6 +62,37 @@
     @(cluster/claim! *conn* c k (assoc msg :packet-identifier 7))
     (is (nil? (entry c k)) "nor taken once the client has completed it")))
 
+(deftest a-hand-over-does-not-move-a-claimed-delivery-to-another-identifier
+  ;; A race the simulation found (thoughts.md, 20261020): a delivery
+  ;; claimed under 207 is sent from pending again and claimed under 267,
+  ;; which the cluster refuses; the client drops before the refusal comes
+  ;; back, and the hand-over put the message on the queue under 267. That
+  ;; replaced 207, under which the client had it, and the next resume sent
+  ;; it again under 267, a new message to the client.
+  (let [c   (tu/client-id "claim-moved")
+        k   (h/new-message-key)
+        msg {:topic "eo/x" :qos 2 :payload (.getBytes "p" "UTF-8")}]
+    @(cluster/claim! *conn* c k (assoc msg :packet-identifier 207))
+    @(cluster/claim! *conn* c k (assoc msg :packet-identifier 267))
+    @(cluster/enqueue! *conn* c (assoc msg :packet-identifier 267) k)
+    (is (= 207 (:packet-identifier (entry c k))) "kept under the identifier claimed")
+    (testing "the hand-over of the same identifier, released, still goes on"
+      @(cluster/enqueue! *conn* c (assoc msg :packet-identifier 207 :released? true) k)
+      (is (:released? (entry c k)))
+      @(cluster/enqueue! *conn* c (assoc msg :packet-identifier 300 :released? true) k)
+      (is (= 207 (:packet-identifier (entry c k))) "and stays claimed"))))
+
+(deftest a-delivery-no-claim-put-on-the-queue-may-move-to-another-identifier
+  ;; A topic not delivered exactly once: restored under an identifier in
+  ;; use here, a message is sent under a new one, which the client then
+  ;; holds; its hand-over under that one replaces the old.
+  (let [c   (tu/client-id "handed-moved")
+        k   (h/new-message-key)
+        msg {:topic "t/x" :qos 2 :payload (.getBytes "p" "UTF-8")}]
+    @(cluster/enqueue! *conn* c (assoc msg :packet-identifier 5) k)
+    @(cluster/enqueue! *conn* c (assoc msg :packet-identifier 6) k)
+    (is (= 6 (:packet-identifier (entry c k))))))
+
 (defn- subscriber
   "A raw client that keeps every PUBLISH it is sent in `publishes` and every
    PUBREL in `releases`, and answers nothing by itself."

@@ -4,6 +4,47 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261020
 
+### The two races, fixed in the code
+
+Each started with a test that failed on the code as it was.
+
+**1. A hand-over moving a claimed delivery to another identifier.**
+
+- **The test** (`exactly-once-test/a-hand-over-does-not-move-a-claimed-delivery-to-another-identifier`):
+  1. Claim under 207.
+  2. A refused claim under 267.
+  3. An enqueue under 267.
+
+  Before the fix the entry moved to 267, then to 300.
+- **The fix** is narrower than the simulation's, which kept every
+  in-flight entry against another identifier. On an ordinary topic a
+  hand-over's own entry must be able to move. A message restored under an
+  identifier in use here goes out under another, which the client then
+  holds, and keeping the old one would send it again under that, as a
+  second message.
+  - So the queues topology marks what a claim puts on the queue
+    (`entry-put`, `:claimed?`), and keeps the mark when the same delivery
+    is put there again.
+  - `queue-verdict` refuses another identifier only over a claimed entry.
+  - A second test checks that an ordinary topic's entry still moves.
+
+**2. A PUBREL that gives up on the hold before Rama has processed it.**
+
+- **The test**
+  (`moving-in-test/a-pubrel-for-a-hold-the-cluster-has-not-processed-yet-waits-for-it`)
+  hides the hold from reads until a record appended after it has landed,
+  which is the order Rama keeps on a partition. Before the fix the PUBREL
+  was answered with a PUBCOMP and the message was published nowhere.
+- **The fix:** when the reads don't find the hold,
+  `release-from-cluster!` appends a barrier (`cluster/barrier!`, a
+  `:probe` on the client's partition) at `:ack` through `until-landed!`,
+  then reads once more. It waits exactly as long as Rama is behind on
+  that partition.
+  - A PUBREL for a message truly done already, its PUBCOMP lost, now
+    waits that long too before its PUBCOMP.
+
+Forward-ack on receipt is next.
+
 ### Both races fixed in the model; the bridge modes compared
 
 **The fixes** (`runner/race-fixes`, both off by default):

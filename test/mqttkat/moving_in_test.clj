@@ -326,6 +326,54 @@
             ((:stop peer))
             (bridge/drop! live)))))))
 
+(deftest a-pubrel-for-a-hold-the-cluster-has-not-processed-yet-waits-for-it
+  ;; A race the simulation found (thoughts.md, 20261020). The broker that
+  ;; took a QoS 2 publish held it at :append-ack, sent the PUBREC, and
+  ;; died; the PUBREL came here, and the reads (held-read-millis) found
+  ;; nothing, the topology being further behind than they waited. Answered
+  ;; with a PUBCOMP alone, the message was published nowhere. Here the
+  ;; topology is stood in for as behind: the hold is not read until a
+  ;; record appended to the publisher's partition after it has landed,
+  ;; which is what Rama's order on a partition promises.
+  (let [topic    (tu/topic "pubrel-behind")
+        received (atom [])
+        sub      (connect! (client received) (tu/client-id "behind-sub") true)
+        pub-id   (tu/client-id "behind-pub")
+        raw      (tu/client! 16 true)
+        caught-up (atom false)
+        source   @h/session-source]
+    (try
+      (deref (:connack sub) 5000 nil)
+      (client/send-message (:client sub) {:packet-type :SUBSCRIBE :packet-identifier 1
+                                          :topics [{:qos 2 :topic-filter topic}]})
+      (deref (:suback sub) 5000 nil)
+      (client/send-message (:client raw) {:packet-type :CONNECT :protocol-name "MQTT" :protocol-version 4
+                                          :keep-alive 100 :clean-session? false :client-id pub-id})
+      (tu/expect! (:ch raw) :CONNACK 5000)
+      (client/send-message (:client raw) {:packet-type :PUBLISH :topic topic :qos 2 :packet-identifier 7
+                                          :payload (.getBytes "held, not yet seen" "UTF-8")
+                                          :retain? false :duplicate? false})
+      (tu/expect! (:ch raw) :PUBREC 5000)
+      (is (tu/wait-until #(some? (cluster/held *conn* pub-id 7)) 5000))
+      ;; The broker that took it is gone; the topology, behind, does not
+      ;; show its hold until whatever is appended after it has landed.
+      (swap! h/*inflight* dissoc [pub-id 7])
+      (reset! h/session-source
+              (cond-> (assoc source :held (fn [c pid] (when @caught-up ((:held source) c pid))))
+                (:barrier! source)
+                (assoc :barrier! (fn [c]
+                                   (doto ^java.util.concurrent.CompletableFuture ((:barrier! source) c)
+                                     (.thenRun ^Runnable (fn [] (reset! caught-up true))))))))
+      (with-redefs [h/held-read-millis [0 100]]
+        (client/send-message (:client raw) {:packet-type :PUBREL :packet-identifier 7})
+        (tu/expect! (:ch raw) :PUBCOMP 10000))
+      (is (tu/wait-until #(= ["held, not yet seen"] @received) 5000)
+          "acknowledged with a PUBCOMP, so it must have been published")
+      (finally
+        (reset! h/session-source source)
+        (close! sub)
+        (try (client/close (:client raw)) (catch Exception _ nil))))))
+
 (deftest a-pubrel-for-a-publish-another-broker-took-delivers-it
   ;; A QoS 2 publish is held where it was received until its PUBREL
   ;; (§4.3.3). When that broker goes after its PUBREC, the publisher sends

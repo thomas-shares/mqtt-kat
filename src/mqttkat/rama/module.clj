@@ -243,16 +243,33 @@
    again to a client that had completed them, some forty times each. Nor
    over an entry in flight under an identifier, a hand-over's or a claim's,
    with one that has none, which went out under a new one, or with one not
-   yet released once it is. Nor past `limit`."
+   yet released once it is. Nor over a claim's with another identifier: a
+   hand-over's of a delivery whose claim the cluster refused, the entry
+   being in flight already, under the identifier the client had it under;
+   put, it went out again under the new one, a second message to the
+   client. A hand-over's own entry may move: a message restored under an
+   identifier in use went out under another, which the client then holds.
+   Nor past `limit`."
   [taken had message n limit]
   (cond
     (some? taken)                       "queue-taken-off"
     (and (some? (:packet-identifier had))
          (or (nil? (:packet-identifier message))
+             (and (:claimed? had)
+                  (not= (:packet-identifier had) (:packet-identifier message)))
              (and (:released? had) (not (:released? message)))))
                                         "queue-kept-in-flight"
     (or had (< (long n) (long limit)))  "put"
     :else                               "queue-refused"))
+
+(defn entry-put
+  "What goes on the queue for `message` under a key where `had` is: a
+   claim's entry marked :claimed?, and kept so when the same delivery is
+   put there again, by its hand-over or its release (queue-verdict)."
+  [event had message]
+  (if (or (= :claim event) (:claimed? had))
+    (assoc message :claimed? true)
+    message))
 
 (defn claim-verdict
   "What a :claim does: \"put\" the message on the queue, in flight under
@@ -1149,7 +1166,8 @@
             ;; compiled in a thread's default stack.
             (queue-verdict *taken *had *message *n queue-limit :> *verdict)
             (<<if (= *verdict "put")
-              (local-transform> [(keypath *client-id *key) (termval *message)] $$queued))
+              (local-transform> [(keypath *client-id *key) (termval (entry-put :enqueue *had *message))]
+                                $$queued))
             (count> $$queue-counts (verdict-counts *verdict *had)))
           ;; Then, once, the broker it is connected on is told: it has
           ;; read its queue already, on the CONNECT, and this came after.
@@ -1194,7 +1212,8 @@
         (local-select> [(keypath *client-id *key)] $$queued :> *had)
         (claim-verdict *taken *had *message :> *verdict)
         (<<if (= *verdict "put")
-          (local-transform> [(keypath *client-id *key) (termval *message)] $$queued))
+          (local-transform> [(keypath *client-id *key) (termval (entry-put :claim *had *message))]
+                            $$queued))
         (count> $$queue-counts (verdict-counts *verdict *had))
 
         ;; ── what the sessions topology asks of a client's queue ────────

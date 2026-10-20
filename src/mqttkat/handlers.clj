@@ -4363,18 +4363,32 @@
 (defn- release-from-cluster!
   "Publish the QoS 2 message `client-id` has held on the cluster under
    `packet-identifier`, its PUBREL having come here, off the reader's
-   thread. Not there after the last of held-read-millis: done already, its
-   PUBCOMP lost, and the PUBCOMP only."
+   thread. Not there after the last of held-read-millis, it is read once
+   more after a barrier (:barrier!): once everything appended to the
+   client's partition before now has been processed, the hold of a broker
+   that died after its PUBREC has too. Not there then: done already, its
+   PUBCOMP lost, and the PUBCOMP only.
+
+   The reads alone gave up after three seconds. With Rama five behind, the
+   simulation found a hold the dead broker had appended not processed
+   yet, and the message, acknowledged with a PUBCOMP, published nowhere
+   (thoughts.md, 20261020). The barrier waits as long as that takes, and
+   no longer than it does."
   [client-key client-id packet-identifier]
   (future
     (try
-      (let [{:keys [held]} @session-source
+      (let [{:keys [held barrier!]} @session-source
             t0 (System/currentTimeMillis)
-            m  (loop [[at & more] held-read-millis]
-                 (let [wait (- (+ t0 (long at)) (System/currentTimeMillis))]
-                   (when (pos? wait) (Thread/sleep wait)))
-                 (or (held client-id packet-identifier)
-                     (when more (recur more))))]
+            m  (or (loop [[at & more] held-read-millis]
+                     (let [wait (- (+ t0 (long at)) (System/currentTimeMillis))]
+                       (when (pos? wait) (Thread/sleep wait)))
+                     (or (held client-id packet-identifier)
+                         (when more (recur more))))
+                   (when (and barrier!
+                              (until-landed! (str "barrier for the hold of " client-id)
+                                             #(barrier! client-id)
+                                             #(live-key? client-key)))
+                     (held client-id packet-identifier)))]
         (if m
           (let [msg  (assoc m :client-key client-key)
                 held (java.util.ArrayList.)]
