@@ -47,6 +47,10 @@
                 (sim/note :kills {:broker b :at (sim/now w)})
                 (assoc-in [:down-since b] (sim/now w))
                 (sim/kill b ((:broker-state model) b) (get-in w [:config :crash-detect-ms] [50 500]))
+                (as-> w (reduce (fn [w o]
+                                  (sim/timer w o (apply sim/rand-long w (get-in w [:config :crash-detect-ms] [50 500]))
+                                             {:type :peer-down :peer b}))
+                                w (remove #{b} up)))
                 (sim/after (apply sim/rand-long w down-ms) {:to :world :type :fault/restart :broker b})))))
 
       :fault/restart

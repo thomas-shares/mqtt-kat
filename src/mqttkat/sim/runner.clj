@@ -50,6 +50,10 @@
   "The current design with identifier leases (mqttkat.sim.current)."
   {:model {:leases? true}})
 
+(def forward-ack
+  "Forwarded copies as hand-offs (mqttkat.sim.current)."
+  {:model {:forward-ack? true}})
+
 (defn- deep-merge [a b]
   (if (and (map? a) (map? b)) (merge-with deep-merge a b) b))
 

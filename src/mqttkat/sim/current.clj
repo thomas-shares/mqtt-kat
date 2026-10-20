@@ -34,6 +34,11 @@
      from Rama (nudged!), resend under a handed-over identifier
      (resend-handed-over!)
 
+   With {:model {:forward-ack? true}}, a forwarded copy is a hand-off:
+   the publish waits until the other broker has taken it, or until it has
+   been put on the cluster's queue here, having come back or its broker
+   having died (forward-ack?, taken-or-handed-back).
+
    And, with {:model {:leases? true}}, what the code does not do yet:
    identifier leases. A session's identifiers come in blocks of
    :lease-block, each recorded on Rama before it is used; a broker that
@@ -67,6 +72,10 @@
    :held-read-ms       [0 250 1000 3000]
    ;; Identifier leases (thoughts.md, 20261020): off, as the code is today.
    :leases?            false
+   ;; A copy forwarded to another broker as a hand-off (forward-ack?):
+   ;; off, as the code's default.
+   :forward-ack?       false
+   :forward-wait-ms    30000
    :lease-block        64})
 
 (defn- cfg [w k] (get-in w [:config :model k] (get defaults k)))
@@ -155,6 +164,7 @@
    :out {}            ; subscriber -> {:inflight {pid e} :pending [e] :next-id :gate}
    :catching-up {}    ; subscriber -> {:connect-id :had {k landed} :reading? ...}
    :barriers {}       ; tok -> {:n :then}
+   :copies {}         ; forwarded copies not yet taken -> {:client :m :tok :peer}
    :overflowed #{}})
 
 (defn- bs [w id] (sim/node w id))
@@ -410,8 +420,15 @@
                     (deliver-local w id s m tok false)
 
                     (and connected? broker (not= id broker))
-                    (-> (sim/send-link w id broker {:type :copy :client s :m m})
-                        (sim/trace (:id m) id "forwarded to" broker "for" s))
+                    (if (and tok (cfg w :forward-ack?))
+                      (let [[w cid] (sim/fresh w "copy")]
+                        (-> (hold-barrier w id tok)
+                            (bu id assoc-in [:copies cid] {:client s :m m :tok tok :peer broker})
+                            (sim/send-link id broker {:type :copy :client s :m m :copy cid})
+                            (sim/timer id (cfg w :forward-wait-ms) {:type :copy-wait :copy cid})
+                            (sim/trace (:id m) id "forwarded to" broker "for" s "as a hand-off")))
+                      (-> (sim/send-link w id broker {:type :copy :client s :m m})
+                          (sim/trace (:id m) id "forwarded to" broker "for" s)))
 
                     :else
                     (enqueue w id s (:key m) {:m m} tok "queued, away,")))))
@@ -591,7 +608,9 @@
             (-> (set-out w id c (assoc (out w id c) :gate :closed))
                 (sim/timer id 250 {:type :gate-poll :client c :conn conn
                                    :deadline (+ now (long (cfg w :gate-ms)))}))
-            w)
+            ;; adopt-session!: a gate a connection before closed here
+            ;; does not outlast it.
+            (set-out w id c (dissoc (out w id c) :gate)))
         w (reduce (fn [w [pid e]]
                     (if (:released? e)
                       (-> (to-client w id c {:type :pubrel :pid pid}) (t e id "PUBREL again to" c pid))
@@ -773,6 +792,17 @@
 
 ;; ---------------------------------------------------------------- continuations
 
+(defn- hand-back
+  "A forwarded copy done with: taken by the other broker (`why` nil), or
+   not, and put on the cluster's queue here. Either way the publish it is
+   part of stops waiting for it once that has landed."
+  [w id cid why]
+  (if-let [{:keys [client m tok]} (get-in (bs w id) [:copies cid])]
+    (-> (bu w id update :copies dissoc cid)
+        (cond-> why (enqueue id client (:key m) {:m m} tok why))
+        (release-barrier id tok))
+    w))
+
 (defn- continue [w id {:keys [k] :as then}]
   (case k
     nil       w
@@ -789,6 +819,7 @@
                   (rama/query w id #(get-in % [:queued c ck])
                               {:type :claim-read :client c :key ck :pid pid :eid eid})
                   w))
+    :copy-taken (sim/send-link w id (:origin then) {:type :taken :copy (:copy then)})
     :leased   (let [{c :client :keys [block conn]} then
                     o (out w id c)]
                 (if (and (= conn (live-conn w id c)) (= block (:leasing o)))
@@ -894,21 +925,36 @@
           :else (pubcomp-to w id c pid conn)))
 
       :link
-      (let [{:keys [type client m connect-id]} msg]
+      (let [{:keys [type client m connect-id copy]} msg]
         (case type
-          :copy     (if (live-conn w id client)
-                      (deliver-local w id client m nil true)
-                      (enqueue w id client (:key m) {:m m} nil "queued, gone from here,"))
+          ;; Taken, with forward-ack?, once what this broker did with it
+          ;; has landed: in a window here, claimed, or on the queue.
+          :copy     (let [[w tok] (if copy
+                                    (barrier w id {:k :copy-taken :origin (:from ev) :copy copy})
+                                    [w nil])
+                          w (if (live-conn w id client)
+                              (deliver-local w id client m tok true)
+                              (enqueue w id client (:key m) {:m m} tok "queued, gone from here,"))]
+                      (release-barrier w id tok))
+          :taken    (hand-back w id copy nil)
           :takeover (let [conn (live-conn w id client)]
                       (if (and conn (= conn connect-id))
                         (-> (sim/close w conn [10 200] [0 0]) (remove-client id conn))
                         w))))
 
       :undelivered
-      (let [{:keys [client m]} msg]
-        (if (= :copy (:type msg))
-          (enqueue w id client (:key m) {:m m} nil "handed back by the bridge,")
-          w)))))
+      (let [{:keys [client m copy]} msg]
+        (cond
+          copy                 (hand-back w id copy "handed back by the bridge,")
+          (= :copy (:type msg)) (enqueue w id client (:key m) {:m m} nil "handed back by the bridge,")
+          :else                w))
+
+      ;; taken-or-handed-back: what a broker that died had not taken.
+      :peer-down
+      (reduce (fn [w [cid {:keys [peer]}]]
+                (if (= peer (:peer ev)) (hand-back w id cid "handed back, its broker gone,") w))
+              w (sort-by key (:copies (bs w id))))
+      :copy-wait (hand-back w id (:copy ev) "handed back after waiting,"))))
 
 (defn on-kill
   "What a broker had only in memory when it died: noted, so that a loss
