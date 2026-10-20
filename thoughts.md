@@ -4,6 +4,59 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261020
 
+### Identifier leases, in the simulation
+
+`{:model {:leases? true}}` (`mqttkat.sim.current`, `runner/leases`):
+
+- **Blocks.** A session's identifiers come in blocks of `:lease-block`,
+  64 in the simulation.
+- **Recorded before use.** Rama records each block, together with every
+  block the broker still has identifiers out in, before any identifier in
+  it is used. Until the lease has landed, messages wait.
+- **Released on an orphaned resume.** A broker resumes the session
+  without its hand-over when the broker before it is down, is another
+  incarnation, or did not hand over in time. It then sends a PUBREL for
+  every identifier of the recorded blocks that the queue does not have in
+  flight, and leases the next block. A client holding none of them answers
+  each with a PUBCOMP (§4.3.3).
+
+**Results:**
+
+- **The same 40 seeds as before:**
+
+  ```clojure
+  ;; without leases
+  {:ok 34 :counts {:eo-lost 3 :lost 3 :identifier-reused 7 :crash-window 5034}}
+  ;; with leases
+  {:ok 39 :counts {:eo-lost 1 :crash-window 5289}}
+  ```
+
+- **The 11 short seeds** that gave out an identifier the client held
+  (`sim-test`): with leases none did, and all 11 passed.
+
+**What it costs, at a block of 64:**
+
+- **Writes:** about one lease write per 60 deliveries, around 100 a run.
+- **PUBRELs:** up to 128 owed to nobody per orphaned resume, 120 to 370 a
+  run.
+
+At the real window of 128 the block has to be at least that. 1024 would
+cost one write per thousand deliveries, but up to 2048 PUBRELs when a
+session resumes from a dead broker. Keeping the blocks small, with the
+record listing every block still in use, keeps that down.
+
+**The one loss left** (seed 28) is the bridge gap we already knew about,
+and it reaches the exactly-once topics:
+
+1. b1 publishes on the PUBREL and forwards a copy to b3, where s1's
+   session is recorded.
+2. b3 is down, so the copy comes back to b1, which has died meanwhile.
+3. With forward-ack off, the publisher was told the message was done, and
+   its hold was let go, before the copy was anywhere safe.
+
+That is next on the list: the forwarded copy has to be a hand-off as well.
+The `:sim` selector now runs both designs, and both still fail it.
+
 ### The simulation's first finding: identifiers orphaned by a crash
 
 The simulation runs, at the default config, in about 2.5 s a run:

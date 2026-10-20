@@ -34,6 +34,13 @@
      from Rama (nudged!), resend under a handed-over identifier
      (resend-handed-over!)
 
+   And, with {:model {:leases? true}}, what the code does not do yet:
+   identifier leases. A session's identifiers come in blocks of
+   :lease-block, each recorded on Rama before it is used; a broker that
+   resumes the session without its hand-over sends a PUBREL for every
+   identifier of the recorded blocks the queue does not have in flight,
+   so that none the client holds is orphaned (thoughts.md, 20261020).
+
    What is not: QoS 0, clean sessions, retained messages, shared
    subscriptions, will messages, expiry, back-pressure on publishers,
    limits on Rama's queues, the origin holds of forwarded copies, writes
@@ -57,7 +64,10 @@
    :catch-up-again-ms  2000
    :reconcile-ms       10000
    :redequeue-ms       5000
-   :held-read-ms       [0 250 1000 3000]})
+   :held-read-ms       [0 250 1000 3000]
+   ;; Identifier leases (thoughts.md, 20261020): off, as the code is today.
+   :leases?            false
+   :lease-block        64})
 
 (defn- cfg [w k] (get-in w [:config :model k] (get defaults k)))
 
@@ -97,8 +107,13 @@
         count (fn [w k] (update-in w [:ledger :rama k] (fnil inc 0)))]
     (case kind
       :connected
-      (let [[b cid] args]
-        (rama/update-pstate w assoc-in [:sessions c] {:broker b :connect-id cid :connected? true}))
+      (let [[b cid ep] args]
+        (rama/update-pstate w assoc-in [:sessions c] {:broker b :connect-id cid :connected? true
+                                                      :epoch ep}))
+
+      :lease
+      (let [[b k blocks] args]
+        (rama/update-pstate w assoc-in [:leases c] {:broker b :cur k :blocks blocks}))
 
       :disconnected
       (let [[_ cid] args]
@@ -228,6 +243,48 @@
   (loop [p (inc (mod (or next-id 0) 65535))]
     (if (contains? inflight p) (recur (inc (mod p 65535))) p)))
 
+(defn- n-blocks [w] (quot 65535 (long (cfg w :lease-block))))
+
+(defn- block-of [w pid] (quot (dec (long pid)) (long (cfg w :lease-block))))
+
+(defn- pick-pid
+  "The identifier the next message for this session goes out under, nil
+   for none yet. Without leases, next-identifier. With them, the next one
+   free in the block this broker holds the lease on, nil while it holds
+   none or the block is used up."
+  [w {:keys [next-id inflight lease] :as o}]
+  (if-not (cfg w :leases?)
+    (next-identifier o)
+    (when lease
+      (let [b  (long (cfg w :lease-block))
+            lo (inc (* (long lease) b))
+            hi (* (inc (long lease)) b)]
+        (loop [p (max lo (inc (long (or next-id 0))))]
+          (cond (> p hi)                    nil
+                (contains? inflight p)      (recur (inc p))
+                :else                       p))))))
+
+(defn- request-lease
+  "Lease block `k` for `c` on the cluster: recorded there, with every block
+   this broker may have identifiers out in, before any of it is used. A
+   broker that resumes the session without a hand-over releases what is
+   recorded (go-live)."
+  [w id c k]
+  (let [o      (out w id c)
+        blocks (into (sorted-set k) (map #(block-of w %)) (keys (:inflight o)))]
+    (-> (set-out w id c (assoc o :leasing k))
+        (update-in [:ledger :leases] (fnil inc 0))
+        (write id [:lease c id k blocks] :ack
+               {:k :leased :client c :block k :conn (live-conn w id c)} nil))))
+
+(defn- ensure-lease
+  "With leases, a new block once this one is used up, if none is coming."
+  [w id c]
+  (let [o (out w id c)]
+    (if (and (cfg w :leases?) (live-conn w id c) (not (:leasing o)) (nil? (pick-pid w o)))
+      (request-lease w id c (mod (inc (long (or (:lease o) (:base-block o) -1))) (n-blocks w)))
+      w)))
+
 (defn- send-publish [w id c e pid dup?]
   (-> (to-client w id c {:type :publish :pid pid :m (:m e) :dup? dup?})
       (t e id "sent to" c "pid" pid (if dup? "(dup)" ""))))
@@ -249,15 +306,17 @@
 (defn- take-pending
   "take-pending!: the head of the pending queue into the window."
   [w id c]
-  (let [{:keys [inflight pending gate] :as o} (out w id c)]
-    (if (and (seq pending) (< (count inflight) (long (cfg w :window))) (not gate)
-             (acked? w id (live-conn w id c)))
-      (let [pid (next-identifier o)
-            e   (first pending)]
-        [(set-out w id c (assoc o :next-id pid :pending (subvec pending 1)
-                                :inflight (assoc inflight pid e)))
-         pid e])
-      [w nil nil])))
+  (let [{:keys [inflight pending gate] :as o} (out w id c)
+        room? (and (seq pending) (< (count inflight) (long (cfg w :window))) (not gate)
+                   (acked? w id (live-conn w id c)))
+        pid   (when room? (pick-pid w o))]
+    (cond
+      pid   (let [e (first pending)]
+              [(set-out w id c (assoc o :next-id pid :pending (subvec pending 1)
+                                      :inflight (assoc inflight pid e)))
+               pid e])
+      room? [(ensure-lease w id c) nil nil]
+      :else [w nil nil])))
 
 (defn- drain
   "drain-pending!: one from pending; a session that overflowed, caught up,
@@ -292,22 +351,25 @@
    the cluster's queue."
   [w id c e tok]
   (let [conn (live-conn w id c)
-        {:keys [inflight pending gate] :as o} (out w id c)]
+        {:keys [inflight pending gate] :as o} (out w id c)
+        pid  (when (and (acked? w id conn) (< (count inflight) (long (cfg w :window)))
+                        (empty? pending) (not gate))
+               (pick-pid w o))]
     (cond
-      (and (acked? w id conn) (< (count inflight) (long (cfg w :window)))
-           (empty? pending) (not gate))
-      (let [pid (next-identifier o)
-            w   (set-out w id c (assoc o :next-id pid :inflight (assoc inflight pid e)))
+      pid
+      (let [w   (set-out w id c (assoc o :next-id pid :inflight (assoc inflight pid e)))
             w   (if (:reconcile? e) (note-had w id c (:key e)) w)]
         (send-claimed w id c e pid tok))
 
       (and (acked? w id conn) (overflow? w id c e))
       (-> (bu w id update :overflowed conj c)
-          (enqueue id c (:key e) {:m (:m e)} tok "overflowed"))
+          (enqueue id c (:key e) {:m (:m e)} tok "overflowed")
+          (ensure-lease id c))
 
       :else
       (-> (set-out w id c (update o :pending conj e))
-          (t e id "pending for" c)))))
+          (t e id "pending for" c)
+          (ensure-lease id c)))))
 
 (defn- holds? [o k]
   (some #(or (= k (:key %)) (= k (:cluster-key %)))
@@ -495,7 +557,7 @@
 (defn- go-live
   "The session adopted: restored, live, CONNACK, what was in flight sent
    again (redeliver-inflight!), pending flushed, catch-up reads begun."
-  [w id conn c queued waited-out?]
+  [w id conn c {:keys [queued lease]} waited-out? orphaned?]
   (let [[w restored] (restore w id c queued)
         now (sim/now w)
         w (-> w
@@ -505,8 +567,26 @@
               (bu id assoc-in [:live c] conn)
               (bu id assoc-in [:conns conn :acked?] true)
               (bu id update :adopting dissoc conn)
-              (write id [:connected c id conn] :append-ack nil nil)
+              (write id [:connected c id conn (sim/epoch w id)] :append-ack nil nil)
               (sim/send-on conn id {:type :connack}))
+        ;; Leases: what the broker before had out and never handed over
+        ;; released, every identifier of its blocks the queue does not
+        ;; have in flight; a client that holds none answers with a
+        ;; PUBCOMP (§4.3.3). Then a block of this broker's own.
+        w (if (cfg w :leases?)
+            (let [b      (long (cfg w :lease-block))
+                  queued-pids (into #{} (keep (comp :pid val)) queued)
+                  stray  (when orphaned?
+                           (for [k (:blocks lease)
+                                 p (range (inc (* (long k) b)) (inc (* (inc (long k)) b)))
+                                 :when (not (contains? queued-pids p))]
+                             p))
+                  w      (reduce #(sim/send-on %1 conn id {:type :pubrel :pid %2}) w stray)]
+              (-> (update-in w [:ledger :stray-pubrels] (fnil + 0) (count stray))
+                  (set-out id c (-> (out w id c) (assoc :base-block (:cur lease))
+                                    (dissoc :lease :leasing)))
+                  (request-lease id c (mod (inc (long (or (:cur lease) -1))) (n-blocks w)))))
+            w)
         w (if waited-out?
             (-> (set-out w id c (assoc (out w id c) :gate :closed))
                 (sim/timer id 250 {:type :gate-poll :client c :conn conn
@@ -547,9 +627,16 @@
         (sim/timer w id 100 {:type :adopt-poll :conn conn :client c}))
 
       :else
-      (let [waited-out? (and deadline (>= (sim/now w) (long deadline)))]
-        (rama/query w id #(get-in % [:queued c])
-                    {:type :resume :conn conn :client c :waited-out? waited-out?})))))
+      (let [waited-out? (boolean (and deadline (>= (sim/now w) (long deadline))))
+            ;; Resumed without the hand-over of whoever had it: the broker
+            ;; is gone or another incarnation, or did not hand over in time.
+            orphaned?   (boolean (and connected? broker
+                                      (or waited-out?
+                                          (not (sim/up? w broker))
+                                          (not= (:epoch session) (sim/epoch w broker)))))]
+        (rama/query w id #(hash-map :queued (get-in % [:queued c]) :lease (get-in % [:leases c]))
+                    {:type :resume :conn conn :client c :waited-out? waited-out?
+                     :orphaned? orphaned?})))))
 
 ;; ---------------------------------------------------------------- leaving
 
@@ -702,6 +789,13 @@
                   (rama/query w id #(get-in % [:queued c ck])
                               {:type :claim-read :client c :key ck :pid pid :eid eid})
                   w))
+    :leased   (let [{c :client :keys [block conn]} then
+                    o (out w id c)]
+                (if (and (= conn (live-conn w id c)) (= block (:leasing o)))
+                  (-> (set-out w id c (-> o (assoc :lease block :next-id (* (long block) (long (cfg w :lease-block))))
+                                          (dissoc :leasing)))
+                      (flush-pending id c))
+                  w))
     :released (let [{c :client :keys [pid conn]} then]
                 (if (= conn (live-conn w id c))
                   (sim/send-on w conn id {:type :pubrel :pid pid})
@@ -755,7 +849,8 @@
                                 {:type :session :conn (:conn ev) :client (:client ev)})
                     w)
       :resume     (if (and (sim/open? w (:conn ev)) (get-in (bs w id) [:conns (:conn ev)]))
-                    (go-live w id (:conn ev) (:client ev) (:result ev) (:waited-out? ev))
+                    (go-live w id (:conn ev) (:client ev) (:result ev) (:waited-out? ev)
+                             (:orphaned? ev))
                     w)
       :gate-poll  (let [{c :client :keys [conn deadline]} ev
                         o (out w id c)]

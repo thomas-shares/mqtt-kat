@@ -85,9 +85,33 @@
     (is (= [{:to :a :type :undelivered :peer :b :msg {:x 1} :epoch 0}]
            (get-in w [:ledger :got])))))
 
+(deftest leases-release-the-identifiers-a-dead-broker-left-the-client-holding
+  ;; Seeds whose short runs, without leases, gave a later message an
+  ;; identifier the client still held from a broker that died (R6).
+  (doseq [seed [9 23]]
+    (testing (str "seed " seed)
+      (is (seq (get-in (r/run seed short-run) [:result :identifier-reused])) "without leases")
+      (let [w (r/run seed (r/config short-run r/leases))]
+        (is (empty? (get-in w [:result :identifier-reused])) "with them")
+        (is (:ok? (:result w)))
+        (is (pos? (get-in w [:ledger :stray-pubrels] 0)) "released by PUBRELs nobody was owed")))))
+
+(deftest with-leases-and-nothing-going-wrong-nothing-is-released
+  (let [w (r/run 3 (r/config short-run r/calm r/leases))]
+    (is (:ok? (:result w)))
+    (is (zero? (get-in w [:ledger :stray-pubrels] 0)))
+    (is (pos? (get-in w [:ledger :leases] 0)))))
+
 (deftest ^:sim the-current-design-keeps-the-guarantees
   ;; It does not, today: a broker killed with a QoS 2 message in flight
   ;; leaves the client holding its identifier, which a later message is
   ;; given and dropped under (doc/guarantees.md, R6, then R3).
   (let [{:keys [failed] :as res} (r/sweep (range 20) (r/config) current/model)]
+    (is (empty? failed) (pr-str (dissoc res :failed)))))
+
+(deftest ^:sim the-current-design-with-leases-keeps-the-guarantees
+  ;; Nor this, today: a copy forwarded over the bridge, for a broker that
+  ;; is down, comes back to a broker that died meanwhile, and its
+  ;; publisher was told it was done (forward-ack off).
+  (let [{:keys [failed] :as res} (r/sweep (range 20) (r/config r/leases) current/model)]
     (is (empty? failed) (pr-str (dissoc res :failed)))))

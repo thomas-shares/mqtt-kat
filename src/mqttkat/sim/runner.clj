@@ -46,6 +46,10 @@
   "No faults at all: what any design must get right."
   {:faults {:kill-every nil :drop-every nil :lag-every nil}})
 
+(def leases
+  "The current design with identifier leases (mqttkat.sim.current)."
+  {:model {:leases? true}})
+
 (defn- deep-merge [a b]
   (if (and (map? a) (map? b)) (merge-with deep-merge a b) b))
 
