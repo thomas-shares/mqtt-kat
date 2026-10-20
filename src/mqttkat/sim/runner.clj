@@ -54,6 +54,12 @@
   "Forwarded copies as hand-offs (mqttkat.sim.current)."
   {:model {:forward-ack? true}})
 
+(defn forward-ack-as
+  "Forwarded copies as hand-offs of `mode`: :full, :receipt, :eo or
+   :eo+receipt (mqttkat.sim.current)."
+  [mode]
+  {:model {:forward-ack? mode}})
+
 (defn- deep-merge [a b]
   (if (and (map? a) (map? b)) (merge-with deep-merge a b) b))
 

@@ -34,10 +34,18 @@
      from Rama (nudged!), resend under a handed-over identifier
      (resend-handed-over!)
 
-   With {:model {:forward-ack? true}}, a forwarded copy is a hand-off:
-   the publish waits until the other broker has taken it, or until it has
-   been put on the cluster's queue here, having come back or its broker
-   having died (forward-ack?, taken-or-handed-back).
+   With {:model {:forward-ack? mode}}, a forwarded copy is a hand-off: the
+   publish waits until the other broker has taken it, or until it has been
+   put on the cluster's queue here, having come back or its broker having
+   died (forward-ack?, taken-or-handed-back). Taken means, by mode:
+
+     true, :full   once the other broker's own hand-offs for it have
+                   landed: in a window there, claimed, or on the queue
+     :receipt      once it has reached the other broker, whatever that
+                   then does with it: lost with it if it dies
+     :eo           :full for a QoS 2 copy on an exactly-once topic, none
+                   for the rest (fire and forget, as with it off)
+     :eo+receipt   :full for those, :receipt for the rest
 
    And, with {:model {:leases? true}}, what the code does not do yet:
    identifier leases. A session's identifiers come in blocks of
@@ -73,7 +81,7 @@
    ;; Identifier leases (thoughts.md, 20261020): off, as the code is today.
    :leases?            false
    ;; A copy forwarded to another broker as a hand-off (forward-ack?):
-   ;; off, as the code's default.
+   ;; off, as the code's default. See the namespace for the modes.
    :forward-ack?       false
    :forward-wait-ms    30000
    :lease-block        64})
@@ -406,6 +414,18 @@
       (let [[w eid] (sim/fresh w "e")]
         (place w id c {:m m :key k :eid eid :reconcile? recent? :via-bridge? via-bridge?} tok)))))
 
+(defn- copy-ack
+  "What a copy of `m` forwarded to another broker waits for, by the mode
+   of forward-ack?: :full, :receipt, or nil for nothing."
+  [w m]
+  (let [eo? (and (= 2 (:qos m)) (eo-topic? w (:topic m)))]
+    (case (cfg w :forward-ack?)
+      (true :full) :full
+      :receipt     :receipt
+      :eo          (when eo? :full)
+      :eo+receipt  (if eo? :full :receipt)
+      nil)))
+
 (defn- fan-out
   "route, subscribers-for, queue-for-offline-sessions!, forward-to-brokers!:
    each subscriber live here, connected elsewhere, or away."
@@ -420,13 +440,13 @@
                     (deliver-local w id s m tok false)
 
                     (and connected? broker (not= id broker))
-                    (if (and tok (cfg w :forward-ack?))
+                    (if-let [mode (when tok (copy-ack w m))]
                       (let [[w cid] (sim/fresh w "copy")]
                         (-> (hold-barrier w id tok)
                             (bu id assoc-in [:copies cid] {:client s :m m :tok tok :peer broker})
-                            (sim/send-link id broker {:type :copy :client s :m m :copy cid})
+                            (sim/send-link id broker {:type :copy :client s :m m :copy cid :ack mode})
                             (sim/timer id (cfg w :forward-wait-ms) {:type :copy-wait :copy cid})
-                            (sim/trace (:id m) id "forwarded to" broker "for" s "as a hand-off")))
+                            (sim/trace (:id m) id "forwarded to" broker "for" s "as a hand-off," (name mode))))
                       (-> (sim/send-link w id broker {:type :copy :client s :m m})
                           (sim/trace (:id m) id "forwarded to" broker "for" s)))
 
@@ -925,11 +945,15 @@
           :else (pubcomp-to w id c pid conn)))
 
       :link
-      (let [{:keys [type client m connect-id copy]} msg]
+      (let [{:keys [type client m connect-id copy ack]} msg]
         (case type
           ;; Taken, with forward-ack?, once what this broker did with it
-          ;; has landed: in a window here, claimed, or on the queue.
-          :copy     (let [[w tok] (if copy
+          ;; has landed: in a window here, claimed, or on the queue; or,
+          ;; :receipt, as soon as it is here.
+          :copy     (let [w (if (= :receipt ack)
+                              (sim/send-link w id (:from ev) {:type :taken :copy copy})
+                              w)
+                          [w tok] (if (= :full ack)
                                     (barrier w id {:k :copy-taken :origin (:from ev) :copy copy})
                                     [w nil])
                           w (if (live-conn w id client)
