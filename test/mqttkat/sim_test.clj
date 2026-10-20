@@ -88,7 +88,7 @@
 (deftest leases-release-the-identifiers-a-dead-broker-left-the-client-holding
   ;; Seeds whose short runs, without leases, gave a later message an
   ;; identifier the client still held from a broker that died (R6).
-  (doseq [seed [9 23]]
+  (doseq [seed [9 13]]
     (testing (str "seed " seed)
       (is (seq (get-in (r/run seed short-run) [:result :identifier-reused])) "without leases")
       (let [w (r/run seed (r/config short-run r/leases))]
