@@ -54,6 +54,16 @@
   "Forwarded copies as hand-offs (mqttkat.sim.current)."
   {:model {:forward-ack? true}})
 
+(def race-fixes
+  "The two races harsher faults found, fixed (mqttkat.sim.current)."
+  {:model {:keep-claimed-pid? true :held-read-barrier? true}})
+
+(def harsh
+  "Brokers killed every 2 to 5 s, connections dropped every 0.5 to 2 s,
+   Rama up to 5 s behind."
+  {:faults {:kill-every [2000 5000] :down-ms [500 3000]
+            :drop-every [500 2000] :lag-every [1000 3000] :lag-ms [0 5000]}})
+
 (defn forward-ack-as
   "Forwarded copies as hand-offs of `mode`: :full, :receipt, :eo or
    :eo+receipt (mqttkat.sim.current)."

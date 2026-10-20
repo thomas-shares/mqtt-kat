@@ -84,6 +84,13 @@
    ;; off, as the code's default. See the namespace for the modes.
    :forward-ack?       false
    :forward-wait-ms    30000
+   ;; Two races harsher faults found (thoughts.md, 20261020), fixed when
+   ;; on: an enqueue naming another identifier keeps an entry in flight
+   ;; (queue-verdict); a PUBREL for a hold this broker does not have, not
+   ;; found by the reads, is read once more after a no-op appended to the
+   ;; client's partition has been processed (release-from-cluster!).
+   :keep-claimed-pid?  false
+   :held-read-barrier?     false
    :lease-block        64})
 
 (defn- cfg [w k] (get-in w [:config :model k] (get defaults k)))
@@ -91,12 +98,18 @@
 ;; ---------------------------------------------------------------- Rama
 
 (defn- queue-verdict
-  "mqttkat.rama.module/queue-verdict, without the limit."
-  [taken had message]
+  "mqttkat.rama.module/queue-verdict, without the limit. With
+   `keep-claimed?`, an entry in flight is kept against one naming another
+   identifier too: a hand-over's, of a delivery whose claim the cluster
+   refused because the entry was in flight already, replaced the
+   identifier the client had the message under, and the next resume sent
+   it again under the new one."
+  [taken had message keep-claimed?]
   (cond
     taken                                          :taken-off
     (and (:pid had)
          (or (nil? (:pid message))
+             (and keep-claimed? (not= (:pid had) (:pid message)))
              (and (:released? had) (not (:released? message))))) :kept-in-flight
     :else                                          :put))
 
@@ -142,7 +155,9 @@
       (let [[k e] args
             taken (get-in ps [:taken-off c k])
             had   (get-in ps [:queued c k])
-            v     (if (= :enqueue kind) (queue-verdict taken had e) (claim-verdict taken had e))
+            v     (if (= :enqueue kind)
+                    (queue-verdict taken had e (cfg w :keep-claimed-pid?))
+                    (claim-verdict taken had e))
             w     (count w [kind v])]
         (if (= :put v)
           (cond-> (rama/update-pstate w update-in [:queued c] (fnil assoc (sorted-map)) k e)
@@ -158,6 +173,7 @@
                                               (assoc-in [:taken-off c k] true)))
                                         ps ks))))
 
+      :noop   w
       :hold   (let [[pid m] args] (rama/update-pstate w assoc-in [:held [c pid]] m))
       :unhold (let [[pid] args] (rama/update-pstate w update :held dissoc [c pid])))))
 
@@ -218,7 +234,7 @@
   "Append `op`; `then` once it is answered at `level`, and `tok`'s barrier
    waits for it."
   [w id op level then tok]
-  (let [depot (if (#{:connected :disconnected :hold :unhold} (first op)) :sessions :queues)]
+  (let [depot (if (#{:connected :disconnected :hold :unhold :noop} (first op)) :sessions :queues)]
     (-> (hold-barrier w id tok)
         (rama/append id depot op level (when (and level (or then tok))
                                          {:type :landed :then then :barrier tok})))))
@@ -839,6 +855,9 @@
                   (rama/query w id #(get-in % [:queued c ck])
                               {:type :claim-read :client c :key ck :pid pid :eid eid})
                   w))
+    :held-barrier (rama/query w id #(get-in % [:held [(:client then) (:pid then)]])
+                              {:type :held-read-result :conn (:conn then) :client (:client then)
+                               :pid (:pid then) :at nil :barrier? true})
     :copy-taken (sim/send-link w id (:origin then) {:type :taken :copy (:copy then)})
     :leased   (let [{c :client :keys [block conn]} then
                     o (out w id c)]
@@ -942,6 +961,12 @@
           result (publish-released w id result c pid conn)
           (next at) (sim/timer w id (max 0 (- (+ (long t0) (long (second at))) (sim/now w)))
                                (assoc ev :type :held-read :at (next at)))
+          ;; Not processed, perhaps, rather than not there: once a no-op
+          ;; appended to the client's partition now has been, everything
+          ;; appended there before it has too, the dead broker's hold
+          ;; included, and one read more is the answer.
+          (and (cfg w :held-read-barrier?) (not (:barrier? ev)))
+          (write w id [:noop c] :ack {:k :held-barrier :client c :pid pid :conn conn} nil)
           :else (pubcomp-to w id c pid conn)))
 
       :link
