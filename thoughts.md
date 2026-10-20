@@ -4,6 +4,85 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261020
 
+### Cheaper bridge hand-offs, and what harsher faults found
+
+`forward-ack?` now takes a mode (`mqttkat.sim.current`, `runner/forward-ack-as`):
+
+- **`:full`:** as before.
+- **`:receipt`:** the copy is taken once it reaches the other broker.
+- **`:eo`:** full for exactly-once copies, nothing for the rest.
+- **`:eo+receipt`:** full for exactly-once copies, on receipt for the rest.
+
+**The default faults, 100 seeds each, all with leases.** Every mode passes
+every seed, so these seeds only measure cost:
+
+```clojure
+{:none       {:owed 461098}
+ :receipt    {:owed 445749 :cost "-3%"}
+ :eo+receipt {:owed 390064 :cost "-15%"}
+ :eo         {:owed 375492 :cost "-19%"}
+ :full       {:owed 311659 :cost "-32%" :crash-window "half the others'"}}
+```
+
+**Harsher faults:**
+
+- brokers killed every 2 to 5 s, down for 0.5 to 3 s;
+- connections dropped every 0.5 to 2 s;
+- Rama behind by up to 5 s.
+
+```clojure
+{:none       {:ok 94 :eo-duplicate 30 :lost 2}
+ :full       {:ok 99 :eo-duplicate 5}
+ :receipt    {:ok 95 :eo-duplicate 11 :eo-lost 7}
+ :eo         {:ok 94 :eo-duplicate 14 :lost 4}
+ :eo+receipt {:ok 97 :eo-duplicate 10 :eo-lost 3}}
+```
+
+Every mode fails here, `:full` too, and on causes that have nothing to do
+with the bridge. Two are traced so far.
+
+**1. A hand-over overwrites the identifier a claim holds** (`:full`, seed
+10).
+
+1. b3 claims key K for s3 under pid 207, which lands. s3 drops, and the
+   hand-over puts K on the queue under 207.
+2. Later b3 sends the same message from pending and claims K under 267.
+   Rama refuses the claim: K is in flight under 207.
+3. s3 drops before the refusal comes back, and the hand-over enqueues K
+   under 267. `queue-verdict` takes it: it keeps an entry in flight only
+   from an enqueue that names no identifier, or that un-releases it, not
+   from one that names another.
+4. 267 replaces 207. s3 had the message under 207, then was sent it
+   again under 267, and took it as new.
+
+The real `queue-verdict` has the same rule. The fix to try is that an
+enqueue naming another identifier does not replace one in flight either.
+
+**2. A PUBREL elsewhere looks for the hold too soon** (`:eo+receipt`,
+seed 50).
+
+1. b1 holds a QoS 2 publish at `:append-ack`, sends the PUBREC, and dies.
+2. The publisher sends its PUBREL to another broker, which reads the hold
+   for 3.25 s (`held-read-millis`).
+3. With Rama 5 s behind, the hold is not there yet. The broker answers
+   with a PUBCOMP alone, and the message is lost.
+
+The real wait is the same. The ways out are to read for as long as Rama is
+behind (its probes say how far), or to hold at `:ack`, which costs the
+PUBREC Rama's lag.
+
+**Not yet traced:**
+
+- the `:lost` under `:none` and `:eo`;
+- the `:eo-lost` under `:receipt`, probably the hole `:receipt` leaves
+  open: an exactly-once copy taken on arrival, and lost with a broker that
+  dies before its claim lands.
+
+So the modes cannot be compared under these faults until the two races
+are fixed in the model. Until then, cost decides: `:receipt` costs
+almost nothing and `:eo+receipt` 15%. Only the modes that wait fully on
+exactly-once copies can close the bridge gap for them.
+
 ### Identifier leases, in the code
 
 As modelled, with the names the code already had:
