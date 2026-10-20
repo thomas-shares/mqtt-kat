@@ -4,6 +4,67 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261020
 
+### Both races fixed in the model; the bridge modes compared
+
+**The fixes** (`runner/race-fixes`, both off by default):
+
+- **`:keep-claimed-pid?`.** `queue-verdict` keeps an entry in flight against
+  an enqueue that names another identifier, not only against one that names
+  none. Seed 10 under `:full` no longer delivers twice.
+- **`:held-read-barrier?`.** When a PUBREL comes for a hold this broker does
+  not have and the reads do not find it, the broker appends a no-op to the
+  client's partition at `:ack`, waits for it, and reads once more.
+  - A partition is processed in order. Once the no-op has been processed,
+    so has every append before it, the dead broker's hold included. If the
+    hold is not there then, it never will be.
+  - The first try, reading for as long as Rama's probes said it was behind,
+    failed on seed 50: the backlog drained just before the hold landed, and
+    the reader gave up a few hundred ms short. The barrier waits for exactly
+    what is needed.
+
+**The harsh faults again**, 100 seeds, leases and both fixes on:
+
+```clojure
+{:none       {:ok 98  :owed 191174 :eo-duplicate 5 :lost 1}
+ :receipt    {:ok 100 :owed 139171 :cost "-27%"}
+ :eo         {:ok 97  :owed 114393 :cost "-40%" :lost 4}
+ :eo+receipt {:ok 100 :owed 103145 :cost "-46%"}
+ :full       {:ok 100 :owed 78892  :cost "-59%"}}
+```
+
+**What this says:**
+
+- **Any hand-off on every copy closes the bridge gap.**
+  - Without one, a copy lost between brokers fails the run: exactly-once
+    duplicates, and ordinary messages lost with no crash window to explain
+    them.
+  - `:eo` leaves the ordinary copies unacknowledged, and they are lost when
+    the brokers fail together.
+- **`:receipt` is enough, even for exactly-once copies.** A copy on an
+  exactly-once topic that reaches the other broker is claimed there at
+  once. The claim is appended to Rama before that broker can die with it in
+  memory, and once appended it is processed whether or not the broker
+  lives. The gap is between arrival and that append, which the simulation
+  makes zero. In the code the claim goes through `claim-executor`, so it is
+  microseconds to milliseconds: smaller than any other window we have, but
+  not nothing.
+- **`:receipt` is the cheapest that passes.** It costs 3% at the default
+  faults and 27% at the harsh ones, where copies wait on brokers that have
+  died until their deaths are noticed. `:full` costs 32% and 59%.
+
+**For the code, in this order:**
+
+1. The two race fixes, each with a test first that fails on the code as it
+   is: a refused claim followed by a hand-over, and a PUBREL elsewhere while
+   Rama is behind.
+2. Forward-ack on receipt. The bridge's peer PUBACKs a copy when it
+   arrives, rather than once its own hand-offs land, and `forward-ack?` is
+   on by default in that mode.
+
+**Not traced:** the exactly-once duplicates in the no-hand-off runs (seeds
+4 and 82). They go away with any hand-off, so they are a bridge loss of
+some kind.
+
 ### Cheaper bridge hand-offs, and what harsher faults found
 
 `forward-ack?` now takes a mode (`mqttkat.sim.current`, `runner/forward-ack-as`):
