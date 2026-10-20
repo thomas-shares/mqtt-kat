@@ -4,6 +4,52 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261020
 
+### Identifier leases, in the code
+
+As modelled, with the names the code already had:
+
+- **`$$leases`.** In the sessions topology, client-id ->
+  `{:connect-id :broker-id :incarnation :block :blocks :released?}`.
+  - **Taken** with `:lease`, only for the connection on record, so a broker
+    that has not caught up cannot hide the block the new one uses.
+  - **Released** when that connection's `:disconnect` arrives, which comes
+    after its hand-over has landed.
+  - **Dropped** with a clean session.
+- **`lease-identifiers!`**, after the CONNACK.
+  1. If the lease read with the queue on the resume was not released, and
+     was not this broker's in this run, it sends a PUBREL for every
+     identifier of its blocks. It leaves out the identifiers the queue has
+     in flight, which are sent again under them, and those already in
+     flight here.
+  2. It then leases the next block, through `until-landed!`.
+  3. Until that lands, `next-identifier` gives out nothing, so deliveries
+     wait in pending, and the block's arrival flushes them.
+  4. `hold-identifiers!`, before the client is live, makes sure nothing
+     slips out from the last connection's block in between.
+- **The block is 256 identifiers**, twice the window. On by default, off
+  with `MQTTKAT_LEASES=false`.
+
+**Tests:**
+
+- `mqttkat.orphaned-identifier-test` now passes, on an ordinary topic and
+  an exactly-once one. The dead broker's block 0 is released with 256
+  PUBRELs, and the message goes out under 257.
+- A second test checks that a session which left with a hand-over is sent
+  no PUBRELs at all on its return.
+
+**One edge left, as in the simulation.** A broker that waits out a hand-over
+that is merely slow releases identifiers the late hand-over then sends
+messages under again. That is a duplicate on an ordinary QoS 2 topic, never
+a loss. Exactly-once messages are claimed on the queue before they are
+sent, so they are left out of the release.
+
+**What the chaos and load runs should show:**
+
+- No identifier reuse, and so no more of the non-exactly-once losses that
+  had no crash near them.
+- The cost: one write per 256 deliveries per session, and up to a few
+  hundred PUBRELs per session that resumes from a dead broker.
+
 ### Four variants, 100 seeds each
 
 **What changed in the model:**

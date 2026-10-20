@@ -151,6 +151,8 @@
      :queued-state   PState client, client-id -> key -> queued message
      :held-state     PState client, client-id -> packet identifier -> a QoS 2
                      message published and not yet released: see hold!
+     :leases-state   PState client, client-id -> the identifiers a broker
+                     may have out to it: see lease!
      :nudges-state   PState client, `$$nudges`: which clients connected
                      here have had something queued since
      :trie           atom, the in-memory copy of every subscription in the
@@ -200,6 +202,7 @@
      :retained-state (r/foreign-pstate cluster module-name "$$retained")
      :queued-state  (r/foreign-pstate cluster module-name "$$queued")
      :held-state    (r/foreign-pstate cluster module-name "$$held")
+     :leases-state  (r/foreign-pstate cluster module-name "$$leases")
      :nudges-state  (r/foreign-pstate cluster module-name "$$nudges")
      :stats-state   (r/foreign-pstate cluster module-name "$$rama-stats")
      :detail-state  (r/foreign-pstate cluster module-name "$$broker-detail")
@@ -367,6 +370,16 @@
    `packet-identifiers`: released and published."
   [client-id packet-identifiers]
   {:event :unhold :client-id client-id :packet-identifiers (mapv long packet-identifiers)
+   :at (System/currentTimeMillis)})
+
+(defn ->lease
+  "The record leasing identifier block `block` for `client-id`'s connection
+   `connect-id`, with `blocks`, every block this broker may have
+   identifiers out to it in."
+  [client-id connect-id block blocks]
+  {:event :lease :client-id client-id :connect-id connect-id
+   :broker-id broker-id :incarnation incarnation
+   :block (long block) :blocks (vec (sort (map long blocks)))
    :at (System/currentTimeMillis)})
 
 (defn ->dequeue
@@ -874,6 +887,19 @@
   ;; Rama's, as often as not, which may be what gives a permit back.
   (record! conn (->unhold client-id packet-identifiers) {:wait? false}))
 
+(defn lease!
+  "Lease identifier block `block` for `client-id` on `connect-id`: a
+   future, done once the topology has it, before which the broker gives
+   out none of it (mqttkat.handlers/lease!). Not waiting for a permit: it
+   is asked from wherever a delivery found the last block used up."
+  [conn client-id connect-id block blocks]
+  (record! conn (->lease client-id connect-id block blocks) {:wait? false}))
+
+(defn lease
+  "`client-id`'s lease, or nil: see $$leases in mqttkat.rama.module."
+  [{:keys [leases-state]} client-id]
+  (r/foreign-select-one (keypath client-id) leases-state))
+
 (defn held
   "The QoS 2 message `client-id` has held under `packet-identifier`, or
    nil: one point read."
@@ -919,10 +945,10 @@
 
 (defn resume
   "What a broker needs on `client-id`'s CONNECT: {:session the record,
-   :subscriptions filter->entry, :queued [[key msg]…]} — the last two for a
-   persistent session, empty for a clean one — or nil when Rama has never
-   seen the client. One read, two for a persistent session, on the CONNECT
-   path only."
+   :subscriptions filter->entry, :queued [[key msg]…], :lease} — the last
+   three for a persistent session, empty for a clean one — or nil when Rama
+   has never seen the client. One read, three for a persistent session, on
+   the CONNECT path only."
   [conn client-id]
   (when-let [s (session conn client-id)]
     (if (false? (:clean-session? s))
@@ -932,7 +958,8 @@
        ;; the client has worked through that (handlers/catch-up!). Not all
        ;; of it: a session that came back to a full queue had its live
        ;; deliveries refused until the client worked through it.
-       :queued        (vec (queued conn client-id (quot handlers/pending-limit 2)))}
+       :queued        (vec (queued conn client-id (quot handlers/pending-limit 2)))
+       :lease         (lease conn client-id)}
       {:session s :subscriptions {} :queued []})))
 
 ;; ── the copy of the cluster's subscriptions ──────────────────────────────
@@ -1871,12 +1898,15 @@
   (reset! handlers/redirector (fn [client-id] (redirect-target client-id)))
   (reset! handlers/session-source
           {:my-broker-id broker-id
+           :my-incarnation incarnation
            :resume       (fn [client-id] (resume conn client-id))
            :enqueue!     (fn [client-id msg key] (enqueue! conn client-id msg key))
            :dequeue!     (fn [client-id keys] (dequeue! conn client-id keys))
            :hold!        (fn [client-id pid msg] (hold! conn client-id pid msg))
            :unhold!      (fn [client-id pids] (unhold! conn client-id pids))
            :held         (fn [client-id pid] (held conn client-id pid))
+           :lease!       (fn [client-id connect-id block blocks]
+                           (lease! conn client-id connect-id block blocks))
            :claim!       (fn [client-id key msg] (claim! conn client-id key msg))
            :queued-entry (fn [client-id key] (queued-entry conn client-id key))
            :queued       (fn [client-id limit] (queued conn client-id limit))

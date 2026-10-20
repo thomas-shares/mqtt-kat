@@ -98,6 +98,8 @@
      {:event :unsubscribe  :connect-id :client-id :filter :at}
      {:event :hold         :client-id :packet-identifier :message :at}
      {:event :unhold       :client-id :packet-identifiers :at}
+     {:event :lease        :client-id :connect-id :broker-id :incarnation
+                           :block :blocks :at}
      {:event :retain       :topic :message :at}
      {:event :unretain     :topic :at}
      {:event :broker-up    :broker-id :incarnation :host :port :at}
@@ -596,6 +598,15 @@
     ;; first went after its PUBREC (§4.4). Subindexed: one write to hold, one
     ;; to let go, one point read to find.
     (declare-pstate s $$held {String (map-schema Long Object {:subindex? true})})
+    ;; client-id -> the packet identifiers a broker may have out to the
+    ;; client: {:connect-id :broker-id :incarnation :block :blocks
+    ;; :released?}. The broker gives out identifiers only from :block, once
+    ;; this has it; :blocks are every block it may still have some out in.
+    ;; :released? once that connection ended and handed over what it had.
+    ;; A broker resuming the session from one that never did releases them
+    ;; all, so that none the client still holds is given to a new message
+    ;; (mqttkat.handlers/release-orphans!).
+    (declare-pstate s $$leases {String Object})
     ;; One entry per task, keyed by the task itself: the index for the
     ;; sessions on this task lives on this task, next to them, and the sweep
     ;; runs everywhere at once without a hop. Inside, a sorted map of due
@@ -854,6 +865,21 @@
         (ops/explode (get *record :packet-identifiers) :> *pid)
         (local-transform> [(keypath *client-id *pid) NONE>] $$held)
 
+        ;; ── the identifiers a broker gives out to a client ─────────────
+        ;; Only for the connection on record: a lease from one that has
+        ;; been replaced is a broker that has not caught up, and taking it
+        ;; would hide the block the new one is using.
+        (case> :lease)
+        (local-select> [(keypath *client-id :connect-id)] $$sessions :> *on-record)
+        (<<if (= *on-record *connect-id)
+          (local-transform> [(keypath *client-id)
+                             (termval {:connect-id  *connect-id
+                                       :broker-id   (get *record :broker-id)
+                                       :incarnation (get *record :incarnation)
+                                       :block       (get *record :block)
+                                       :blocks      (get *record :blocks)})]
+                            $$leases))
+
         ;; ── the sessions ───────────────────────────────────────────────
         (default>)
         ;; A :lost was decided on a sweep; the run it names may have announced
@@ -888,8 +914,11 @@
             ;; clean one's are discarded, here and below in the shards.
             (<<if *clean?
               (identity {} :> *kept)
-              ;; And what it had in flight as a publisher (§4.1).
+              ;; And what it had in flight as a publisher (§4.1), and the
+              ;; identifiers it was given: a clean session's client
+              ;; starts afresh too.
               (local-transform> [(keypath *client-id) NONE>] $$held)
+              (local-transform> [(keypath *client-id) NONE>] $$leases)
               (else>)
               (identity *subs :> *kept))
             (local-transform> [(keypath *client-id)
@@ -993,7 +1022,13 @@
             (<<if (= *event :lost)
               (local-transform> [(keypath *client-id) :lost? (termval true)] $$sessions)
               (else>)
-              (local-transform> [(keypath *client-id) :lost? NONE>] $$sessions))
+              (local-transform> [(keypath *client-id) :lost? NONE>] $$sessions)
+              ;; Ended, and appended once its hand-over had landed
+              ;; (mqttkat.rama.cluster/on-broker-event): what it had out is
+              ;; on the queue, and its identifiers need no releasing.
+              (local-select> [(keypath *client-id)] $$leases :> *lease)
+              (<<if (= *connect-id (get *lease :connect-id))
+                (local-transform> [(keypath *client-id) :released? (termval true)] $$leases)))
             (local-select> [(keypath *client-id)] $$sessions :> *after)
             (count> (session-deltas *current *after))
             (depot-partition-append! *queue-events {:event :disconnected :client-id *client-id

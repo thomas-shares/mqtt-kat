@@ -320,6 +320,14 @@ export MQTTKAT_EXACTLY_ONCE_TOPICS=chaos/+/t0,chaos/+/t1,chaos/+/t2,chaos/+/t3,c
 bb scripts/chaos.bb chaos/broker-kill.edn chaos/qos2.edn
 ```
 
+On a cluster, a kept session's packet identifiers are leased, in blocks of
+256 recorded on the cluster before any of them is used. A broker that dies
+with a QoS 2 message in flight leaves the client holding that identifier
+until a PUBREL nobody else would send. The broker that resumes the session
+releases the dead broker's blocks with PUBRELs, so that no later message is
+given an identifier the client still holds and dropped as a repeat. Off with
+`-Dmqttkat.leases=false` or `MQTTKAT_LEASES=false`, to compare.
+
 By default a chaos client starts on broker `i mod N` and comes back to any
 broker that is up. `:setup :redirect` hands that to the brokers: the runner
 sets the cluster's redirect policy (`:round-robin` or `:load`) through broker

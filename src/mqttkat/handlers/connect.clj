@@ -242,6 +242,10 @@
     ;; — a publish from anyone else in that moment missed it. The moment
     ;; was short; asking the cluster on the way in made it long enough to
     ;; be seen.
+    ;; No identifiers until this connection has a lease, when it is to
+    ;; have one: before the client is live, or a delivery took one from
+    ;; the last connection's block.
+    (handlers/hold-identifiers! client-id connect-id msg)
     (add-client! (assoc msg :keep-alive agreed :connect-id connect-id))
     (send-buffer [client-key] connack)
     ;; Only now may anything else go to it (§3.2.0-1). add-client! put it in
@@ -249,6 +253,10 @@
     ;; reached the socket first; it was held instead, and the flush after
     ;; this handler sends it.
     (handlers/connack-sent! client-key)
+    ;; After the CONNACK (§3.2.0-1), before anything is given a new
+    ;; identifier: what a broker that died left the client holding is
+    ;; released, and this connection leased identifiers of its own.
+    (handlers/lease-identifiers! client-key client-id connect-id)
     ;; And what other brokers queued after the cluster was asked, later.
     (handlers/catch-up! client-id connect-id)
     ;; After add-client!, never before: it replaces this key's whole entry,

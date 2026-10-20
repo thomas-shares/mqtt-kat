@@ -915,19 +915,52 @@
           0
           (vals @*outbound*)))
 
+(def lease-block
+  "How many packet identifiers a lease is for: see lease-identifiers!. At
+   least inflight-window, so that a window's worth spans two blocks at
+   most; small enough that releasing them on a resume is a few hundred
+   PUBRELs, not thousands."
+  256)
+
+(defn- block-count ^long [] (quot (long max-packet-identifier) (long lease-block)))
+
+(defn- block-of
+  "The lease block identifier `pid` is in."
+  ^long [pid]
+  (quot (dec (long pid)) (long lease-block)))
+
+(defn- block-range
+  "The identifiers of lease block `k`, [first last]."
+  [k]
+  [(inc (* (long k) (long lease-block))) (* (inc (long k)) (long lease-block))])
+
 (defn- next-identifier
   "The next free identifier for this client, or nil if there is none.
 
    A plain wrapping counter is enough because `inflight-window` is far below
    65535: the counter cannot lap a live identifier. The containment check is
-   belt and braces for a window raised carelessly."
-  [{:keys [next-id inflight] :or {next-id 0}}]
-  (loop [candidate (inc (mod next-id max-packet-identifier))
-         tried     0]
-    (cond
-      (>= tried max-packet-identifier)  nil
-      (contains? inflight candidate)    (recur (inc (mod candidate max-packet-identifier)) (inc tried))
-      :else                             candidate)))
+   belt and braces for a window raised carelessly.
+
+   Under a lease (lease-identifiers!), only from the block leased, and none
+   until the cluster has it: nil once the block is used up, until the next
+   one is leased."
+  [{:keys [next-id inflight lease] :or {next-id 0}}]
+  (if lease
+    (when-let [b (:block lease)]
+      (let [[lo hi] (block-range b)]
+        (loop [candidate (max (long lo) (inc (long next-id)))]
+          (cond
+            (> candidate (long hi))        nil
+            (contains? inflight candidate) (recur (inc candidate))
+            :else                          candidate))))
+    (loop [candidate (inc (mod next-id max-packet-identifier))
+           tried     0]
+      (cond
+        (>= tried max-packet-identifier)  nil
+        (contains? inflight candidate)    (recur (inc (mod candidate max-packet-identifier)) (inc tried))
+        :else                             candidate))))
+
+(declare ensure-lease! flush-pending!)
 
 (defn- reserve
   "Record `msg` against a fresh identifier, or leave the state alone when it
@@ -959,14 +992,15 @@
   "Reserve an identifier for `client-id` and record `msg` against it.
 
    Returns the identifier, or nil when the client already has `window`
-   messages outstanding. Never blocks: a client that has stopped acknowledging
+   messages outstanding, or its lease has none left (ensure-lease!). Never blocks: a client that has stopped acknowledging
    is the caller's problem to handle, not a reason to park the thread doing the
    fan-out."
   ([client-id msg] (acquire-packet-identifier! client-id msg inflight-window))
   ([client-id msg window]
    (let [[before after] (swap-vals! (outbound-atom client-id) reserve msg false window)]
-     (when (> (count (:inflight after)) (count (:inflight before)))
-       (:next-id after)))))
+     (if (> (count (:inflight after)) (count (:inflight before)))
+       (:next-id after)
+       (ensure-lease! client-id)))))
 
 (defn release-packet-identifier!
   "Retire `id` for `client-id`.
@@ -1629,7 +1663,7 @@
   ;; with two peers looks like one client connected in two places, and the
   ;; takeover below had its bridges knock each other off in turn.
   (when-let [{:keys [resume takeover! my-broker-id]} (when-not (bridge/bridge? client-id) @session-source)]
-    (when-let [{:keys [session subscriptions queued] ::keys [waited-out?] :as adopted}
+    (when-let [{:keys [session subscriptions queued lease] ::keys [waited-out?] :as adopted}
                (let [{:keys [session] :as resumed} (resume client-id)]
                  (if (connected-elsewhere? session my-broker-id)
                    (do (log/info "session" client-id "is connected on" (:broker-id session) "- taking it over")
@@ -1663,7 +1697,10 @@
                                               k)
                                           (trace/trace! client-id msg "left on the cluster's queue at the resume" k))))
                              queued)]
-          (swap! catching-up assoc client-id {:had (zipmap restored (repeat nil))}))
+          (swap! catching-up assoc client-id {:had (zipmap restored (repeat nil))})
+          ;; For lease-identifiers!, after the CONNACK. Read with the
+          ;; queue, so that what is in flight there is what it leaves out.
+          (swap! (outbound-atom client-id) assoc ::resumed-lease lease))
         (if waited-out?
           (gate-identifiers! resume client-id (:session adopted) my-broker-id)
           (swap! (outbound-atom client-id) dissoc :gate)))
@@ -2022,8 +2059,10 @@
                              state                    ; window still full
                              (update reserved :pending pop)))
                          state)))]
-     (when (< (count (:pending after)) (count (:pending before)))
-       [(:next-id after) (peek (:pending before))]))))
+     (if (< (count (:pending after)) (count (:pending before)))
+       [(:next-id after) (peek (:pending before))]
+       (do (when (seq (:pending after)) (ensure-lease! client-id))
+           nil)))))
 
 (defn drop-unsubscribed-pending!
   "Take off `client-id`'s pending queue what only `removed` subscriptions
@@ -2729,6 +2768,153 @@
                           (claimed! key client-id k msg packet-identifier @entry)))))))
       true)
     (send-publish! key msg packet-identifier)))
+
+(def leases?
+  "Whether a kept session's packet identifiers are leased on the cluster
+   (lease-identifiers!). On unless -Dmqttkat.leases=false or
+   MQTTKAT_LEASES=false, which reaches brokers started by
+   scripts/brokers.bb."
+  (delay (not= "false" (or (System/getProperty "mqttkat.leases")
+                           (System/getenv "MQTTKAT_LEASES")))))
+
+(defn- leased-session?
+  "Whether the client connecting with `connect-msg` has its identifiers
+   leased: a kept session, not another broker's bridge, on a cluster that
+   leases."
+  [client-id connect-msg]
+  (boolean (and @leases?
+                (:lease! @session-source)
+                (not (bridge/bridge? client-id))
+                (keep-session? connect-msg))))
+
+(defn- lease!
+  "Lease block `k` for `client-id`'s connection `connect-id` on the cluster,
+   with every block it may still have identifiers out in, and give out
+   identifiers from it once that has landed, however long that takes: see
+   until-landed!. Not if a lease is on its way already, or the connection
+   is not the one leasing any more."
+  [client-id connect-id k]
+  (let [[before after]
+        (swap-vals! (outbound-atom client-id)
+                    (fn [{:keys [lease] :as state}]
+                      (if (and lease (= connect-id (:connect-id lease)) (nil? (:leasing lease)))
+                        (assoc-in state [:lease :leasing] k)
+                        state)))]
+    (when-not (identical? before after)
+      (let [blocks (into #{k} (map block-of) (keys (:inflight after)))
+            mine?  #(= connect-id (get-in @(outbound-atom client-id) [:lease :connect-id]))]
+        (.execute ^java.util.concurrent.Executor claim-executor
+                  ^Runnable
+                  (fn []
+                    (when (until-landed! (str "lease block " k " for " client-id)
+                                         #((:lease! @session-source) client-id connect-id k blocks)
+                                         mine?)
+                      (let [[before after]
+                            (swap-vals! (outbound-atom client-id)
+                                        (fn [{:keys [lease] :as state}]
+                                          (if (and (= connect-id (:connect-id lease)) (= k (:leasing lease)))
+                                            (-> state
+                                                (assoc :lease (assoc lease :block k :leasing nil))
+                                                (assoc :next-id (dec (long (first (block-range k))))))
+                                            state)))]
+                        (when-not (identical? before after)
+                          (log/debug "leased identifier block" k "for" client-id)
+                          (when-let [key (live-connection client-id)]
+                            (when (= connect-id (get-in @*clients* [key :connect-id]))
+                              (flush-pending! key client-id))))))))))))
+
+(defn- ensure-lease!
+  "The next block for `client-id` once its lease has no identifier left,
+   unless one is on its way. Always nil, for acquire-packet-identifier!."
+  [client-id]
+  (when-let [a (existing-outbound client-id)]
+    (let [{:keys [lease] :as state} @a]
+      (when (and lease (:block lease) (nil? (:leasing lease)) (nil? (next-identifier state)))
+        (lease! client-id (:connect-id lease) (mod (inc (long (:block lease))) (block-count))))))
+  nil)
+
+(defn hold-identifiers!
+  "On a CONNECT, before the client is live here: no identifiers for it
+   until its connection has a lease of its own (lease-identifiers!), when
+   it is leased; none of the last connection's, when it is not."
+  [client-id connect-id connect-msg]
+  (swap! (outbound-atom client-id)
+         (fn [state]
+           (if (leased-session? client-id connect-msg)
+             (assoc state :lease {:connect-id connect-id
+                                  :previous   (dissoc (:lease state) :previous)})
+             (dissoc state :lease)))))
+
+(defn- orphaned?
+  "Whether `lease`, read from the cluster on the resume, names identifiers
+   a broker may have out to the client that nobody has handed over: its
+   connection never ended with a hand-over (:released?), and it was not
+   this broker's, in this run, whose own memory still has them."
+  [lease]
+  (boolean (and lease
+                (not (:released? lease))
+                (not (and (= (:broker-id lease) (:my-broker-id @session-source))
+                          (= (:incarnation lease) (:my-incarnation @session-source)))))))
+
+(defn- release-orphans!
+  "PUBREL every identifier of `lease`'s blocks that the cluster's queue does
+   not have in flight and this broker has not put in flight again.
+
+   The broker that had them died, or did not hand over in time. It may have
+   sent the client a QoS 2 message under any of them, which the client
+   holds until a PUBREL that nobody would now send (§4.3.3); and the next
+   message given that identifier, by any broker, the client took for the
+   one it held, and dropped. A client that holds none answers with a
+   PUBCOMP, which is ignored here. Those on the queue are sent again under
+   their identifiers, and a PUBREL first would make that a second message.
+   Returns how many it sent."
+  [client-key client-id lease]
+  (let [{:keys [queued]} @session-source
+        on-queue (into #{} (keep (comp :packet-identifier second))
+                       (queued client-id Integer/MAX_VALUE))
+        here     (set (keys (:inflight (some-> (existing-outbound client-id) deref))))
+        pids     (for [k (:blocks lease)
+                       :let [[lo hi] (block-range k)]
+                       pid (range lo (inc (long hi)))
+                       :when (not (or (on-queue pid) (here pid)))]
+                   pid)]
+    (doseq [pid pids]
+      (send-buffer [client-key] (MqttPubRel/encode {:packet-type       :PUBREL
+                                                    :packet-identifier pid})))
+    (log/info "released" (count pids) "identifiers" client-id "may hold from"
+              (:broker-id lease) "which never handed them over")
+    (count pids)))
+
+(defn lease-identifiers!
+  "Once the CONNACK has gone to a kept session on a cluster: release what
+   the broker before may have left the client holding (release-orphans!),
+   then lease this connection a block of identifiers of its own.
+
+   A broker that died with a QoS 2 message in flight left the client
+   holding its identifier, and this one, its counter starting again, gave
+   the same identifier to a later message, which the client dropped as the
+   one it held: on topics delivered exactly once too, whose claim recorded
+   the identifier this broker chose. The simulation found it
+   (mqttkat.sim.current, :leases?) and mqttkat.orphaned-identifier-test
+   shows it. Leased, every identifier a broker can have out is on the
+   cluster before it is used, so whoever resumes the session can release
+   them."
+  [client-key client-id connect-id]
+  (when (= connect-id (get-in @(outbound-atom client-id) [:lease :connect-id]))
+    (let [{::keys [resumed-lease] :keys [lease]} @(outbound-atom client-id)
+          previous (:previous lease)]
+      (when (orphaned? resumed-lease)
+        (release-orphans! client-key client-id resumed-lease))
+      (swap! (outbound-atom client-id) #(-> % (dissoc ::resumed-lease) (update :lease dissoc :previous)))
+      ;; The block after the last this client was given: this broker's own
+      ;; if it had one, else the cluster's record.
+      (let [mine?      (or (nil? resumed-lease)
+                           (and (= (:broker-id resumed-lease) (:my-broker-id @session-source))
+                                (= (:incarnation resumed-lease) (:my-incarnation @session-source))))
+            last-block (if mine?
+                         (or (:block previous) (:leasing previous) (:block resumed-lease))
+                         (:block resumed-lease))]
+        (lease! client-id connect-id (mod (inc (long (or last-block -1))) (block-count)))))))
 
 (declare deliver-now-or-queue!)
 
