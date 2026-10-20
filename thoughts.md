@@ -4,6 +4,74 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261020
 
+### The simulation's first finding: identifiers orphaned by a crash
+
+The simulation runs, at the default config, in about 2.5 s a run:
+
+- 3 brokers and 3 publishers;
+- 4 subscribers, one slow and on `#`;
+- a window of 8;
+- over 30 s: brokers killed every 5 to 15 s, connections dropped every
+  1 to 4 s, and Rama behind by up to 3 s.
+
+With nothing going wrong, every message arrives once.
+
+Forty seeds of the current design gave:
+
+```clojure
+{:runs 40 :ok 34 :owed 185430
+ :counts {:crash-window 5034 :duplicate-after-crash 90
+          :eo-lost 3 :identifier-reused 7 :lost 3}}
+```
+
+The crash-window losses and the duplicates after a crash are what we
+expected of a crash, and what `doc/guarantees.md` leaves open or allows.
+Every failed seed broke R6 first, and every one in the same way:
+
+1. A broker sends a QoS 2 message on an ordinary topic under identifier
+   P, and dies before the PUBREL.
+2. The client holds P unreleased, as it must (§4.3.3), but nobody knows,
+   because only the dead broker's memory did.
+3. The client resumes elsewhere. That broker's counter for it starts
+   again from 1, and sooner or later another QoS 2 message goes out under
+   P.
+4. The client takes it for the one it holds and drops it.
+
+On an exactly-once topic that breaks R3: seed 29 lost `p2:272` that way,
+to an identifier orphaned by `p2:109` on `t/a` 28 s earlier. On another
+topic it is a loss with no crash near it (`:lost`).
+
+So the crash window of the ordinary topics reaches the exactly-once ones,
+because a session has one identifier space for both, and the claims
+cover only one of them. Each orphan is a loss every time the counter
+comes round to it, for as long as the session lives. At the real window
+of 128 a crash can orphan 128 at once.
+
+This is a claim about the design, found in the model. It still has to be
+confirmed against the code, with a test:
+
+1. Give a kept subscriber a QoS 2 message on an ordinary topic under
+   identifier 1.
+2. Kill its broker before the PUBREL.
+3. Resume the subscriber on another broker and send it a QoS 2 message.
+
+The new broker's first identifier for it is 1.
+
+Ways out, cheapest first:
+
+- **Leases.** A broker takes identifiers for a session from Rama in
+  blocks of, say, 1024, one write a block. A broker resuming a session
+  whose last block it does not know sends a PUBREL for every identifier
+  in it before using any. A client answers a PUBREL it has no state for
+  with a PUBCOMP (§4.3.3), so that is harmless.
+- **Every QoS 2 delivery to a kept session claimed,** as the exactly-once
+  ones are. This is what costs Rama a write per delivery.
+- **Design A,** where an identifier is a position in a durable log and
+  there is no counter in memory to lose.
+
+The simulation also has a `:sim` test selector that sweeps 20 seeds and
+fails on any violation. It fails today, on this.
+
 ### Stepping back: does this design hold up?
 
 Weeks of chaos and load runs, and every fix has exposed another race.

@@ -74,8 +74,13 @@
   ;; socket and nothing else. With MQTT_BROKER_HOST (and MQTT_BROKER_PORT) set
   ;; they run against that broker instead of one the suite starts, which is how
   ;; CI checks them against Mosquitto; see mqttkat.test-util/external?.
-  :test-selectors {:default     (complement :performance)
+  ;;
+  ;; `lein test :sim` sweeps seeds of the simulation (mqttkat.sim.*) and
+  ;; fails on any run that breaks doc/guarantees.md: the bar a design has
+  ;; to clear, not a regression test.
+  :test-selectors {:default     (complement (some-fn :performance :sim))
                    :performance :performance
+                   :sim         :sim
                    :portable    :portable
                    ;; What CI runs against Mosquitto: the portable tests less
                    ;; the ones Mosquitto is known to fail, each of which says
@@ -102,6 +107,7 @@
   ;; to a cluster, whose workers have Rama already; theirs must be the only
   ;; copy. The uberjar profile below still compiles it for its Main-Class.
   :main ^:skip-aot mqttkat.server
+  :aliases {"sim" ["run" "-m" "mqttkat.sim.runner"]}
   :profiles
   {:dev
    {:dependencies [[djblue/portal "0.67.2"]

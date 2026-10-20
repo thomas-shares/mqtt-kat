@@ -344,6 +344,28 @@ mix, share of persistent sessions), `:chaos` (each action and how often) and
 `logs/chaos/<run>.edn`. `brokers.bb start` takes `--rama in-process` or
 `--rama none` for a broker that needs no cluster.
 
+### Simulation
+
+What the cluster promises, per QoS and kind of topic and under which
+failures, is written down in `doc/guarantees.md`. `mqttkat.sim.*` checks a
+design against it in a deterministic simulation:
+
+- brokers, a Rama that lags, clients and the network, all on one thread with
+  a virtual clock;
+- brokers killed, connections dropped and Rama slowed, at points drawn from
+  one seed.
+
+A run takes seconds, and the same seed is the same run, event for event. It
+models the protocol, not the code: `mqttkat.sim.current` is the current
+design, function by function, and its docstring says what is left out.
+
+```
+lein sim                 # 20 seeds from 0: how many broke which rule
+lein sim 200 1000        # 200 seeds from 1000
+lein sim explain 29      # one run: each violation, message by message
+lein test :sim           # the sweep as a test: fails on any violation
+```
+
 ## And here are some links with info to help me:
 https://gist.github.com/Botffy/3860641
 
