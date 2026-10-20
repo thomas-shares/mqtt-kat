@@ -2,6 +2,140 @@
 
 In this file will go my thoughts and ramblings about this project and what I have done and what I might do next.
 
+## 20261020
+
+### Stepping back: does this design hold up?
+
+Weeks of chaos and load runs, and every fix has exposed another race.
+Before another one, here is a look at the whole.
+
+**What the runs taught us:**
+
+- **Nearly every bug was a race between two copies of the truth.** A
+  message lives in a broker's memory (the window, the pending queue, the
+  bridge queue, an origin hold), and sometimes also on Rama (the queue, a
+  claim, a hold, `taken-off`). Each fix closed one gap between the two and
+  opened a new interleaving:
+  - stale reads;
+  - a takeover in the middle of a read;
+  - a claim landing after the unhold;
+  - a resend given a new key;
+  - read flags surviving a reconnect.
+- **Every guarantee costs a Rama round trip, and on one machine that is
+  0.5 to 10 s.**
+  - Exactly-once works only while Rama has headroom.
+  - Overflowing to Rama broke the load run twice.
+  - Waiting on the bridge tied every publisher to the slowest subscriber.
+- **Two state machines guess at each other.** The cluster's idea of where
+  a client is lags the truth, so a broker guesses "away", "leaving",
+  "reconciled" or "had". Duplicates and losses come from the guesses.
+- **We cannot tell a bug from a capacity limit.** Load and chaos run on
+  one laptop, so a lost message could be:
+  - a bug;
+  - a subscriber that is behind;
+  - a drain that stopped too early.
+
+  Each question costs a twenty-minute run.
+
+**The honest verdict:** this is a fast in-memory broker with Rama
+attached on the side, asynchronously. Its durability is the sum of about
+fifteen mechanisms:
+
+- views, bridges, origin holds and awaiting;
+- hand-over, catch-up reads and nudges;
+- reconcile windows and `taken-off`;
+- claims, releases and overflow;
+- wait-on-cluster and forward-ack;
+- identifier gates.
+
+None of them is wrong on its own, but how they interact is past what we
+can reason about, and the runs keep finding new interactions. We can go
+on patching, but nothing says the stream of bugs ends.
+
+**The other ways to do it:**
+
+- **A, log first.** Rama is the only truth for QoS 1 and 2.
+  - **How:** a publish goes onto a topic log (one write, acknowledged on
+    the append). Each kept session has a cursor per log. Whichever broker
+    serves the session streams from the cursor. Packet identifiers derive
+    from the position in the log, so a resend after a crash carries the
+    same identifier and exactly once comes free. A PUBACK or PUBCOMP moves
+    the cursor, in batches.
+  - **Gain:** no bridges and no hand-over.
+  - **Cost:** wildcard subscribers read many logs, so the load moves to
+    reads.
+- **B, replicate sessions between brokers.** Each kept session has an
+  owner broker and a backup. The owner copies its in-flight and pending
+  state to the backup before it sends, and the backup takes over with the
+  same identifiers. Rama keeps only subscriptions and ownership. This is
+  what HiveMQ and EMQX do.
+  - **Gain:** durability at LAN speed.
+  - **Cost:** a replication protocol of our own, and its failure
+    detection.
+- **C, Rama delivers.** A microbatch topology fans each publish out into
+  per-session outboxes, with identifiers assigned there, and brokers are
+  pipes.
+  - **Gain:** exactly once is Rama's, and everything is in one place.
+  - **Cost:** a write per delivery, about 55k a second in the load run:
+    far past one machine.
+- **D, narrow the promise.** QoS 1 and 2 are at least once, with a
+  bounded and measured crash window. Exactly once and no loss hold only
+  on named topics, served by A or C away from the fast path.
+
+**The choice:** D with A, in three steps.
+
+1. Write down what we promise. That is `doc/guarantees.md`, which from now
+   on decides what a bug is. It records target against today, and leaves
+   one decision open: what a broker crash may cost QoS 1.
+2. Build a deterministic simulation, so a race is found in seconds and
+   replayed from its seed, not hoped for in a twenty-minute run.
+3. Then spike A for the exactly-once topics, in the same simulation, next
+   to the current design.
+
+### A deterministic simulation: the protocol, not the code
+
+The simulation (`mqttkat.sim.*`) runs brokers, a Rama that lags, clients
+and a network in one thread, on a virtual clock, with every random choice
+drawn from one seed.
+
+- **Faults:** brokers are killed and restarted, connections dropped and
+  Rama slowed, at points the seed picks.
+- **Checks:** after the run (`mqttkat.sim.check`) it checks the rules of
+  `doc/guarantees.md` against what each client handed to its application.
+- **Replay:** the same seed replays the same run, event for event, with a
+  trace of each message that went wrong.
+
+It models the protocol; it does not run the broker's code. Running the
+real code deterministically would mean putting every thread, timer,
+executor, socket and Rama call behind an interface the simulation can
+drive. `handlers.clj` alone has:
+
+- virtual threads;
+- futures;
+- `at-at` timers;
+- `CompletableFuture` callbacks;
+- `Thread/sleep` retries.
+
+That is a rewrite in its own right, and design A would need it anyway.
+So the current design is modelled function by function. Each piece of
+the model names the function in `handlers.clj` it stands for, at the
+default settings:
+
+- exactly-once claims;
+- QoS 2 held on the cluster;
+- forward-ack off;
+- wait-on-cluster off.
+
+A race the simulation finds is then a claim about the design, to be
+confirmed against the code with a targeted test, as the runs' findings
+were. A model that misses a mechanism misses that mechanism's bugs, and
+says so in its namespace docstring.
+
+The first thing to ask of it is the real question behind the last weeks:
+does the current design converge, so that each fix leaves fewer races, or
+does it keep leaking? The second is whether A does better on the same
+seeds.
+
 ## 20261016
 
 ### Queues nobody read: a reconnect wedged the reads
