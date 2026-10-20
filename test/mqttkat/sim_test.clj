@@ -110,8 +110,12 @@
     (is (empty? failed) (pr-str (dissoc res :failed)))))
 
 (deftest ^:sim the-current-design-with-leases-keeps-the-guarantees
-  ;; Nor this, today: a copy forwarded over the bridge, for a broker that
-  ;; is down, comes back to a broker that died meanwhile, and its
-  ;; publisher was told it was done (forward-ack off).
+  ;; It does, on 100 seeds (thoughts.md, 20261020). The bridge can still
+  ;; lose a copy for a broker that is down when the broker that forwarded
+  ;; it dies, which forward-ack closes; this sweep did not hit it.
   (let [{:keys [failed] :as res} (r/sweep (range 20) (r/config r/leases) current/model)]
+    (is (empty? failed) (pr-str (dissoc res :failed)))))
+
+(deftest ^:sim the-current-design-with-leases-and-forward-ack-keeps-the-guarantees
+  (let [{:keys [failed] :as res} (r/sweep (range 20) (r/config r/leases r/forward-ack) current/model)]
     (is (empty? failed) (pr-str (dissoc res :failed)))))

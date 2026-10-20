@@ -4,6 +4,60 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261020
 
+### Four variants, 100 seeds each
+
+**What changed in the model:**
+
+- **Forwarded copies as a hand-off** (`{:model {:forward-ack? true}}`,
+  `runner/forward-ack`), as `forward-ack?` and `taken-or-handed-back` do.
+  A copy forwarded to another broker holds its publish until that broker
+  has done with it what it would with its own: put it in a window, claimed
+  it, or queued it. If the copy comes back instead, because its broker is
+  down, dies or does not answer in 30 s, it is queued here.
+- **A model bug found and fixed.** A 300-seed sweep left one run with 374
+  messages unread on a queue (R5). A connection that waited out a
+  hand-over had closed the identifier gate. The next connection, resuming
+  cleanly on the same broker, left that gate closed for good. The code
+  clears it (`adopt-session!`); the model now does too.
+
+**Then the same 100 seeds through each variant:**
+
+```clojure
+{:current            {:ok 75  :owed 483608 :identifier-reused 33 :eo-lost 9 :lost 19
+                      :crash-window 15123 :duplicate-after-crash 402}
+ :leases             {:ok 100 :owed 461098 :crash-window 15572 :duplicate-after-crash 250}
+ :forward-ack        {:ok 86  :owed 310988 :identifier-reused 21 :eo-lost 4 :lost 12
+                      :crash-window 7859 :duplicate-after-crash 430}
+ :leases+forward-ack {:ok 100 :owed 311659 :crash-window 7992 :duplicate-after-crash 471}}
+```
+
+**What that says:**
+
+- **Leases are the fix that matters.** Every failure of the current design
+  on these seeds was an orphaned identifier, and leases remove them all.
+- **The bridge gap is real but rare.** It is the forwarded copy lost when
+  both brokers fail together. These 100 seeds did not hit it once the gate
+  was fixed, though an earlier 40-seed sweep did. Forward-ack closes it.
+- **Forward-ack costs a third of the throughput.** 311k owed against 461k
+  in the same simulated time, because publishers wait on the bridge, and
+  so on the slowest subscriber behind it. That is the stall the real load
+  runs showed.
+- **It also halves the crash window** (1.6% of what is owed against 3.4%).
+  A copy waits for the other broker to have it, so less of it is only in
+  the memory of the broker that forwarded it.
+
+**What next:**
+
+1. Leases in the code, with `mqttkat.orphaned-identifier-test` as the
+   bar.
+2. For the bridge, a hand-off cheaper than forward-ack. The origin could
+   hold the publish until the copy is on the wire to a broker that is up,
+   or queue the copy on Rama when the bridge is backed up. The simulation
+   can weigh those against each other before any code changes.
+
+The `:sim` selector now sweeps the current design (fails), with leases
+(passes) and with leases and forward-ack (passes).
+
 ### Identifier leases, in the simulation
 
 `{:model {:leases? true}}` (`mqttkat.sim.current`, `runner/leases`):
