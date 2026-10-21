@@ -468,3 +468,26 @@
     (is (= 3 (get-in (run nil) [:counts :lost])))
     (is (= 1 (count (kept (run nil)))) "one kept, of three")
     (is (contains? (kept (run #{"c"})) "c") "and a followed client's, whichever came first")))
+
+(deftest a-new-message-under-an-identifier-the-client-holds
+  ;; Method B: a QoS 2 PUBLISH under an identifier held since its PUBREC
+  ;; is a resend, dropped. A new message under one is the broker giving
+  ;; out an identifier still in use (§2.2.1): dropped the same, and
+  ;; recorded, so that a loss it makes is told from a crash's.
+  (let [lg  (ledger/ledger)
+        cl  (c/make lg {:id "s" :kind :sub :idx 0 :mqtt5? false :persistent? true})
+        pub (fn [pid payload dup?]
+              (#'c/handle cl (:epoch @(:conn cl))
+                          {:packet-type :PUBLISH :topic "t/1" :qos 2 :packet-identifier pid
+                           :duplicate? dup? :payload (.getBytes ^String payload "US-ASCII")}))]
+    (reset! (:conn cl) {:connected? true :epoch 1 :broker 2})
+    (pub 5 "3:1|" false)
+    (pub 5 "3:1|" true)
+    (is (= [] @(:protocol lg)) "a resend")
+    (pub 5 "3:2|" false)
+    (is (= [{:client "s" :what :identifier-reused :pid 5 :held [3 1] :got [3 2]
+             :dup? false :topic "t/1" :broker 2}]
+           (map #(dissoc % :at) @(:protocol lg))))
+    (#'c/handle cl 1 {:packet-type :PUBREL :packet-identifier 5})
+    (pub 5 "3:3|" false)
+    (is (= 1 (count @(:protocol lg))) "released, then free")))

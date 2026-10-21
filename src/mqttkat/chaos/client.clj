@@ -53,7 +53,8 @@
           ;; next connect; see take-redirect!.
           :redirect-to  (atom nil)
           :sub          (atom {:state :none})
-          :awaiting-rel (ConcurrentHashMap/newKeySet)
+          ;; pid -> the message received under it, or ::unparseable.
+          :awaiting-rel (ConcurrentHashMap.)
           :inflight     (ConcurrentHashMap.)
           :window       (Semaphore. (int window))
           :next-id      (AtomicInteger.)
@@ -171,7 +172,7 @@
         :sub (when-not (:persistent? c)
                (ledger/ended! (:ledger c) (:id c) :drop at)
                (reset! (:sub c) {:state :none})
-               (.clear ^java.util.Set (:awaiting-rel c)))))))
+               (.clear ^ConcurrentHashMap (:awaiting-rel c)))))))
 
 (defn kill!
   "Take the client down for `down-ms`: gracefully (a DISCONNECT first, as a
@@ -270,7 +271,7 @@
               (when (= :sub (:kind c))
                 (ledger/ended! lg (:id c) :session-lost at)
                 (reset! (:sub c) {:state :none})
-                (.clear ^java.util.Set (:awaiting-rel c)))
+                (.clear ^ConcurrentHashMap (:awaiting-rel c)))
               ;; Nothing the broker kept can be retransmitted to.
               (when (= :pub (:kind c)) (release-inflight! c))))
           (when (:persistent? c) (reset! (:had-session? c) true))
@@ -339,8 +340,16 @@
       0 (hand-on!)
       1 (do (hand-on!)
             (send! c (MqttPubAck/encode (v5 c {:packet-type :PUBACK :packet-identifier pid}))))
-      2 (do (when (.add ^java.util.Set (:awaiting-rel c) pid)
-              (hand-on!))
+      ;; Held already: a resend, dropped (method B). Held for another
+      ;; message, the broker gave out an identifier still in use (§2.2.1),
+      ;; and this one is dropped as a client must: a loss the broker made.
+      2 (let [held (.putIfAbsent ^ConcurrentHashMap (:awaiting-rel c) pid (or id ::unparseable))]
+          (cond
+            (nil? held) (hand-on!)
+            (and id (not= held id))
+            (ledger/protocol-error! (:ledger c) (:id c) :identifier-reused
+                                    {:pid pid :held held :got id :dup? (:duplicate? msg)
+                                     :topic (:topic msg) :broker (broker-of c)}))
             (send! c (MqttPubRec/encode (v5 c {:packet-type :PUBREC :packet-identifier pid})))))))
 
 (defn- retire! [c pid ok?]
@@ -359,7 +368,7 @@
       :SUBACK   (on-suback c msg)
       :UNSUBACK (on-unsuback c msg)
       :PUBLISH  (on-publish c msg)
-      :PUBREL   (do (.remove ^java.util.Set (:awaiting-rel c) (:packet-identifier msg))
+      :PUBREL   (do (.remove ^ConcurrentHashMap (:awaiting-rel c) (:packet-identifier msg))
                     (send! c (MqttPubComp/encode (v5 c {:packet-type :PUBCOMP
                                                         :packet-identifier (:packet-identifier msg)}))))
       :PUBACK   (retire! c (:packet-identifier msg) (not (failed? msg)))

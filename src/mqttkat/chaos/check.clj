@@ -59,7 +59,10 @@
      :session-lost    a persistent session the broker no longer had on
                       reconnect
      :protocol        something MQTT forbids whatever the QoS: a PUBLISH
-                      before the CONNACK (§3.2.0-1)
+                      before the CONNACK (§3.2.0-1), or a QoS 2 PUBLISH of
+                      a new message under an identifier the client still
+                      held unreleased (§2.2.1, :identifier-reused), which
+                      it drops as a resend
      :nothing-checked no message was owed to anyone, so the run proves
                       nothing"
   (:require [clojure.string :as str]))
