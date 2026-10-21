@@ -90,6 +90,13 @@
    ;; found by the reads, is read once more after a no-op appended to the
    ;; client's partition has been processed (release-from-cluster!).
    :keep-claimed-pid?  false
+   ;; keep-reading! (in the code): every :safety-read-ms a connected kept
+   ;; session's queue is read, nudged or not.
+   :safety-read?       false
+   :safety-read-ms     30000
+   ;; Overload control, not in the code: a broker stops reading its
+   ;; publishers while Rama is more than this many ms behind. nil: never.
+   :admission-lag-ms   nil
    :overflow-before-connack? false
    :held-read-barrier?     false
    :lease-block        64})
@@ -679,7 +686,9 @@
                   (:inflight (out w id c)))
         w (flush-pending w id c)
         gaps (map - (cfg w :catch-up-reads) (cons 0 (cfg w :catch-up-reads)))]
-    (sim/timer w id (first gaps) {:type :read :client c :cid conn :gaps gaps}))))
+    (cond-> (sim/timer w id (first gaps) {:type :read :client c :cid conn :gaps gaps})
+      (cfg w :safety-read?)
+      (sim/timer id (cfg w :safety-read-ms) {:type :safety-read :client c :cid conn})))))
 
 (defn- peer-gone? [w x]
   (and (not (sim/up? w x))
@@ -922,6 +931,24 @@
 
 ;; ---------------------------------------------------------------- events
 
+(defn- behind?
+  "Whether Rama is further behind than :admission-lag-ms, as a probe on the
+   queues depot would say."
+  [w]
+  (when-let [limit (cfg w :admission-lag-ms)]
+    (> (- (long (get-in (sim/node w rama/node-id) [:busy :queues] 0)) (sim/now w)) (long limit))))
+
+(defn- admit?
+  "Whether a publisher's packet on `conn` is handled now: not while Rama is
+   behind, nor while others before it wait."
+  [w id conn]
+  (and (empty? (get-in (bs w id) [:parked conn])) (not (behind? w))))
+
+(defn- park [w id conn msg]
+  (let [first? (empty? (get-in (bs w id) [:parked conn]))]
+    (cond-> (bu w id update-in [:parked conn] (fnil conj []) msg)
+      first? (sim/timer id 100 {:type :unpark :conn conn}))))
+
 (defn handle [w {:keys [to type conn msg] :as ev}]
   (let [id to]
     (case type
@@ -936,7 +963,29 @@
           (cond
             (nil? client) w
             (= :subscriber (:role (sim/node w client))) (subscriber-packet w id conn client msg)
-            :else (publisher-packet w id conn client msg))))
+            (admit? w id conn) (publisher-packet w id conn client msg)
+            :else (park w id conn msg))))
+
+      ;; Overload control: a publisher's packets wait while Rama is behind.
+      :unpark
+      (let [conn (:conn ev)]
+        (loop [w w]
+          (let [[m & more] (get-in (bs w id) [:parked conn])
+                client (get-in (bs w id) [:conns conn :client])]
+            (cond
+              (nil? m) (bu w id update :parked dissoc conn)
+              (or (nil? client) (not (sim/open? w conn))) (bu w id update :parked dissoc conn)
+              (behind? w) (sim/timer w id 100 {:type :unpark :conn conn})
+              :else (recur (-> (bu w id assoc-in [:parked conn] (vec more))
+                               (publisher-packet id conn client m)))))))
+
+      ;; keep-reading!: a connected kept session's queue read now and then.
+      :safety-read
+      (let [{c :client :keys [cid]} ev]
+        (if (= cid (get-in (bs w id) [:catching-up c :connect-id]))
+          (-> (read-again w id c cid nil)
+              (sim/timer id (cfg w :safety-read-ms) ev))
+          w))
 
       :session    (adopt w id (:conn ev) (:client ev) (:result ev))
       :adopt-poll (if (get-in (bs w id) [:adopting (:conn ev)])

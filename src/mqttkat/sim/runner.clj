@@ -58,7 +58,13 @@
   "The races the sweeps found beyond leases and the bridge, fixed
    (mqttkat.sim.current)."
   {:model {:keep-claimed-pid? true :held-read-barrier? true
-           :overflow-before-connack? true}})
+           :overflow-before-connack? true :safety-read? true}})
+
+(defn admission
+  "Overload control: publishers not read while Rama is more than `ms`
+   behind (mqttkat.sim.current)."
+  [ms]
+  {:model {:admission-lag-ms ms}})
 
 (def harsh
   "Brokers killed every 2 to 5 s, connections dropped every 0.5 to 2 s,
