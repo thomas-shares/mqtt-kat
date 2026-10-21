@@ -926,6 +926,18 @@
    PUBRELs, not thousands."
   256)
 
+(def lease-ahead-millis
+  "How long the blocks a session has leased ahead should last it, at the
+   rate it used its last block: see ensure-lease!. Longer than a lease
+   takes with Rama behind (load run 20261021-205056, up to about six
+   seconds)."
+  10000)
+
+(def max-lease-ahead
+  "The most blocks a session leases ahead: what a resume after its broker
+   dies releases is this many blocks and two more, at most 4,608 PUBRELs."
+  16)
+
 (defn- block-count ^long [] (quot (long max-packet-identifier) (long lease-block)))
 
 (defn- block-of
@@ -965,13 +977,17 @@
         :else                             candidate))))
 
 (defn- advance-lease
-  "`state` giving out identifiers from its lease's :next block once its
-   current one has none left (ensure-lease! leases it ahead)."
+  "`state` giving out identifiers from the first of its lease's :next
+   blocks once its current one has none left (ensure-lease! leases them
+   ahead), and noting how long that one lasted, :per-block millis."
   [{:keys [lease] :as state}]
-  (if (and (:next lease) (nil? (next-identifier state)))
-    (-> state
-        (assoc :lease (-> lease (assoc :block (:next lease)) (dissoc :next)))
-        (assoc :next-id (dec (long (first (block-range (:next lease)))))))
+  (if (and (seq (:next lease)) (nil? (next-identifier state)))
+    (let [now (System/currentTimeMillis)
+          k   (first (:next lease))]
+      (-> state
+          (assoc :lease (cond-> (assoc lease :block k :next (subvec (:next lease) 1) :since now)
+                          (:since lease) (assoc :per-block (- now (long (:since lease))))))
+          (assoc :next-id (dec (long (first (block-range k)))))))
     state))
 
 (declare ensure-lease! flush-pending!)
@@ -2771,7 +2787,7 @@
              :pending  (count (:pending state))
              :live?    (some? key)}
       (:gate state)               (assoc :gate (:gate state))
-      (:lease state)              (assoc :lease (select-keys (:lease state) [:block :leasing]))
+      (:lease state)              (assoc :lease (select-keys (:lease state) [:block :next :leasing :per-block]))
       (and key (awaiting-connack? key)) (assoc :awaiting-connack? true)
       heard                       (assoc :quiet-ms (- (System/currentTimeMillis) (long heard))))))
 
@@ -2953,66 +2969,97 @@
                 (keep-session? connect-msg))))
 
 (defn- lease!
-  "Lease block `k` for `client-id`'s connection `connect-id` on the cluster,
-   with every block it may still have identifiers out in, and give out
-   identifiers from it once that has landed, however long that takes: see
-   until-landed!. Not if a lease is on its way already, or the connection
-   is not the one leasing any more."
-  [client-id connect-id k]
-  (let [[before after]
+  "Lease blocks `ks` for `client-id`'s connection `connect-id` on the
+   cluster, with every block it may still have identifiers out in or give
+   out before them, and give out identifiers from them once that has
+   landed, however long that takes: see until-landed!. Not if a lease is
+   on its way already, or the connection is not the one leasing any more."
+  [client-id connect-id ks]
+  (let [ks (vec ks)
+        k  (peek ks)
+        [before after]
         (swap-vals! (outbound-atom client-id)
                     (fn [{:keys [lease] :as state}]
                       (if (and lease (= connect-id (:connect-id lease)) (nil? (:leasing lease)))
-                        (assoc-in state [:lease :leasing] k)
+                        (assoc-in state [:lease :leasing] ks)
                         state)))]
     (when-not (identical? before after)
-      (let [blocks (cond-> (into #{k} (map block-of) (keys (:inflight after)))
+      (let [blocks (cond-> (-> (set ks)
+                               (into (map block-of) (keys (:inflight after)))
+                               ;; And those leased ahead already, given out
+                               ;; from before these.
+                               (into (:next (:lease after))))
                      ;; And the block still given out from, until k takes over.
                      (:block (:lease after)) (conj (:block (:lease after))))
             mine?  #(= connect-id (get-in @(outbound-atom client-id) [:lease :connect-id]))]
         (.execute ^java.util.concurrent.Executor claim-executor
                   ^Runnable
                   (fn []
-                    (when (until-landed! (str "lease block " k " for " client-id)
+                    (when (until-landed! (str "lease blocks " ks " for " client-id)
                                          #((:lease! @session-source) client-id connect-id k blocks)
                                          mine?)
                       (let [[before after]
                             (swap-vals! (outbound-atom client-id)
                                         (fn [{:keys [lease] :as state}]
                                           (cond
-                                            (not (and (= connect-id (:connect-id lease)) (= k (:leasing lease))))
+                                            (not (and (= connect-id (:connect-id lease)) (= ks (:leasing lease))))
                                             state
 
                                             ;; Leased ahead: given out from once this one is used up.
                                             (:block lease)
-                                            (assoc state :lease (assoc lease :next k :leasing nil))
+                                            (assoc state :lease (assoc lease :next (into (or (:next lease) []) ks)
+                                                                       :leasing nil))
 
                                             :else
                                             (-> state
-                                                (assoc :lease (assoc lease :block k :leasing nil))
-                                                (assoc :next-id (dec (long (first (block-range k)))))))))]
+                                                (assoc :lease (assoc lease :block (first ks) :next (subvec ks 1)
+                                                                     :leasing nil :since (System/currentTimeMillis)))
+                                                (assoc :next-id (dec (long (first (block-range (first ks))))))))))]
                         (when-not (identical? before after)
-                          (log/debug "leased identifier block" k "for" client-id)
+                          (log/debug "leased identifier blocks" ks "for" client-id)
                           (when-let [key (live-connection client-id)]
                             (when (= connect-id (get-in @*clients* [key :connect-id]))
                               (flush-pending! key client-id))))))))))))
 
+(defn- blocks-wanted
+  "How many blocks `lease` should have ahead to last lease-ahead-millis at
+   the rate its last block was used, from 1 to max-lease-ahead: 1 until a
+   block has been used up."
+  ^long [{:keys [per-block]}]
+  (if per-block
+    (-> (Math/ceil (/ (double lease-ahead-millis) (max 1.0 (double per-block))))
+        long (max 1) (min (long max-lease-ahead)))
+    1))
+
 (defn- ensure-lease!
-  "The next block for `client-id` once half of this one is given out,
-   unless one is on its way or leased already: it is there when this one
-   runs out (advance-lease). Leased only once this one had none left, a
-   subscriber on `+` used a block up in well under a second and then
-   waited, nothing in flight and thousands pending, for the lease to land,
-   which with Rama behind took up to six seconds (load run 175703). Always
-   nil, for acquire-packet-identifier!."
+  "More blocks for `client-id` once fewer are left than half of
+   blocks-wanted, half a block for a session that uses them slowly, unless
+   a lease is on its way: enough to bring it to blocks-wanted, given out
+   from as each runs out (advance-lease), in one lease.
+
+   Leased only once a block had none left, a subscriber on `+` used a
+   block up in well under a second and then waited, nothing in flight and
+   thousands pending, for the lease to land, which with Rama behind took
+   up to six seconds (load run 175703). With the next block leased at half
+   of this one, they still waited: one used a block in 0.6 s, which left
+   0.3 s (load run 20261021-205056). Always nil, for
+   acquire-packet-identifier!."
   [client-id]
   (when-let [a (existing-outbound client-id)]
     (let [{:keys [lease next-id] :as state} @a]
-      (when (and lease (:block lease) (nil? (:leasing lease)) (nil? (:next lease))
-                 (or (nil? (next-identifier state))
-                     (let [[lo _] (block-range (:block lease))]
-                       (>= (- (long (or next-id 0)) (dec (long lo))) (quot (long lease-block) 2)))))
-        (lease! client-id (:connect-id lease) (mod (inc (long (:block lease))) (block-count))))))
+      (when (and lease (:block lease) (nil? (:leasing lease)))
+        (let [ahead  (count (:next lease))
+              [lo _] (block-range (:block lease))
+              used   (if (next-identifier state)
+                       (- (long (or next-id 0)) (dec (long lo)))
+                       (long lease-block))
+              left   (+ (* ahead (long lease-block)) (- (long lease-block) used))
+              wanted (blocks-wanted lease)]
+          (when (<= left (quot (* wanted (long lease-block)) 2))
+            (let [from (or (peek (:next lease)) (:block lease))]
+              (lease! client-id (:connect-id lease)
+                      (for [i (range 1 (inc (max 1 (- wanted ahead))))]
+                        (mod (+ (long from) (long i)) (block-count))))))))))
   nil)
 
 (defn hold-identifiers!
@@ -3133,9 +3180,10 @@
                            (and (= (:broker-id resumed-lease) (:my-broker-id @session-source))
                                 (= (:incarnation resumed-lease) (:my-incarnation @session-source))))
             last-block (if mine?
-                         (or (:next previous) (:leasing previous) (:block previous) (:block resumed-lease))
+                         (or (peek (:leasing previous)) (peek (:next previous)) (:block previous)
+                             (:block resumed-lease))
                          (:block resumed-lease))]
-        (lease! client-id connect-id (mod (inc (long (or last-block -1))) (block-count)))))))
+        (lease! client-id connect-id [(mod (inc (long (or last-block -1))) (block-count))])))))
 
 (declare deliver-now-or-queue! overflow? overflow!)
 

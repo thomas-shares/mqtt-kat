@@ -240,7 +240,7 @@
                                                 :retain? false :duplicate? false}))
           (is (tu/wait-until #(= n (count @received)) 10000) "delivered")
           (is (= b (:block (lease))) "still giving out the first block")
-          (is (tu/wait-until #(some #{nxt} [(:leasing (lease)) (:next (lease))]) 5000)
+          (is (tu/wait-until #(some #{nxt} (concat (:leasing (lease)) (:next (lease)))) 5000)
               (str "the next leased already: " (pr-str (lease))))
           (testing "and given out from once this one is used up"
             (dotimes [i h/lease-block]
@@ -252,3 +252,75 @@
             (is (= nxt (:block (lease))) (pr-str (lease))))
           (finally (close! pub))))
       (finally (close! c)))))
+
+(deftest a-subscriber-that-uses-blocks-fast-leases-several-ahead
+  ;; Load run 20261021-205056: with the next block leased at half of this
+  ;; one, subscribers on `+` still waited for it, nothing in flight and two
+  ;; thousand pending. One used a block in about 0.6 s, which left 0.3 s
+  ;; for a lease that took up to six. Leased ahead by how fast its blocks
+  ;; are used, enough for lease-ahead-millis, in one lease; and every block
+  ;; leased ahead is on the cluster's record, for the resume to release.
+  (with-redefs [h/lease-ahead-millis 600000]
+    (let [id       (tu/client-id "lease-rate")
+          topic    (tu/topic "lease-rate")
+          received (atom [])
+          c        (connect! (client [] received (atom [])) id false)
+          lease    #(:lease @(@#'h/outbound-atom id))
+          ahead    #(count (concat (:next (lease)) (:leasing (lease))))]
+      (try
+        (is (some? (deref (:connack c) 5000 nil)))
+        (client/send-message (:client c) {:packet-type :SUBSCRIBE :packet-identifier 1
+                                          :topics [{:qos 1 :topic-filter topic}]})
+        (is (some? (deref (:suback c) 5000 nil)))
+        (is (tu/wait-until #(some? (:block (lease))) 10000) "leased")
+        (let [n   (* 2 h/lease-block)
+              pub (connect! (client [] (atom []) (atom [])) (tu/client-id "lease-rate-pub") true)]
+          (try
+            (is (some? (deref (:connack pub) 5000 nil)))
+            (dotimes [i n]
+              (client/send-message (:client pub) {:packet-type :PUBLISH :topic topic :qos 1
+                                                  :packet-identifier (inc (mod i 65535))
+                                                  :payload (.getBytes (str i) "UTF-8")
+                                                  :retain? false :duplicate? false}))
+            (is (tu/wait-until #(= n (count @received)) 20000) "delivered")
+            (is (tu/wait-until #(= h/max-lease-ahead (ahead)) 5000)
+                (str "as many blocks ahead as it may have: " (pr-str (lease))))
+            (testing "all on the cluster's record"
+              (is (tu/wait-until #(every? (set (:blocks (cluster/lease *conn* id)))
+                                          (cons (:block (lease)) (:next (lease))))
+                                 10000)
+                  (str (pr-str (lease)) " " (pr-str (cluster/lease *conn* id)))))
+            (finally (close! pub))))
+        (finally (close! c))))))
+
+(deftest a-subscriber-that-uses-blocks-slowly-leases-one-at-a-time
+  ;; And one that takes longer over a block than lease-ahead-millis leases
+  ;; only the next, as before: a resume after it dies releases fewer.
+  (with-redefs [h/lease-ahead-millis 1]
+    (let [id       (tu/client-id "lease-slow")
+          topic    (tu/topic "lease-slow")
+          received (atom [])
+          c        (connect! (client [] received (atom [])) id false)
+          lease    #(:lease @(@#'h/outbound-atom id))]
+      (try
+        (is (some? (deref (:connack c) 5000 nil)))
+        (client/send-message (:client c) {:packet-type :SUBSCRIBE :packet-identifier 1
+                                          :topics [{:qos 1 :topic-filter topic}]})
+        (is (some? (deref (:suback c) 5000 nil)))
+        (is (tu/wait-until #(some? (:block (lease))) 10000) "leased")
+        (let [n   (+ h/lease-block (quot h/lease-block 2) 8)
+              pub (connect! (client [] (atom []) (atom [])) (tu/client-id "lease-slow-pub") true)]
+          (try
+            (is (some? (deref (:connack pub) 5000 nil)))
+            (dotimes [i n]
+              (client/send-message (:client pub) {:packet-type :PUBLISH :topic topic :qos 1
+                                                  :packet-identifier (inc i)
+                                                  :payload (.getBytes (str i) "UTF-8")
+                                                  :retain? false :duplicate? false}))
+            (is (tu/wait-until #(= n (count @received)) 20000) "delivered")
+            (is (tu/wait-until #(= 1 (count (concat (:next (lease)) (:leasing (lease))))) 5000)
+                (pr-str (lease)))
+            (Thread/sleep 500)
+            (is (= 1 (count (concat (:next (lease)) (:leasing (lease))))) (pr-str (lease)))
+            (finally (close! pub))))
+        (finally (close! c))))))
