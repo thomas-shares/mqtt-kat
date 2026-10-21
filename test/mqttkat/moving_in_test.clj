@@ -590,3 +590,49 @@
           (Thread/sleep 3000)
           (is (= ["0"] @received) "not delivered again")
           (finally (close! c)))))))
+
+(deftest an-exactly-once-message-before-the-connack-waits-on-the-cluster
+  ;; The simulation found it (thoughts.md, 20261021). Between a kept
+  ;; session's CONNECT and its CONNACK, which waits for the cluster to have
+  ;; it connected and so for as long as Rama is behind, its messages wait
+  ;; in this broker's memory. An exactly-once one waited there with its
+  ;; publisher told it was done, and a broker that died before the CONNACK
+  ;; took it with it. Here the connect is held from landing, and the
+  ;; message published meanwhile must be on the cluster's queue.
+  (let [id       (tu/client-id "before-connack")
+        topic    (tu/topic "before-connack")
+        received (atom [])
+        entered  (promise)
+        release  (java.util.concurrent.CompletableFuture.)
+        record   cluster/record-until-landed!]
+    (with-redefs [h/exactly-once-filters (delay [topic])]
+      (let [c (connect! (client (atom [])) id false)]
+        (deref (:connack c) 5000 nil)
+        (client/send-message (:client c) {:packet-type :SUBSCRIBE :packet-identifier 1
+                                          :topics [{:qos 2 :topic-filter topic}]})
+        (is (some? (deref (:suback c) 5000 nil)))
+        (close! c)
+        (is (tu/wait-until #(false? (cluster/connected? *conn* id)) 10000)))
+      (with-redefs [cluster/record-until-landed!
+                    (fn [conn rec opts]
+                      (let [^java.util.concurrent.CompletableFuture f (record conn rec opts)]
+                        (if (and (= :connect (:event rec)) (= id (:client-id rec)))
+                          (do (deliver entered true)
+                              (.thenCombine f release (reify java.util.function.BiFunction
+                                                        (apply [_ a _] a))))
+                          f)))]
+        (let [c (connect! (client received) id false)]
+          (try
+            (is (deref entered 5000 false) "the connect is being recorded")
+            (stream! topic 2 1 0 (constantly nil))
+            (is (= 0 (h/pending-count id)) "not waiting in this broker's memory")
+            (is (= ["0"] (map (comp tu/payload-str second) (cluster/queued *conn* id)))
+                "on the cluster's queue")
+            (.complete release nil)
+            (is (true? (:session-present? (deref (:connack c) 10000 nil))))
+            (is (tu/wait-until #(= ["0"] @received) 10000) "and delivered once the session is here")
+            (Thread/sleep 1000)
+            (is (= ["0"] @received) "once")
+            (finally
+              (.complete release nil)
+              (close! c))))))))

@@ -2959,7 +2959,7 @@
                          (:block resumed-lease))]
         (lease! client-id connect-id (mod (inc (long (or last-block -1))) (block-count)))))))
 
-(declare deliver-now-or-queue!)
+(declare deliver-now-or-queue! overflow? overflow!)
 
 (defn- deliver-or-queue!
   "Send `msg` to a subscriber if its window has room; hold it if not.
@@ -2975,6 +2975,15 @@
    cluster queues it for a session that is kept as for one that is away."
   [key client-id msg publisher-key]
   (cond
+    ;; Before its CONNACK, as with no window slot, an exactly-once message
+    ;; waits on the cluster's queue (overflow?), read back once the session
+    ;; is here. The CONNACK waits for the cluster to have the session
+    ;; connected, as long as Rama is behind; held here meanwhile, with its
+    ;; publisher told it was done, a broker that died before the CONNACK
+    ;; took it with it. The simulation found it (thoughts.md, 20261021).
+    (and (awaiting-connack? key) (overflow? key msg client-id publisher-key))
+    (overflow! client-id msg)
+
     ;; Before its CONNACK: held, and sent by the flush that follows the
     ;; CONNACK. Unless that flush has been and gone while this was queued,
     ;; which the second look catches.

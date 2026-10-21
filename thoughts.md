@@ -4,6 +4,29 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261021
 
+### The window before the CONNACK, fixed in the code
+
+Between a kept session's CONNECT and its CONNACK, its messages waited in
+the broker's memory (`deliver-or-queue!`, `awaiting-connack?`), exactly-once
+ones too. The CONNACK waits for the cluster to have the session connected,
+which takes as long as Rama is behind. Meanwhile the publisher had its
+acknowledgement, and a broker that died before the CONNACK took the message
+with it.
+
+- **The test**
+  (`moving-in-test/an-exactly-once-message-before-the-connack-waits-on-the-cluster`):
+  1. It holds the session's connect from landing.
+  2. It publishes an exactly-once message.
+  3. It looks at where the message is.
+
+  Before the fix it was in the pending queue here and not on the cluster's
+  queue.
+- **The fix:** before the CONNACK, a message that `overflow?` sends to the
+  cluster with no window slot goes there now too, as a hand-off. That is
+  every exactly-once message, and every kept session's with
+  wait-on-cluster on. Once the session is in, it is read back and
+  delivered once, as the test checks.
+
 ### Load runs on the fixes, and a duplicate they found
 
 Load runs 112137 (forward-ack on) and 113118 (off), Rama reset before
