@@ -4,6 +4,42 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261021
 
+### A clean subscriber that went quiet, and what the refusal now says
+
+Load run 135218 lost 73,381 messages, all of them s1275's: a clean v5
+session on `+`, so every topic.
+
+- **It stopped being delivered to about 7 s in.** From 25 s to the end the
+  brokers refused about 2,000 of its messages every 5 s, which is all of
+  its QoS 1/2 share. Its pending queue was full at 4,096 and never drained.
+- **Its broker's local publishers were paused by it,** and about 4,200 of
+  their messages were never acknowledged.
+
+The same seed again (run 143943) held every promise, with s1275 delivered
+to normally. So it depends on timing, not on which clients the seed
+makes.
+
+**What changed, and what didn't:**
+
+- **Changed by this round:** the bridge is never paused now, so a wedged
+  clean subscriber shows as losses, which the guarantees allow under
+  overload. Before, the same wedge would have paused every bridge into its
+  broker and stalled the cluster.
+- **Not explained:** why it wedged. With nothing traced, the logs could not
+  say whether the broker stopped sending (window empty, identifiers held
+  back) or the client stopped answering (window full).
+
+So the warning that a subscriber's pending queue is full now carries its
+state (`subscriber-state`):
+
+- its window, what is in flight, and what is pending;
+- the identifier gate, the lease, and whether it still awaits its CONNACK;
+- how long since the client was last heard from.
+
+The next run in which a subscriber wedges says which side it is, in the
+line that reports it, without a trace. `forward-ack-test` checks the state
+of a subscriber that answers nothing: its window full, messages pending.
+
 ### The window before the CONNACK, fixed in the code
 
 Between a kept session's CONNECT and its CONNACK, its messages waited in

@@ -109,7 +109,8 @@
   ;; bridge, and are acknowledged, for every other subscriber's sake.
   (with-redefs [h/pause-threshold 3 h/resume-threshold 1]
     (let [topic (tu/topic "fa-pause")
-          slow  (connect! (client (atom []) (atom [])) (tu/client-id "fa-slow") true 4)
+          slow-id (tu/client-id "fa-slow")
+          slow  (connect! (client (atom []) (atom [])) slow-id true 4)
           _     (client/send-message (:client slow) {:packet-type :SUBSCRIBE :packet-identifier 1
                                                      :topics [{:qos 1 :topic-filter topic}]})
           _     (is (some? (deref (:suback slow) 5000 nil)))
@@ -130,6 +131,11 @@
           (Thread/sleep 20))
         (is (tu/wait-until #(= n (count @acked)) 10000)
             (str (count @acked) " of " n " acknowledged"))
+        (testing "what the warning says once its queue is full: its window is"
+          (let [{:keys [live? window inflight pending]} (#'h/subscriber-state slow-id)]
+            (is live?)
+            (is (= window inflight) "a client that answers nothing")
+            (is (pos? (long pending)))))
         (finally
           (close! peer)
           (close! slow))))))

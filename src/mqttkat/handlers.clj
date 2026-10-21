@@ -2654,6 +2654,25 @@
   ;; :sample #{client-id ...}}.
   (atom {:since 0}))
 
+(defn- subscriber-state
+  "What a broker knows of why `client-id`'s pending queue is not draining,
+   for the warning that it is full: its window and what may be holding it
+   (the identifier gate, the lease, the CONNACK), and how long since the
+   client was last heard from. A window full and a client gone quiet is the
+   client; a window with room and messages waiting is this broker."
+  [client-id]
+  (let [key   (live-connection client-id)
+        state (some-> (existing-outbound client-id) deref)
+        heard (some-> (get-in @*clients* [key :last-active]) deref)]
+    (cond-> {:inflight (count (:inflight state))
+             :window   (when key (receive-maximum-of key))
+             :pending  (count (:pending state))
+             :live?    (some? key)}
+      (:gate state)               (assoc :gate (:gate state))
+      (:lease state)              (assoc :lease (select-keys (:lease state) [:block :leasing]))
+      (and key (awaiting-connack? key)) (assoc :awaiting-connack? true)
+      heard                       (assoc :quiet-ms (- (System/currentTimeMillis) (long heard))))))
+
 (defn- note-refused!
   "A QoS 1 or 2 message refused for `client-id`, whose pending queue was
    full: its publisher has been told the broker has it, and nobody will be
@@ -2678,7 +2697,8 @@
           (log/warn "refused" counts "QoS 1/2 messages in the" (- now (long (:since before)))
                     "ms before, their subscribers' pending queues full - for" (vec (:sample before)))))
       (log/warn "refusing a QoS 1/2 message from a" (name from) "for" client-id
-                "- its pending queue is full at" pending-limit "- counting the rest for" refused-log-ms "ms"))))
+                "- its pending queue is full at" pending-limit "- counting the rest for" refused-log-ms "ms"
+                (pr-str (subscriber-state client-id))))))
 
 (defonce ^:private claim-executor
   ;; Where a claim's answer is acted on: off Rama's own threads, since it
