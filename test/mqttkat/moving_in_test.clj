@@ -636,3 +636,31 @@
             (finally
               (.complete release nil)
               (close! c))))))))
+
+(deftest a-queue-is-read-even-when-no-nudge-comes
+  ;; Load run 155447 ended with 78,458 messages on the queues of clients
+  ;; that were connected. Their reads had stopped: the catch-up reads after
+  ;; a resume end after a minute, and after that only a nudge reads the
+  ;; queue, which comes when a write lands for a client the cluster has
+  ;; connected here. With Rama behind, writes landed minutes late, and a
+  ;; connect that never landed left nudges going nowhere. Here the nudge is
+  ;; lost outright, after the catch-up reads are over.
+  (with-redefs [h/safety-read-millis   1000
+                h/catch-up-reads-millis [100]
+                h/nudged!              (fn [_] nil)]
+    (let [id       (tu/client-id "no-nudge")
+          topic    (tu/topic "no-nudge")
+          received (atom [])
+          c        (connect! (client received) id false)]
+      (try
+        (deref (:connack c) 5000 nil)
+        (client/send-message (:client c) {:packet-type :SUBSCRIBE :packet-identifier 1
+                                          :topics [{:qos 1 :topic-filter topic}]})
+        (is (some? (deref (:suback c) 5000 nil)))
+        (Thread/sleep 1000)
+        ;; Queued as a broker that took it for away queues it.
+        @(cluster/record! *conn* (cluster/->enqueue id {:topic topic :qos 1
+                                                        :payload (.getBytes "late" "UTF-8")}
+                                                    (h/new-message-key)))
+        (is (tu/wait-until #(= ["late"] @received) 10000) "read without a nudge")
+        (finally (close! c))))))

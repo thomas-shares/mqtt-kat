@@ -1859,6 +1859,31 @@
                  (read-soon! client-id connect-id catch-up-again-millis)))
             my-pool))
 
+(def safety-read-millis
+  "How often a kept session connected here has its queue on the cluster
+   read, whatever else reads it: see keep-reading!."
+  30000)
+
+(defn- keep-reading!
+  "Read `client-id`'s queue every safety-read-millis while `connect-id` is
+   the connection it is read for, and then for as long as a read leaves
+   some of it behind.
+
+   Whatever else reads it. After the catch-up reads that follow a resume,
+   only a nudge did, and a nudge comes once a write has landed for a client
+   the cluster has connected here: with Rama behind, writes landed minutes
+   late, and a connect that never landed sent the nudges nowhere. A load
+   run ended with 78,458 messages on the queues of clients that were
+   connected, nothing reading them (thoughts.md, 20261021)."
+  [client-id connect-id]
+  (at/after safety-read-millis
+            #(future
+               (when (= connect-id (get-in @catching-up [client-id :connect-id]))
+                 (when (read-again! client-id connect-id)
+                   (read-soon! client-id connect-id catch-up-again-millis))
+                 (keep-reading! client-id connect-id)))
+            my-pool))
+
 (defn- catch-up-after!
   "Read `client-id`'s queue again after each of `gaps`, and then for as
    long as a read leaves some of it behind."
@@ -1875,7 +1900,8 @@
   "`client-id` connected as `connect-id`. A persistent session resumed from
    the cluster has its queue there read again, at catch-up-reads-millis, and
    after them while there is more on it than this broker could take; and,
-   resumed or not, whenever the cluster says more has been put on it."
+   resumed or not, whenever the cluster says more has been put on it, and
+   every safety-read-millis in case it did not (keep-reading!)."
   [client-id connect-id]
   (when (:queued @session-source)
     (let [now     (System/currentTimeMillis)
@@ -1903,7 +1929,10 @@
                                 :else   m)))]
       (when (contains? before client-id)
         (catch-up-after! client-id connect-id
-                         (map - catch-up-reads-millis (cons 0 catch-up-reads-millis)))))))
+                         (map - catch-up-reads-millis (cons 0 catch-up-reads-millis))))
+      ;; Resumed or new, read now and then while it is here.
+      (when (= connect-id (get-in @catching-up [client-id :connect-id]))
+        (keep-reading! client-id connect-id)))))
 
 (defn nudged!
   "The cluster says something was put on `client-id`'s queue while it was
@@ -2948,6 +2977,43 @@
               (:broker-id lease) "which never handed them over")
     (count pids)))
 
+(defn- holder-gone?
+  "Whether the broker `lease` names is gone: another run of it is listed,
+   or none, or it refuses every connection (bridge/peer-gone?)."
+  [lease]
+  (let [{:keys [incarnation-of]} @session-source]
+    (boolean (or (not= (:incarnation lease)
+                       (when incarnation-of (incarnation-of (:broker-id lease))))
+                 (bridge/peer-gone? (:broker-id lease))))))
+
+(defn- release-when-gone!
+  "release-orphans! for `lease` once the broker it names is gone, or
+   identifier-gate-millis from now, while `client-key` is still the
+   client's connection here.
+
+   Not at once: a resume that waits out a hand-over (once-gone) waited on a
+   broker that may only be slow, Rama being behind. A load run released 498
+   identifiers so, which that broker could still have been handing over:
+   a message it handed over under one went out again under it, after the
+   client had let it go. By the time it is gone or the wait is over, what
+   it handed over is on the queue, and release-orphans! leaves those out.
+   New identifiers come from this connection's own block meanwhile."
+  [client-key client-id lease]
+  (future
+    (try
+      (let [deadline (+ (System/currentTimeMillis) (long identifier-gate-millis))]
+        (loop []
+          (Thread/sleep 250)
+          (cond
+            (not= client-key (live-connection client-id)) nil
+
+            (or (holder-gone? lease) (> (System/currentTimeMillis) deadline))
+            (release-orphans! client-key client-id lease)
+
+            :else (recur))))
+      (catch Throwable t
+        (log/warn t "could not release the identifiers" client-id "may hold from" (:broker-id lease))))))
+
 (defn lease-identifiers!
   "Once the CONNACK has gone to a kept session on a cluster: release what
    the broker before may have left the client holding (release-orphans!),
@@ -2967,7 +3033,9 @@
     (let [{::keys [resumed-lease] :keys [lease]} @(outbound-atom client-id)
           previous (:previous lease)]
       (when (orphaned? resumed-lease)
-        (release-orphans! client-key client-id resumed-lease))
+        (if (holder-gone? resumed-lease)
+          (release-orphans! client-key client-id resumed-lease)
+          (release-when-gone! client-key client-id resumed-lease)))
       (swap! (outbound-atom client-id) #(-> % (dissoc ::resumed-lease) (update :lease dissoc :previous)))
       ;; The block after the last this client was given: this broker's own
       ;; if it had one, else the cluster's record.

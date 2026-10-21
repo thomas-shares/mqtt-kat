@@ -1919,6 +1919,7 @@
   (reset! handlers/session-source
           {:my-broker-id broker-id
            :my-incarnation incarnation
+           :incarnation-of (fn [peer-id] (:incarnation (get @(:brokers conn) peer-id)))
            :resume       (fn [client-id] (resume conn client-id))
            :enqueue!     (fn [client-id msg key] (enqueue! conn client-id msg key))
            :dequeue!     (fn [client-id keys] (dequeue! conn client-id keys))

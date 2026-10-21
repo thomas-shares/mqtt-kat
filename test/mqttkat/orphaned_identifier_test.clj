@@ -181,3 +181,31 @@
         (is (= [] (remove (set (map first @seen)) @released))
             "no PUBREL for identifiers nobody holds")
         (finally (close! again))))))
+
+(deftest identifiers-a-broker-alive-may-still-hand-over-are-released-only-once-it-is-gone
+  ;; Load run 155447: a session resumed after waiting ten seconds for a
+  ;; hand-over that was only slow, Rama being behind, and released the 498
+  ;; identifiers the broker it left could still have been handing over;
+  ;; a message handed over under one of them would then have been sent
+  ;; again, under an identifier the client had just let go. Released only
+  ;; once that broker is gone: here, once it refuses every connection.
+  (let [gone?    (atom false)
+        id       (tu/client-id "orphan-slow")
+        topic    (tu/topic "orphan-slow")
+        slow     (tu/client-id "peer-slow")
+        received (atom [])
+        seen     (atom [])
+        released (atom [])
+        stray    #(remove (set (map first @seen)) @released)]
+    (with-redefs [bridge/peer-gone?        (fn [_] @gone?)
+                  h/hand-over-wait-millis  500
+                  h/identifier-gate-millis 30000]
+      (on-dead-broker! id topic slow)
+      (let [c (connect! (client [1] received seen released) id false)]
+        (try
+          (is (true? (:session-present? (deref (:connack c) 15000 nil))))
+          (Thread/sleep 2000)
+          (is (= [] (stray)) "not while the broker it left may still hand them over")
+          (reset! gone? true)
+          (is (tu/wait-until #(= h/lease-block (count (stray))) 10000) "released once it is gone")
+          (finally (close! c)))))))

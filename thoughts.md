@@ -4,6 +4,45 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261021
 
+### Queues read whatever, and identifiers released only once their broker is gone
+
+Load run 155447 lost 27,556 messages for kept sessions, 639 of them on
+exactly-once topics. At the end Rama still had 78,458 queued for clients
+that were all connected.
+
+- **Rama never recovered.** Its appends timed out 39,579 times, and queue
+  writes were still being retried twenty minutes after the start. The
+  enqueue events, 267,689 against 16k to 27k in passing runs, were
+  probably inflated by those retries.
+- **Reads stopped.** s948 resumed at 204 s and read its queue in batches
+  until 75 s later, then never again. After the catch-up reads, only a
+  nudge reads a queue, and a nudge needs a write to land for a client
+  that the cluster has connected on this broker. s948's own connect record
+  had failed ("could not record the connect").
+- **The lease edge happened.** s948's resume waited out the 10 s hand-over
+  wait from a broker that was alive, and released 498 identifiers that
+  broker could still have been handing over.
+
+**Fixed in the code, each with a test that failed before:**
+
+- **`keep-reading!`** reads a connected kept session's queue every 30 s,
+  nudged or not, for as long as the connection lasts, and on while a read
+  leaves some of it behind. `catch-up!` starts it for every kept session.
+  The test (`moving-in-test/a-queue-is-read-even-when-no-nudge-comes`)
+  loses the nudge outright.
+- **`release-when-gone!`** holds back the release of another broker's
+  identifiers while that broker is alive. It releases once the broker is
+  gone (unlisted, another run of it, or refusing every connection), or
+  after `identifier-gate-millis`, re-reading the queue then so that what
+  it handed over is left out.
+
+**Overload, in the simulation:** at three times the default rate,
+publishers saturate the model's Rama too, and owed messages are left on
+the queues at the end (`:stuck`). It is the same shape as run 155447. A
+sweep is now comparing the fixes, `keep-reading!` among them, with and
+without admission control (`runner/admission`: a broker stops reading its
+publishers while Rama is behind).
+
 ### A clean subscriber that went quiet, and what the refusal now says
 
 Load run 135218 lost 73,381 messages, all of them s1275's: a clean v5
