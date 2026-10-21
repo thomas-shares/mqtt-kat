@@ -4,6 +4,43 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261021
 
+### Reads that went on and took nothing
+
+Load run 165325 ended as 155447 did, with 58,945 queued for connected
+clients, and `keep-reading!` was in the jar.
+
+- s745's reads after the run delivered its backlog 256 at a time until
+  16:58:28.
+- Nothing after that for 13 minutes, with more than 1,000 entries still on
+  its queue. The reads went on, and took none of it.
+- s745 and s1256 lost exactly 2,741 each, and what was left on their queues
+  begins at the same key. So whatever stopped happened to a set of
+  messages, or to their broker, not to one client.
+
+A read leaves an entry for one of these reasons, until now only said in
+trace lines:
+
+- `:had`: found already had;
+- `:had-or-here`: waiting or in flight here;
+- `:identifier-in-use`: its identifier taken here;
+- `:full-here`: the pending queue here is half full or more.
+
+`left-alone!` now logs them, with the subscriber's state. It does so once
+five reads in a row of a client's queue have found entries and taken none,
+and then once a minute while it goes on. One such read is only a take-off
+that has not landed yet.
+
+The overload sweep of the simulation said nothing about admission control:
+
+- At six and ten times the default rate, the publishers were already at
+  their limit in flight, so both rates made the same run.
+- Rama was never more than a second behind, so admission never acted.
+- Everything stuck was the slow subscriber s3's backlog, not delivered
+  within the 120 s drain.
+
+Studying admission needs a model whose Rama is the bottleneck, with fast
+subscribers.
+
 ### Queues read whatever, and identifiers released only once their broker is gone
 
 Load run 155447 lost 27,556 messages for kept sessions, 639 of them on

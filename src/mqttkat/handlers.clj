@@ -345,7 +345,7 @@
     (when-let [timer (get-in old [key :timer])]
       (at/kill timer))))
 
-(declare taking-off)
+(declare taking-off left-alone)
 
 (defn discard-session!
   "Forget everything stored under `client-id`: the parked session, the
@@ -357,6 +357,7 @@
   (swap! *clients* dissoc client-id)
   (swap! *outbound* dissoc client-id)
   (swap! taking-off dissoc client-id)
+  (swap! left-alone dissoc client-id)
   (swap! *inflight* #(into {} (remove (fn [[[id _] _]] (= id client-id))) %)))
 
 (defn live-connection
@@ -1808,6 +1809,8 @@
          (boolean (get-in before [client-id :again?])))))
 
 
+(declare left-alone!)
+
 (defn- read-again!
   "Deliver what is on `client-id`'s queue on the cluster and not yet had,
    while `connect-id` is still the connection it is for. Whether it left
@@ -1830,6 +1833,8 @@
               ;; and went out twice.
               had     (get-in @catching-up [client-id :had])
               fresh   (remove #(contains? had (first %)) entries)
+              _       (when (and (seq entries) (empty? fresh))
+                        (left-alone! client-id {:had (count entries)}))
               found   (set (map first entries))
               ;; The queue comes in key order, so one cut off at `limit`
               ;; says nothing of the keys after its last.
@@ -1989,6 +1994,52 @@
           (settled! client-id entry)))
       true)))
 
+(declare subscriber-state)
+
+(defonce ^:private left-alone
+  ;; client-id -> {:n reads in a row that took nothing of what they found,
+  ;;               :logged-at when that was last logged}.
+  (atom {}))
+
+(def left-alone-reads
+  "How many reads in a row of a client's queue must take nothing of what
+   they find before it is logged: one alone is what a take-off that has
+   not landed yet looks like."
+  5)
+
+(def left-alone-log-millis
+  "How often, per client, it is logged again while it goes on."
+  60000)
+
+(defn- left-alone!
+  "A read of `client-id`'s queue found entries and took none, for
+   `reasons`, or (nil reasons) took some. Said, with the subscriber's
+   state, once left-alone-reads such reads have been made in a row, and
+   then once a left-alone-log-millis while it goes on. Load runs 155447 and
+   165325 ended with tens of thousands queued for connected clients whose
+   reads went on and took nothing, and nothing said why."
+  [client-id reasons]
+  (if-not reasons
+    (when (contains? @left-alone client-id)
+      (swap! left-alone dissoc client-id))
+    (let [now (System/currentTimeMillis)
+          [before after]
+          (swap-vals! left-alone
+                      (fn [m]
+                        (let [{:keys [n logged-at]} (get m client-id)
+                              n (inc (long (or n 0)))]
+                          (assoc m client-id
+                                 {:n n
+                                  :logged-at (if (and (>= n (long left-alone-reads))
+                                                      (or (nil? logged-at)
+                                                          (>= (- now (long logged-at)) (long left-alone-log-millis))))
+                                               now
+                                               logged-at)}))))]
+      (when (not= (get-in before [client-id :logged-at]) (get-in after [client-id :logged-at]))
+        (log/warn "read the queue of" client-id (get-in after [client-id :n])
+                  "times in a row and took none of it:" (pr-str reasons)
+                  (pr-str (subscriber-state client-id)))))))
+
 (defn deliver-queued!
   "Send a connected client what the cluster queued for it while it was taken
    for away: `queued` as the cluster's queue has it, [key msg] oldest first.
@@ -2026,19 +2077,25 @@
                         (mapcat (juxt ::cluster-key ::msg-key ::release-key))
                         (concat pending (vals inflight)))
             queued? (volatile! false)
+            ;; Why what was left was left: logged when nothing was taken
+            ;; (left-alone!).
+            left    (volatile! {})
+            left!   #(vswap! left update % (fnil inc 0))
             ;; A full queue here refuses the rest, which stay on the
             ;; cluster's for the next read or the next resume.
             took  (into #{}
                         (keep (fn [[k msg]]
                                 (cond
                                   (contains? here k)
-                                  (trace/trace! client-id msg "left on the cluster's queue: had here" k)
+                                  (do (left! :had-or-here)
+                                      (trace/trace! client-id msg "left on the cluster's queue: had here" k))
 
                                   (:packet-identifier msg)
                                   (if (resend-handed-over! key client-id k msg)
                                     k
-                                    (trace/trace! client-id msg "left on the cluster's queue: identifier in use"
-                                                  k (:packet-identifier msg)))
+                                    (do (left! :identifier-in-use)
+                                        (trace/trace! client-id msg "left on the cluster's queue: identifier in use"
+                                                      k (:packet-identifier msg))))
 
                                   ;; Half the queue here at most, so live
                                   ;; deliveries still find room; the rest
@@ -2052,7 +2109,8 @@
                                   k
 
                                   :else
-                                  (trace/trace! client-id msg "left on the cluster's queue: full here" k))))
+                                  (do (left! :full-here)
+                                      (trace/trace! client-id msg "left on the cluster's queue: full here" k)))))
                         queued)]
         (doseq [[k msg] queued
                 :when (contains? took k)]
@@ -2065,6 +2123,7 @@
                                        m)))
           (log/info "delivering" (count took) "messages queued for" client-id "while it was taken for away"
                     (str "- from " (first (sort took)))))
+        (left-alone! client-id (when (empty? took) (not-empty @left)))
         (when @queued?
           (flush-pending! key client-id))
         took)))))

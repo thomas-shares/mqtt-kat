@@ -664,3 +664,15 @@
                                                     (h/new-message-key)))
         (is (tu/wait-until #(= ["late"] @received) 10000) "read without a nudge")
         (finally (close! c))))))
+
+(deftest reads-that-take-nothing-are-said-once-they-go-on
+  ;; One read that takes nothing is a take-off not landed yet; five in a
+  ;; row is what load runs 155447 and 165325 ended with, unexplained.
+  (let [id    (tu/client-id "left-alone")
+        state #(get @@#'h/left-alone id)]
+    (dotimes [_ (dec h/left-alone-reads)] (#'h/left-alone! id {:had 3}))
+    (is (nil? (:logged-at (state))) "not yet")
+    (#'h/left-alone! id {:had 3})
+    (is (some? (:logged-at (state))) "said")
+    (#'h/left-alone! id nil)
+    (is (nil? (state)) "and forgotten once a read takes some")))
