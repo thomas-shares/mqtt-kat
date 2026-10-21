@@ -2,6 +2,92 @@
 
 In this file will go my thoughts and ramblings about this project and what I have done and what I might do next.
 
+## 20261021
+
+### Load runs on the fixes, and a duplicate they found
+
+Load runs 112137 (forward-ack on) and 113118 (off), Rama reset before
+each, nothing killed:
+
+```clojure
+{:forward-ack-on  {:ok? true :acked-qos-1+2 70541}
+ :forward-ack-off {:ok? false :duplicate 80 :acked-qos-1+2 80466}}
+```
+
+**Forward-ack on receipt works.**
+
+- Nothing was lost or duplicated, and no publisher stalled for 30 s; the
+  longest flat stretch was about 10 s.
+- It costs about 14% at this load against off. That is more than the
+  simulation's 3%.
+
+**The 80 duplicates with it off.**
+
+- **Who:** one kept session, s842, on ordinary topics, with nothing killed
+  and no publisher resending. Each was first delivered around 70 s and
+  again at 203 s, in the reconnect at the run's end.
+- **Not the lease release:** the brokers logged no release of identifiers
+  for s842, and no hand-over wait timing out.
+- **A stale queue read on a quick resume.**
+  1. The client completes a message from its queue on the cluster. The
+     take-off is appended, but with Rama behind it is not processed yet.
+  2. The client comes back to the same broker. Nothing waits for that,
+     so the resume reads the queue at once, with the message still on it.
+  3. It is sent again under the identifier it had. The client completed
+     that identifier long ago, and takes it for a new message.
+
+  `catching-up`'s `:had` guards a connection's own reads against this,
+  but it was one connection's: dropped at the disconnect, and built empty
+  on the resume.
+
+  `moving-in-test/a-message-completed-from-the-queue-is-not-sent-again-on-a-quick-resume`
+  holds the take-off back so it never lands. Before the fix, the resume
+  delivered the message again.
+- **The fix:** `taking-off` keeps a client's take-offs, with when each
+  landed, across its connections on this broker.
+  - The resume leaves those keys on the queue, and seeds the new
+    connection's `:had` with them.
+  - They are forgotten as `:had` entries are: by the first read, begun
+    after the take-off landed, that does not find them.
+
+The same race on a resume elsewhere is not covered: that broker cannot
+know the first one's take-offs. It waits for the first to say the client
+has gone, but that is a record in the sessions topology, and the take-offs
+are in the queues topology, which can be further behind.
+
+**The model was wrong, and is corrected.**
+
+- It sent the CONNACK before the cluster had the session connected; the
+  code waits for that. So another broker reading the session a moment
+  later found it on the broker before, and waited for nobody's hand-over.
+- The hand-over barrier I tried against that was not needed, and is gone.
+- Corrected, the model makes the window before the CONNACK as long as
+  Rama is behind. An exactly-once message delivered in it waits in memory
+  (`deliver-or-queue!`, `awaiting-connack?`). It is not overflowed to the
+  cluster, nor a hand-off, so a broker that dies then loses it. That is
+  real in the code too.
+- Modelled fixed as `:overflow-before-connack?`, in `runner/race-fixes`.
+
+**The re-check on the corrected model:**
+
+```clojure
+{:default {:current               {:ok 37  :eo-lost 1124 :identifier-reused 26}
+           :leases                {:ok 56  :eo-lost 991}
+           :all-fixes+receipt     {:ok 100}}
+ :harsh   {:all-fixes+receipt     {:ok 98  :identifier-reused 1 :eo-duplicate 3}
+           :all-fixes-no-hand-off {:ok 98  :eo-lost 35 :stuck 35}}
+ :slow-no-kills {:all-fixes+receipt {:ok 93 :duplicate 20}}}
+```
+
+**Still to do:**
+
+- The window before the CONNACK, in the code: an exactly-once message
+  overflows to the cluster then.
+- The take-off race in the model, which shows it on slow Rama with nothing
+  killed (the 20 duplicates).
+- Harsh seeds 6 (an identifier reused with leases) and 44 (exactly-once
+  delivered twice), not yet traced.
+
 ## 20261020
 
 ### Forward-ack on receipt, in the code

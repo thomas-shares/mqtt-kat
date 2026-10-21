@@ -554,3 +554,39 @@
                          (h/new-message-key))
       (is (tu/wait-until #(= ["queued"] @received) 10000) "read and sent")
       (finally (close! c)))))
+
+(deftest a-message-completed-from-the-queue-is-not-sent-again-on-a-quick-resume
+  ;; Load run 113118 delivered 80 QoS 2 messages twice to one kept session
+  ;; at the run's end, nothing killed. A message from the cluster's queue
+  ;; comes off it when the client completes it, and the take-off can take
+  ;; seconds to land with Rama behind. The connection keeps the keys
+  ;; whose take-off has not landed (`had` in catching-up), so its reads
+  ;; leave them alone; the next connection, here at once, did not, and the
+  ;; resume read the queue with the message still on it. Here the take-off
+  ;; never lands, which is what a slow one looks like until it does.
+  (let [id       (tu/client-id "quick-resume")
+        topic    (tu/topic "quick-resume")
+        received (atom [])]
+    (let [c (connect! (client (atom [])) id false)]
+      (deref (:connack c) 5000 nil)
+      (client/send-message (:client c) {:packet-type :SUBSCRIBE :packet-identifier 1
+                                        :topics [{:qos 2 :topic-filter topic}]})
+      (is (some? (deref (:suback c) 5000 nil)))
+      (close! c)
+      (is (tu/wait-until #(false? (cluster/connected? *conn* id)) 10000)))
+    (stream! topic 2 1 0 (constantly nil))
+    (is (tu/wait-until #(= 1 (count (cluster/queued *conn* id))) 10000) "queued while away")
+    (with-redefs [cluster/dequeue! (fn [& _] (java.util.concurrent.CompletableFuture.))]
+      (let [c (connect! (client received) id false)]
+        (is (true? (:session-present? (deref (:connack c) 10000 nil))))
+        (is (tu/wait-until #(= ["0"] @received) 10000) "delivered, and completed")
+        (Thread/sleep 500)
+        (close! c))
+      (is (tu/wait-until #(false? (cluster/connected? *conn* id)) 10000))
+      ;; A new client object: it holds no identifier, having completed it.
+      (let [c (connect! (client received) id false)]
+        (try
+          (is (true? (:session-present? (deref (:connack c) 10000 nil))))
+          (Thread/sleep 3000)
+          (is (= ["0"] @received) "not delivered again")
+          (finally (close! c)))))))

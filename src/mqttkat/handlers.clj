@@ -345,6 +345,8 @@
     (when-let [timer (get-in old [key :timer])]
       (at/kill timer))))
 
+(declare taking-off)
+
 (defn discard-session!
   "Forget everything stored under `client-id`: the parked session, the
    subscriptions held for it while offline, and anything queued or in flight."
@@ -354,6 +356,7 @@
            {:client-id client-id :qos (:qos topic) :topic-filter (:topic-filter topic)}))
   (swap! *clients* dissoc client-id)
   (swap! *outbound* dissoc client-id)
+  (swap! taking-off dissoc client-id)
   (swap! *inflight* #(into {} (remove (fn [[[id _] _]] (= id client-id))) %)))
 
 (defn live-connection
@@ -1137,6 +1140,24 @@
    by a broker whose word arrived after the first."
   5000)
 
+(defonce ^:private taking-off
+  ;; {client-id {key landed}}: what this broker has asked the cluster to
+  ;; take off a client's queue, the client having had it, and when that
+  ;; landed (nil until it has). Kept across the client's connections here,
+  ;; unlike `catching-up`'s :had, which is one connection's: a client back
+  ;; here at once had its queue read with a take-off not processed yet, and
+  ;; a message it had completed sent again, which it took for a new one. A
+  ;; load run delivered 80 so, nothing killed. Let go as :had is, by the
+  ;; first read begun after the take-off landed that does not find it
+  ;; (end-read!).
+  (atom {}))
+
+(defn- taking-off!
+  "Note that `ks` are being taken off `client-id`'s queue: see taking-off."
+  [client-id ks]
+  (swap! taking-off update client-id
+         (fn [m] (reduce (fn [m k] (if (contains? m k) m (assoc m k nil))) (or m {}) ks))))
+
 (defonce ^:private dequeue-batch
   ;; {client-id {key last?}}: take-offs of live deliveries waiting to go to
   ;; the cluster together. One append per message delivered to a client
@@ -1164,6 +1185,7 @@
   "Take `k` off `client-id`'s queue in the cluster with the next batch;
    `last?` when no other take-off of it follows."
   [client-id k last?]
+  (taking-off! client-id [k])
   (let [[before _] (swap-vals! dequeue-batch update-in [client-id k] #(or % last?))]
     (when (empty? before)
       (at/after dequeue-batch-millis flush-dequeues! my-pool))))
@@ -1318,6 +1340,7 @@
     (release-origin-hold! origin (::msg-key msg) client-id))
   (when-let [{:keys [dequeue!]} @session-source]
     (when-let [k (::cluster-key msg)]
+      (taking-off! client-id [k])
       (cond-> (dequeue! client-id [k])
         ;; One reconciled is let go after its second take-off, below.
         (not (::reconcile? msg)) (once-done! #(landed! client-id k))))
@@ -1513,8 +1536,11 @@
   "`k`'s take-off from `client-id`'s queue on the cluster has landed: see
    catching-up."
   [client-id k]
-  (when (contains? @catching-up client-id)
-    (let [now (System/currentTimeMillis)]
+  (let [now (System/currentTimeMillis)]
+    (swap! taking-off (fn [m] (if (contains? (get m client-id) k)
+                                (assoc-in m [client-id k] now)
+                                m)))
+    (when (contains? @catching-up client-id)
       ;; Whether or not it is noted yet: the note can come after.
       (swap! catching-up (fn [m] (if (contains? m client-id)
                                    (assoc-in m [client-id :had k] now)
@@ -1688,16 +1714,27 @@
                     (count entries) "subscriptions," (count queued) "queued"))
         ;; Had: what was restored here. What stays on the cluster's queue
         ;; is left for the reads that follow.
-        (let [restored (into [] (keep (fn [[k msg]]
-                                        (if (restore-queued! client-id (assoc msg
+        (let [taking   (get @taking-off client-id)
+              restored (into [] (keep (fn [[k msg]]
+                                        (cond
+                                          ;; Completed here, its take-off
+                                          ;; not processed yet: see taking-off.
+                                          (contains? taking k)
+                                          (trace/trace! client-id msg "left on the cluster's queue at the resume: being taken off" k)
+
+                                          (restore-queued! client-id (assoc msg
                                                                               ::queued-at (:queued-at msg)
                                                                               ::cluster-key k))
                                           (do (trace/trace! client-id msg "restored from the cluster's queue"
                                                             k (or (:packet-identifier msg) ""))
                                               k)
+
+                                          :else
                                           (trace/trace! client-id msg "left on the cluster's queue at the resume" k))))
                              queued)]
-          (swap! catching-up assoc client-id {:had (zipmap restored (repeat nil))})
+          ;; And left out of every read, until a read after their take-off
+          ;; landed does not find them.
+          (swap! catching-up assoc client-id {:had (merge (zipmap restored (repeat nil)) taking)})
           ;; For lease-identifiers!, after the CONNACK. Read with the
           ;; queue, so that what is in flight there is what it leaves out.
           (swap! (outbound-atom client-id) assoc ::resumed-lease lease))
@@ -1747,7 +1784,7 @@
    read until the topology caught up. A load run delivered QoS 2 messages
    to one client ten times. Whether another read was asked for meanwhile."
   [client-id connect-id began took gone?]
-  (let [[before _] (swap-vals! catching-up
+  (let [[before after] (swap-vals! catching-up
                                (fn [m] (if (= connect-id (get-in m [client-id :connect-id]))
                                          (update m client-id
                                                  #(-> %
@@ -1761,6 +1798,12 @@
                                                                            h)))
                                                       (update :had (fn [h] (apply had h took)))))
                                          m)))]
+    ;; What the cluster has taken off, it has: no longer this broker's
+    ;; to remember either (taking-off).
+    (when-let [gone (seq (remove (set (keys (get-in after [client-id :had])))
+                                 (keys (get-in before [client-id :had]))))]
+      (swap! taking-off (fn [m] (let [left (apply dissoc (get m client-id) gone)]
+                                  (if (empty? left) (dissoc m client-id) (assoc m client-id left))))))
     (and (= connect-id (get-in before [client-id :connect-id]))
          (boolean (get-in before [client-id :again?])))))
 
@@ -4474,7 +4517,8 @@
       (if (::settle-on-pubcomp? released)
         (settled! client-id (assoc released ::cluster-key k))
         (when-let [{:keys [dequeue!]} @session-source]
-          (dequeue! client-id [k]))))
+          (taking-off! client-id [k])
+          (once-done! (dequeue! client-id [k]) #(landed! client-id k)))))
     (if (release-packet-identifier! client-id packet-identifier)
       (drain-pending! client-key client-id)
       (log/debug "PUBCOMP from" client-id "for identifier" packet-identifier
