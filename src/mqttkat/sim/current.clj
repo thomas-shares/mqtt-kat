@@ -90,6 +90,7 @@
    ;; found by the reads, is read once more after a no-op appended to the
    ;; client's partition has been processed (release-from-cluster!).
    :keep-claimed-pid?  false
+   :overflow-before-connack? false
    :held-read-barrier?     false
    :lease-block        64})
 
@@ -395,7 +396,13 @@
             w   (if (:reconcile? e) (note-had w id c (:key e)) w)]
         (send-claimed w id c e pid tok))
 
-      (and (acked? w id conn) (overflow? w id c e))
+      ;; Awaiting its CONNACK, a session's messages wait here
+      ;; (deliver-or-queue!), however long the cluster takes to have it
+      ;; connected. With :overflow-before-connack?, an exactly-once one goes
+      ;; to the cluster's queue as it would with no slot: here, a broker
+      ;; that died before the CONNACK took it with it.
+      (and (or (acked? w id conn) (and (cfg w :overflow-before-connack?) (eo-key w e)))
+           (overflow? w id c e))
       (-> (bu w id update :overflowed conj c)
           (enqueue id c (:key e) {:m (:m e)} tok "overflowed")
           (ensure-lease id c))
@@ -608,19 +615,37 @@
           queued))
 
 (defn- go-live
-  "The session adopted: restored, live, CONNACK, what was in flight sent
-   again (redeliver-inflight!), pending flushed, catch-up reads begun."
+  "The session adopted: restored, and live here, awaiting its CONNACK
+   until the cluster has it connected (add-client!, whose :connect is
+   recorded until it has landed, before the CONNACK). Appended without
+   waiting, as this model first did, another broker reading the session a
+   moment later found it still on the broker before, waited for nobody's
+   hand-over, and sent again what this one had just had completed."
   [w id conn c {:keys [queued lease]} waited-out? orphaned?]
   (let [[w restored] (restore w id c queued)
-        now (sim/now w)
+        now (sim/now w)]
+    (-> w
+        (bu id assoc-in [:catching-up c]
+            {:connect-id conn :had (apply had-map {} restored)
+             :reconcile-until (+ now (long (last (cfg w :catch-up-reads))))})
+        (bu id assoc-in [:live c] conn)
+        (bu id update :adopting dissoc conn)
+        (write id [:connected c id conn (sim/epoch w id)] :ack
+               {:k :connected :client c :conn conn :lease lease
+                :queued-pids (into #{} (keep (comp :pid val)) queued)
+                :waited-out? waited-out? :orphaned? orphaned?}
+               nil))))
+
+(defn- connacked
+  "The cluster has the session connected here: CONNACK, then what was in
+   flight sent again (redeliver-inflight!), pending flushed, catch-up
+   reads begun."
+  [w id {c :client :keys [conn lease queued-pids waited-out? orphaned?]}]
+  (if-not (and (= conn (live-conn w id c)) (sim/open? w conn))
+    w
+  (let [now (sim/now w)
         w (-> w
-              (bu id assoc-in [:catching-up c]
-                  {:connect-id conn :had (apply had-map {} restored)
-                   :reconcile-until (+ now (long (last (cfg w :catch-up-reads))))})
-              (bu id assoc-in [:live c] conn)
               (bu id assoc-in [:conns conn :acked?] true)
-              (bu id update :adopting dissoc conn)
-              (write id [:connected c id conn (sim/epoch w id)] :append-ack nil nil)
               (sim/send-on conn id {:type :connack}))
         ;; Leases: what the broker before had out and never handed over
         ;; released, every identifier of its blocks the queue does not
@@ -628,7 +653,6 @@
         ;; PUBCOMP (§4.3.3). Then a block of this broker's own.
         w (if (cfg w :leases?)
             (let [b      (long (cfg w :lease-block))
-                  queued-pids (into #{} (keep (comp :pid val)) queued)
                   stray  (when orphaned?
                            (for [k (:blocks lease)
                                  p (range (inc (* (long k) b)) (inc (* (inc (long k)) b)))
@@ -655,7 +679,7 @@
                   (:inflight (out w id c)))
         w (flush-pending w id c)
         gaps (map - (cfg w :catch-up-reads) (cons 0 (cfg w :catch-up-reads)))]
-    (sim/timer w id (first gaps) {:type :read :client c :cid conn :gaps gaps})))
+    (sim/timer w id (first gaps) {:type :read :client c :cid conn :gaps gaps}))))
 
 (defn- peer-gone? [w x]
   (and (not (sim/up? w x))
@@ -858,6 +882,7 @@
     :held-barrier (rama/query w id #(get-in % [:held [(:client then) (:pid then)]])
                               {:type :held-read-result :conn (:conn then) :client (:client then)
                                :pid (:pid then) :at nil :barrier? true})
+    :connected (connacked w id then)
     :copy-taken (sim/send-link w id (:origin then) {:type :taken :copy (:copy then)})
     :leased   (let [{c :client :keys [block conn]} then
                     o (out w id c)]

@@ -55,8 +55,10 @@
   {:model {:forward-ack? true}})
 
 (def race-fixes
-  "The two races harsher faults found, fixed (mqttkat.sim.current)."
-  {:model {:keep-claimed-pid? true :held-read-barrier? true}})
+  "The races the sweeps found beyond leases and the bridge, fixed
+   (mqttkat.sim.current)."
+  {:model {:keep-claimed-pid? true :held-read-barrier? true
+           :overflow-before-connack? true}})
 
 (def harsh
   "Brokers killed every 2 to 5 s, connections dropped every 0.5 to 2 s,

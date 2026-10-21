@@ -86,15 +86,23 @@
            (get-in w [:ledger :got])))))
 
 (deftest leases-release-the-identifiers-a-dead-broker-left-the-client-holding
-  ;; Seeds whose short runs, without leases, gave a later message an
-  ;; identifier the client still held from a broker that died (R6).
-  (doseq [seed [9 13]]
-    (testing (str "seed " seed)
-      (is (seq (get-in (r/run seed short-run) [:result :identifier-reused])) "without leases")
-      (let [w (r/run seed (r/config short-run r/leases))]
-        (is (empty? (get-in w [:result :identifier-reused])) "with them")
-        (is (:ok? (:result w)))
-        (is (pos? (get-in w [:ledger :stray-pubrels] 0)) "released by PUBRELs nobody was owed")))))
+  ;; The short runs whose current design, without leases, gave a later
+  ;; message an identifier the client still held from a broker that died
+  ;; (R6): found rather than pinned, since any change to the model moves
+  ;; which seeds they are.
+  (let [reused (filter #(seq (get-in (r/run % short-run) [:result :identifier-reused]))
+                       (range 30))]
+    (is (seq reused) "some short run reuses an identifier without leases")
+    (doseq [seed reused]
+      (testing (str "seed " seed)
+        (is (empty? (get-in (r/run seed (r/config short-run r/leases)) [:result :identifier-reused]))
+            "with them")
+        (is (:ok? (:result (r/run seed (r/config short-run r/leases r/race-fixes
+                                                 (r/forward-ack-as :receipt)))))
+            "and with the other fixes, nothing broken")))
+    (is (some #(pos? (get-in (r/run % (r/config short-run r/leases)) [:ledger :stray-pubrels] 0))
+              reused)
+        "released by PUBRELs nobody was owed")))
 
 (deftest with-leases-and-nothing-going-wrong-nothing-is-released
   (let [w (r/run 3 (r/config short-run r/calm r/leases))]
