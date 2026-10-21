@@ -209,3 +209,46 @@
           (reset! gone? true)
           (is (tu/wait-until #(= h/lease-block (count (stray))) 10000) "released once it is gone")
           (finally (close! c)))))))
+
+(deftest the-next-block-is-leased-before-this-one-runs-out
+  ;; Load run 175703: subscribers on `+` used a block of identifiers up in
+  ;; well under a second, and then waited, nothing in flight and thousands
+  ;; pending, for the next block's lease to land, which with Rama behind
+  ;; took up to six seconds. The next is leased once half of this one is
+  ;; used, so that it is there when this one runs out.
+  (let [id       (tu/client-id "lease-ahead")
+        topic    (tu/topic "lease-ahead")
+        received (atom [])
+        c        (connect! (client [] received (atom [])) id false)
+        lease    #(:lease @(@#'h/outbound-atom id))]
+    (try
+      (is (some? (deref (:connack c) 5000 nil)))
+      (client/send-message (:client c) {:packet-type :SUBSCRIBE :packet-identifier 1
+                                        :topics [{:qos 1 :topic-filter topic}]})
+      (is (some? (deref (:suback c) 5000 nil)))
+      (is (tu/wait-until #(some? (:block (lease))) 10000) "leased")
+      (let [b    (:block (lease))
+            n    (+ (quot h/lease-block 2) 8)
+            nxt  (mod (inc (long b)) (quot 65535 (long h/lease-block)))
+            pub  (connect! (client [] (atom []) (atom [])) (tu/client-id "lease-ahead-pub") true)]
+        (try
+          (is (some? (deref (:connack pub) 5000 nil)))
+          (dotimes [i n]
+            (client/send-message (:client pub) {:packet-type :PUBLISH :topic topic :qos 1
+                                                :packet-identifier (inc i)
+                                                :payload (.getBytes (str i) "UTF-8")
+                                                :retain? false :duplicate? false}))
+          (is (tu/wait-until #(= n (count @received)) 10000) "delivered")
+          (is (= b (:block (lease))) "still giving out the first block")
+          (is (tu/wait-until #(some #{nxt} [(:leasing (lease)) (:next (lease))]) 5000)
+              (str "the next leased already: " (pr-str (lease))))
+          (testing "and given out from once this one is used up"
+            (dotimes [i h/lease-block]
+              (client/send-message (:client pub) {:packet-type :PUBLISH :topic topic :qos 1
+                                                  :packet-identifier (+ n i 1)
+                                                  :payload (.getBytes (str (+ n i)) "UTF-8")
+                                                  :retain? false :duplicate? false}))
+            (is (tu/wait-until #(= (+ n h/lease-block) (count @received)) 10000) "delivered")
+            (is (= nxt (:block (lease))) (pr-str (lease))))
+          (finally (close! pub))))
+      (finally (close! c)))))

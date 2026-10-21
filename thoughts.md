@@ -4,6 +4,50 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261021
 
+### Leases held up the fastest subscribers, so the next is leased ahead
+
+Load run 175703 drained, with nothing left on the queues. It lost 13,632,
+all to s1284, a clean session on `+`, as s1275's loss was. The publishers'
+acknowledgements stood still from 142 s to 167 s.
+
+The new warnings named a cause of my own making:
+
+```clojure
+;; s69  {:inflight 0 :pending 2563 :lease {:block 27 :leasing 28}}
+;; s689 {:inflight 0 :pending 2561 :lease {:block 27 :leasing 28}}
+;; s489 {:inflight 4 :pending 2306 :lease {:block 28 :leasing 29}}
+```
+
+- Nothing in flight, and thousands pending: their block of identifiers was
+  used up, and the next one's lease had not landed.
+- A block was leased only once the last one had none left.
+- A subscriber on `+` gives out 256 identifiers in well under a second, and
+  with Rama behind a lease took up to six seconds (`lease@ack` max 6,117
+  ms).
+
+So leases throttled the fastest subscribers, and fed the overload.
+
+**The fix:**
+
+- **`ensure-lease!`** leases the next block once half of this one is given
+  out.
+- **`lease!`**, landing while a block is in use, keeps it as `:next`.
+- **`advance-lease`** (in `reserve`) moves to it once the block in use has
+  none left.
+
+The lease record lists the block in use as well, so a resume after a
+crash releases both.
+
+The test (`orphaned-identifier-test/the-next-block-is-leased-before-this-one-runs-out`)
+checks:
+
+- after half a block, the next has been asked for;
+- after a block more, identifiers come from it.
+
+s1284 is the clean-session overload that `doc/guarantees.md` allows: not
+pausing the bridge means a clean subscriber that is behind is refused.
+Whether that should stand is a decision, not a bug.
+
 ### Reads that went on and took nothing
 
 Load run 165325 ended as 155447 did, with 58,945 queued for connected
