@@ -1336,6 +1336,14 @@
     (.add ^java.util.List *hand-offs* fut))
   fut)
 
+(defn- copy-out!
+  "`msg`, a copy a publish waits on (hold-copy), has left this broker's
+   memory: answered for by its client, on the cluster's queue, or not to
+   be delivered at all. Nothing when it is not one."
+  [msg]
+  (when-let [^CompletableFuture fut (::hand-off msg)]
+    (.complete fut nil)))
+
 (defn- once-done!
   "Run `f` once `fut` completes, however it does — at once when it is not a
    future."
@@ -1449,8 +1457,9 @@
                                     (::queued-at msg) (assoc :queued-at (::queued-at msg))
                                     identifier        (assoc :packet-identifier identifier))
                                   k)
-                        #(when-let [origin (::origin msg)]
-                           (release-origin-hold! origin (::msg-key msg) client-id)))
+                        #(do (copy-out! msg)
+                             (when-let [origin (::origin msg)]
+                               (release-origin-hold! origin (::msg-key msg) client-id))))
             ;; One from the cluster's queue was on it without an identifier,
             ;; which is how it went out again under a new one: the chaos run
             ;; saw QoS 2 delivered twice to a client that moved to another
@@ -3187,6 +3196,124 @@
 
 (declare deliver-now-or-queue! overflow? overflow!)
 
+(def hand-off?
+  "Whether a publish waits for its copies for kept sessions to leave this
+   broker's memory (hold-copy). On unless -Dmqttkat.handOff=false or
+   MQTTKAT_HAND_OFF=false, which reaches brokers started by
+   scripts/brokers.bb."
+  (delay (not= "false" (or (System/getProperty "mqttkat.handOff")
+                           (System/getenv "MQTTKAT_HAND_OFF")))))
+
+(def hand-off-millis
+  "How long a copy a publish waits on (hold-copy) stays in memory alone
+   before it is written to the cluster's queue. The simulation did best at
+   50: longer, a subscriber behind holds its publishers up for all of it;
+   none, every copy that waits at all is written (thoughts.md, 20261022)."
+  50)
+
+(defonce ^:private hand-offs-due
+  ;; [due-at client-id future], in the order they were held: see hold-copy.
+  (java.util.concurrent.ConcurrentLinkedQueue.))
+
+(defn- hold-copy
+  "`msg`, a copy for the kept session `client-id` at `key` of a publish
+   being handled, made something the publish waits on (hand-off!) until
+   it leaves this broker's memory: answered for by the client (puback,
+   pubrec), handed over to the cluster's queue when the client goes
+   (hand-over-unacknowledged!), or written there by hand-off-copies!
+   after hand-off-millis (copy-out!). As it is when there is no publish
+   waiting, or the session is not kept.
+
+   Chaos run 20261022-133535 lost what a broker killed held in memory for
+   kept sessions behind a full window, their publishers told it was safe:
+   the crash window of doc/guarantees.md, R1. Copies from another broker
+   are its to keep until they are delivered (delivering-for-origin), and
+   an exactly-once copy is claimed or queued on the cluster already."
+  [key client-id msg]
+  (if (and @hand-off? *hand-offs* @session-source
+           (::msg-key msg)
+           (pos? (long (or (:qos msg) 0)))
+           (nil? (::origin msg))
+           (keep-session? (get @*clients* key))
+           (not (exactly-once-key key msg)))
+    (let [fut (CompletableFuture.)]
+      (hand-off! fut)
+      (.add ^java.util.concurrent.ConcurrentLinkedQueue hand-offs-due
+            [(+ (System/currentTimeMillis) (long hand-off-millis)) client-id fut])
+      (assoc msg ::hand-off fut))
+    msg))
+
+(defn- hand-off-copies!
+  "Write to `client-id`'s queue on the cluster the copies among `futs`
+   still in memory here, under their identifier when in flight, and let
+   their publishes go once it has them. Each is marked as from there
+   (::cluster-key) in the same step, so that it comes off there once the
+   client has it (settled!), whichever happens first. One no longer here
+   is answered for, or not to be delivered, or being handed over: let go,
+   after the hand-over if there is one."
+  [client-id futs]
+  (let [found (volatile! [])
+        mark  (fn [pid m]
+                (let [^CompletableFuture f (::hand-off m)]
+                  (if (and f (contains? futs f) (not (.isDone f))
+                           (not (::cluster-key m)) (not (::released? m)))
+                    (do (vswap! found conj [pid m])
+                        (assoc m ::cluster-key (::msg-key m)))
+                    m)))]
+    (when-let [a (existing-outbound client-id)]
+      (swap! a (fn [{:keys [inflight pending] :as state}]
+                 (vreset! found [])
+                 (cond-> state
+                   (seq inflight) (assoc :inflight (into (empty inflight)
+                                                         (map (fn [[pid m]] [pid (mark pid m)]))
+                                                         inflight))
+                   (seq pending)  (assoc :pending (into clojure.lang.PersistentQueue/EMPTY
+                                                        (map #(mark nil %))
+                                                        pending))))))
+    (let [written (into #{} (map #(::hand-off (second %))) @found)
+          {:keys [enqueue!]} @session-source]
+      (doseq [[pid m] @found]
+        (trace/trace! client-id m "on the cluster's queue after the hand-off wait" (or pid "") (::msg-key m))
+        (once-done! (enqueue! client-id
+                              (cond-> (select-keys m [:topic :payload :qos :properties])
+                                (::queued-at m) (assoc :queued-at (::queued-at m))
+                                pid             (assoc :packet-identifier pid))
+                              (::msg-key m))
+                    #(copy-out! m)))
+      (doseq [^CompletableFuture f futs
+              :when (not (contains? written f))]
+        (if-let [handing (get @handing-over client-id)]
+          (once-done! handing #(.complete f nil))
+          (.complete f nil))))))
+
+(defn- sweep-hand-offs!
+  "hand-off-copies! for every copy held longer than hand-off-millis that
+   has not left memory yet, client by client."
+  []
+  (let [q   ^java.util.concurrent.ConcurrentLinkedQueue hand-offs-due
+        now (System/currentTimeMillis)
+        due (loop [acc {}]
+              (let [[at _ _ :as head] (.peek q)]
+                (if (and head (<= (long at) now))
+                  (let [[_ client-id ^CompletableFuture f] (.poll q)]
+                    (recur (if (.isDone f) acc (update acc client-id (fnil conj #{}) f))))
+                  acc)))]
+    (doseq [[client-id futs] due]
+      (try
+        (hand-off-copies! client-id futs)
+        (catch Throwable t
+          (log/warn t "could not write" (count futs) "copies for" client-id "to the cluster's queue")
+          (run! #(.complete ^CompletableFuture % nil) futs))))))
+
+(defonce ^:private hand-off-sweeper
+  (delay
+    (doto (java.util.concurrent.Executors/newSingleThreadScheduledExecutor
+           (reify java.util.concurrent.ThreadFactory
+             (newThread [_ r] (doto (Thread. ^Runnable r "hand-off-sweeper") (.setDaemon true)))))
+      (.scheduleWithFixedDelay ^Runnable #(try (sweep-hand-offs!)
+                                               (catch Throwable t (log/warn t "hand-off sweep failed")))
+                               10 10 java.util.concurrent.TimeUnit/MILLISECONDS))))
+
 (defn- deliver-or-queue!
   "Send `msg` to a subscriber if its window has room; hold it if not.
 
@@ -3198,8 +3325,13 @@
    memory, and under back-pressure it should never fire.
 
    Returns false when it fired: the client was not delivered to, and the
-   cluster queues it for a session that is kept as for one that is away."
+   cluster queues it for a session that is kept as for one that is away.
+
+   A copy for a kept session holds its publish up until it has left
+   memory: see hold-copy."
   [key client-id msg publisher-key]
+  (let [msg (hold-copy key client-id msg)]
+  (when (::hand-off msg) @hand-off-sweeper)
   (cond
     ;; Before its CONNACK, as with no window slot, an exactly-once message
     ;; waits on the cluster's queue (overflow?), read back once the session
@@ -3219,13 +3351,14 @@
       (if held?
         (note-delivered! client-id msg)
         (do (.increment ^LongAdder MqttStat/droppedMessages)
+            (copy-out! msg)
             (note-refused! client-id publisher-key)))
       (when-not (awaiting-connack? key)
         (flush-pending! key client-id))
       held?)
 
     :else
-    (deliver-now-or-queue! key client-id msg publisher-key)))
+    (deliver-now-or-queue! key client-id msg publisher-key))))
 
 (defn- taken-back!
   "Take `msg` out of `client-id`'s window again, in flight under
@@ -3330,6 +3463,7 @@
    sent it is told it is safe once the cluster has it; and a hold for the
    broker that sent it let go then, as a hand-over lets it go."
   [client-id msg]
+  (copy-out! msg)
   (let [k   (::msg-key msg)
         fut (hand-off! ((:enqueue! @session-source)
                         client-id
@@ -3348,6 +3482,7 @@
                                                          (receive-maximum-of key))]
     (if (left-meanwhile? key client-id packet-identifier msg)
       (do (trace/trace! client-id msg "not sent: its connection has left")
+          (copy-out! msg)
           false)
       ;; A refused send has to give the identifier back, or the window fills with
       ;; messages that were discarded rather than sent and the subscriber
@@ -3357,7 +3492,8 @@
         (trace/trace! client-id msg (if sent? "sent" "not sent: expired or too large") packet-identifier)
         (if sent?
           (note-delivered! client-id msg)
-          (release-packet-identifier! client-id packet-identifier))
+          (do (copy-out! msg)
+              (release-packet-identifier! client-id packet-identifier)))
         true))
     ;; An exactly-once message is claimed when it is read back, with a
     ;; slot to go in.
@@ -3366,6 +3502,7 @@
     (let [held? (queue-pending! client-id msg)]
       (if (and held? (left-meanwhile? key client-id nil msg))
         (do (trace/trace! client-id msg "not held: its connection has left")
+            (copy-out! msg)
             false)
         (do
           (trace/trace! client-id msg (if held? "pending: window full" "refused: pending queue full")
@@ -3373,7 +3510,15 @@
           (if held?
             (note-delivered! client-id msg)
             (do (.increment ^LongAdder MqttStat/droppedMessages)
+                (copy-out! msg)
                 (note-refused! client-id publisher-key)))
+          ;; The window may have emptied between the identifier refused
+          ;; above and the queue here: the acknowledgement that emptied it
+          ;; found nothing waiting, and nothing in flight, no other would
+          ;; come to send this. Everything after it waited behind it until
+          ;; the client reconnected (mqttkat.hand-off-test, one at a time).
+          (when (and held? (< (long (inflight-count client-id)) (long (receive-maximum-of key))))
+            (flush-pending! key client-id))
           ;; Never a bridge: it carries every other subscriber's messages
           ;; too, and the publishers on the broker it comes from wait for
           ;; it to take their copies (forward-ack?). Paused by one clean
@@ -4482,6 +4627,7 @@
   (let [client-id (:client-id (get @*clients* client-key))]
     (if-let [msg (release-packet-identifier! client-id packet-identifier)]
       (do
+        (copy-out! msg)
         (settled! client-id msg)
         ;; A slot just freed, so let the next message waiting on it through.
         (drain-pending! client-key client-id))
@@ -4514,6 +4660,7 @@
                                                        k (assoc ::release-key k ::settle-on-pubcomp? true)))
                                          state)))]
         (when-let [msg (get-in before [:inflight packet-identifier])]
+          (copy-out! msg)
           (when-not (or k (::settle-on-pubcomp? msg))
             (settled! client-id msg)))))
     (let [pubrel! #(send-buffer [client-key]

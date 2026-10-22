@@ -206,9 +206,13 @@
       (finally (swap! h/session-source assoc :claim! real)))))
 
 (deftest a-delivery-on-any-other-topic-is-not
+  ;; Not claimed. Unanswered past hand-off-millis, it would be on the
+  ;; queue all the same, from the hand-off (mqttkat.hand-off-test), which
+  ;; is off here: this is about the claim.
   (let [topic (tu/topic "eo")
         {:keys [pid publishes releases sent released completed]}
-        (delivered [(str topic "/elsewhere")] topic)]
+        (with-redefs [h/hand-off? (delay false)]
+          (delivered [(str topic "/elsewhere")] topic))]
     (is (= 1 (count publishes)))
     (is (= [pid] releases))
     (is (empty? sent))

@@ -4,6 +4,29 @@ In this file will go my thoughts and ramblings about this project and what I hav
 
 ## 20261022
 
+### The hand-off in the code
+
+`mqttkat.handlers/hold-copy`, with `mqttkat.hand-off-test` as the bar.
+
+- **Which copies:** a copy for a kept session made while a publish is
+  handled. That publish's PUBACK or PUBCOMP waits on a future the copy
+  carries (`hand-off!`).
+- **When it is let go:** on the subscriber's PUBACK or PUBREC, or once the
+  hand-over's write for it lands. A copy that is overflowed, refused, or
+  not to be delivered is let go at once.
+- **The fallback:** every 10 ms a sweeper looks at the copies held longer
+  than 50 ms, client by client. It marks those still in memory as from the
+  queue (`::cluster-key`) and writes them there, under their identifier
+  when in flight. Marked in the same step, a copy comes off the queue once
+  the client has it (`settled!`), whichever comes first.
+- **Not covered:** copies from another broker, which that broker keeps until
+  they are delivered (`delivering-for-origin`). Exactly-once copies, which
+  are claimed or overflowed on Rama already.
+- **Differs from the simulation:** the write waits until Rama has processed
+  it, through the client's queue lane, not only for the depot. The
+  simulation put that at about a tenth of the throughput with Rama behind.
+  If the load runs show it, the lane needs an append-ack level of its own.
+
 ### A publish acknowledged once its copies have left memory, in the simulation
 
 Chaos runs 211254, 132513 and 133535 (broker-kill, QoS 2) lost 0.2 to 0.4%

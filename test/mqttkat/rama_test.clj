@@ -1254,6 +1254,10 @@
                     ;; it with it (handlers/overflow?). Only with
                     ;; MQTTKAT_WAIT_ON_CLUSTER=true: under load, writing it
                     ;; was too much for Rama, and by default it waits here.
+                    ;; Either way, unanswered after hand-off-millis it is on
+                    ;; the cluster's queue as well, as is the one in the
+                    ;; window before it, and its PUBACK waited for that
+                    ;; (handlers/hold-copy).
                     (doseq [[on? where] [[true "on the cluster"] [false "here"]]]
                       (testing where
                         (with-redefs [h/wait-on-cluster? (delay on?)]
@@ -1272,7 +1276,7 @@
                                 (client/send-message (:client pub) (publish-msg "held/t" "held" 1 52 :version 4))
                                 (tu/expect-eventually! (:ch pub) :PUBACK)
                                 (Thread/sleep 200)
-                                (is (= (if on? ["held"] [])
+                                (is (= ["sent" "held"]
                                        (mapv (comp #(String. ^bytes % "UTF-8") :payload second)
                                              (cluster/queued conn id))))
                                 (tu/send-v5! sub {:packet-type :PUBACK :packet-identifier (:packet-identifier first-got)})
@@ -1353,9 +1357,16 @@
                           (let [c3 (tu/connect! "leaver" :id id :clean-session? false :ordered? true)]
                             (client/send-message (:client pub) (publish-msg "leave/t" "unacked" 1 42 :version 4))
                             (tu/expect-eventually! (:ch pub) :PUBACK)
-                            (is (= "unacked" (tu/payload-str (tu/expect-eventually! (:ch c3) :PUBLISH)))
-                                "live, straight after the CONNACK: the session is in place before it")
-                            (is (empty? (cluster/queued conn id)) "delivered live: not queued")
+                            (let [live (tu/expect-eventually! (:ch c3) :PUBLISH)]
+                              (is (= "unacked" (tu/payload-str live))
+                                  "live, straight after the CONNACK: the session is in place before it")
+                              ;; Unanswered after hand-off-millis, on the cluster's
+                              ;; queue under its identifier, and the publisher's
+                              ;; PUBACK waited for that (handlers/hold-copy).
+                              (is (tu/wait-until #(= [(:packet-identifier live)]
+                                                     (map (comp :packet-identifier second) (cluster/queued conn id)))
+                                                 5000)
+                                  "delivered live and unanswered: on the cluster's queue in flight"))
                             ;; Gone without a PUBACK: the socket, not a DISCONNECT.
                             (tu/close! c3)
                             (is (tu/wait-until #(= 1 (count (cluster/queued conn id))))

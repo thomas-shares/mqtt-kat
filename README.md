@@ -335,6 +335,13 @@ behind: the broker that sent the copy keeps it until that broker's
 subscribers have it, and queues it for them if that broker dies. Off with
 `-Dmqttkat.forwardAck=false` or `MQTTKAT_FORWARD_ACK=false`.
 
+It also waits for each copy for a kept session on this broker to leave the
+broker's memory: answered by its subscriber, or after 50 ms written to the
+session's queue on the cluster. Without this, a broker killed with copies
+waiting behind a full window took them with it, after their publishers had
+been told they were safe. Off with `-Dmqttkat.handOff=false` or
+`MQTTKAT_HAND_OFF=false`.
+
 By default a chaos client starts on broker `i mod N` and comes back to any
 broker that is up. `:setup :redirect` hands that to the brokers: the runner
 sets the cluster's redirect policy (`:round-robin` or `:load`) through broker
