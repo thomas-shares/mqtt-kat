@@ -26,6 +26,15 @@ In this file will go my thoughts and ramblings about this project and what I hav
   it, through the client's queue lane, not only for the depot. The
   simulation put that at about a tenth of the throughput with Rama behind.
   If the load runs show it, the lane needs an append-ack level of its own.
+- **A lost wakeup the test found, older than this:** a subscriber taking
+  one message at a time stopped after a few, nothing in flight and the
+  rest pending, in two runs of five. A message refused an identifier
+  because the window was full went to pending just after the PUBACK that
+  emptied the window had found pending empty. Nothing in flight, no
+  acknowledgement came to send it, and everything after it queued behind
+  it until the client reconnected. The left-alone warnings of load run
+  205056, `{:inflight 0 :pending 2516}`, may be partly this rather than
+  leases. Pending is now looked at again once the message is in it.
 
 ### A publish acknowledged once its copies have left memory, in the simulation
 
