@@ -110,6 +110,37 @@
     (is (zero? (get-in w [:ledger :stray-pubrels] 0)))
     (is (pos? (get-in w [:ledger :leases] 0)))))
 
+(def ^:private fixed
+  "What the code does now: leases, the race fixes, forward-ack on receipt."
+  [r/leases r/race-fixes (r/forward-ack-as :receipt)])
+
+(deftest a-hand-off-closes-the-crash-window
+  ;; Chaos run 20261022-133535: a broker killed took the copies for kept
+  ;; sessions waiting in its memory, whose publishers had been told they
+  ;; were safe (doc/guarantees.md, R1). Acknowledged only once each copy
+  ;; has left memory, answered for by the client or after 50 ms put on
+  ;; the cluster's queue, none is. Found rather than pinned, as above.
+  (let [crashed (filter #(seq (get-in (r/run % (apply r/config short-run fixed)) [:result :crash-window]))
+                        (range 10))]
+    (is (seq crashed) "some short run loses what a broker held in memory")
+    (doseq [seed crashed
+            until [:acked :sent]]
+      (testing (str "seed " seed ", " until)
+        (let [w (r/run seed (apply r/config short-run (conj fixed (r/hand-off 50 until))))]
+          (is (:ok? (:result w)) (pr-str (check/summary (:result w))))
+          (when (= :acked until)
+            (is (empty? (get-in w [:result :crash-window])) "none in memory when it died"))
+          (is (zero? (get-in w [:ledger :hand-off-vanished] 0)) "every copy waited on accounted for"))))))
+
+(deftest with-a-hand-off-and-nothing-going-wrong-nothing-is-slower
+  ;; With nothing failing, every subscriber answers well within the wait
+  ;; or is written to the queue: as many accepted as without.
+  (let [accepted #(count (filter (comp :accepted val) (get-in % [:ledger :published])))
+        today    (r/run 3 (apply r/config short-run r/calm fixed))
+        handed   (r/run 3 (apply r/config short-run r/calm (conj fixed (r/hand-off 50 :acked))))]
+    (is (:ok? (:result handed)))
+    (is (>= (accepted handed) (* 0.98 (accepted today))) [(accepted today) (accepted handed)])))
+
 (deftest ^:sim the-current-design-keeps-the-guarantees
   ;; It does not, today: a broker killed with a QoS 2 message in flight
   ;; leaves the client holding its identifier, which a later message is
@@ -127,3 +158,8 @@
 (deftest ^:sim the-current-design-with-leases-and-forward-ack-keeps-the-guarantees
   (let [{:keys [failed] :as res} (r/sweep (range 20) (r/config r/leases r/forward-ack) current/model)]
     (is (empty? failed) (pr-str (dissoc res :failed)))))
+
+(deftest ^:sim a-hand-off-keeps-the-guarantees-and-loses-nothing-to-a-crash
+  (let [res (r/sweep (range 20) (apply r/config r/harsh (conj fixed (r/hand-off 50 :acked))) current/model)]
+    (is (empty? (:failed res)) (pr-str (dissoc res :failed)))
+    (is (zero? (get-in res [:counts :crash-window] 0)) (pr-str (:counts res)))))

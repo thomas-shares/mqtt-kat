@@ -54,6 +54,13 @@
    identifier of the recorded blocks the queue does not have in flight,
    so that none the client holds is orphaned (thoughts.md, 20261020).
 
+   With {:model {:hand-off-ms ms}}, what the code does not do yet (thoughts.md,
+   20261022): a publish acknowledged only once each copy of it for a kept
+   session has left memory, answered for by the client, or sent with
+   :hand-off-until :sent, or after `ms` put on the cluster's queue. A
+   copy forwarded on :receipt is then taken only once it has left the
+   other broker's memory, unless :hand-off-receipt?.
+
    What is not: QoS 0, clean sessions, retained messages, shared
    subscriptions, will messages, expiry, back-pressure on publishers,
    limits on Rama's queues, the origin holds of forwarded copies, writes
@@ -99,6 +106,24 @@
    :admission-lag-ms   nil
    :overflow-before-connack? false
    :held-read-barrier?     false
+   ;; Option 2 of thoughts.md, 20261022, not in the code: a publish is
+   ;; acknowledged only once every copy of it for a kept session has left
+   ;; this broker's memory, and a copy still here after :hand-off-ms is
+   ;; put on the cluster's queue, the acknowledgement waiting for that.
+   ;; Left memory, by :hand-off-until: :sent, once it is sent to the
+   ;; client; :acked, once the client has answered for it (PUBACK,
+   ;; PUBREC). nil: off, as the code is today. A copy forwarded on
+   ;; :receipt is then taken only once it has left the other broker's.
+   :hand-off-ms        nil
+   :hand-off-until     :acked
+   ;; What the publish waits for of that write: :append-ack, the depot
+   ;; having it, which Rama never loses; :ack, processed too, which with
+   ;; Rama behind is seconds. The copy stays here meanwhile, so nothing
+   ;; reads it back from there before it is processed.
+   :hand-off-ack       :append-ack
+   ;; A copy forwarded on :receipt taken on receipt still, which leaves it
+   ;; in the other broker's memory alone: to see what that costs.
+   :hand-off-receipt?  false
    :lease-block        64})
 
 (defn- cfg [w k] (get-in w [:config :model k] (get defaults k)))
@@ -197,7 +222,8 @@
    :catching-up {}    ; subscriber -> {:connect-id :had {k landed} :reading? ...}
    :barriers {}       ; tok -> {:n :then}
    :copies {}         ; forwarded copies not yet taken -> {:client :m :tok :peer}
-   :overflowed #{}})
+   :overflowed #{}
+   :hand-offs {}})    ; eid -> {:tok :client}: copies a publish waits on (:hand-off-ms)
 
 (defn- bs [w id] (sim/node w id))
 (defn- bu [w id f & args] (apply sim/update-node w id f args))
@@ -239,13 +265,41 @@
     w))
 
 (defn- write
-  "Append `op`; `then` once it is answered at `level`, and `tok`'s barrier
-   waits for it."
+  "Append `op`; `then` once it is answered at `level`, and the barrier of
+   `tok`, or of each of a vector of them, waits for it."
   [w id op level then tok]
-  (let [depot (if (#{:connected :disconnected :hold :unhold :noop} (first op)) :sessions :queues)]
-    (-> (hold-barrier w id tok)
-        (rama/append id depot op level (when (and level (or then tok))
-                                         {:type :landed :then then :barrier tok})))))
+  (let [depot (if (#{:connected :disconnected :hold :unhold :noop} (first op)) :sessions :queues)
+        toks  (if (vector? tok) (filterv some? tok) tok)]
+    (-> (if (vector? toks) (reduce #(hold-barrier %1 id %2) w toks) (hold-barrier w id toks))
+        (update-in [:ledger :appends (first op)] (fnil inc 0))
+        (rama/append id depot op level (when (and level (or then (if (vector? toks) (seq toks) toks)))
+                                         {:type :landed :then then :barrier toks})))))
+
+;; ---------------------------------------------------------------- hand-offs
+
+(defn- hand-off?
+  "Whether a copy `e` placed here holds up the publish `tok` is the
+   barrier of (:hand-off-ms). In the window, only with :hand-off-until
+   :acked, and not an exactly-once copy, whose claim is on the cluster."
+  [w e tok window?]
+  (boolean (and (cfg w :hand-off-ms) tok (:key e)
+                (or (not window?)
+                    (and (= :acked (cfg w :hand-off-until)) (not (eo-key w e)))))))
+
+(defn- hold-copy
+  "The publish behind `tok` waits on `e` until it leaves memory
+   (release-copy) or :hand-off-ms passes (:hand-off-due)."
+  [w id c e tok]
+  (-> (hold-barrier w id tok)
+      (bu id assoc-in [:hand-offs (:eid e)] {:tok tok :client c})
+      (sim/timer id (cfg w :hand-off-ms) {:type :hand-off-due :eid (:eid e)})))
+
+(defn- release-copy
+  "`e` has left memory: what its publish waited on it for, done."
+  [w id e]
+  (if-let [{:keys [tok]} (get-in (bs w id) [:hand-offs (:eid e)])]
+    (-> (bu w id update :hand-offs dissoc (:eid e)) (release-barrier id tok))
+    w))
 
 ;; ---------------------------------------------------------------- catching up
 
@@ -353,10 +407,10 @@
                    (acked? w id (live-conn w id c)))
         pid   (when room? (pick-pid w o))]
     (cond
-      pid   (let [e (first pending)]
-              [(set-out w id c (assoc o :next-id pid :pending (subvec pending 1)
-                                      :inflight (assoc inflight pid e)))
-               pid e])
+      pid   (let [e (first pending)
+                  w (set-out w id c (assoc o :next-id pid :pending (subvec pending 1)
+                                           :inflight (assoc inflight pid e)))]
+              [(if (= :acked (cfg w :hand-off-until)) w (release-copy w id e)) pid e])
       room? [(ensure-lease w id c) nil nil]
       :else [w nil nil])))
 
@@ -400,7 +454,8 @@
     (cond
       pid
       (let [w   (set-out w id c (assoc o :next-id pid :inflight (assoc inflight pid e)))
-            w   (if (:reconcile? e) (note-had w id c (:key e)) w)]
+            w   (if (:reconcile? e) (note-had w id c (:key e)) w)
+            w   (if (hand-off? w e tok true) (hold-copy w id c e tok) w)]
         (send-claimed w id c e pid tok))
 
       ;; Awaiting its CONNACK, a session's messages wait here
@@ -417,6 +472,7 @@
       :else
       (-> (set-out w id c (update o :pending conj e))
           (t e id "pending for" c)
+          (cond-> (hand-off? w e tok false) (hold-copy id c e tok))
           (ensure-lease id c)))))
 
 (defn- holds? [o k]
@@ -734,17 +790,26 @@
   (let [{:keys [inflight pending] :as o} (out w id c)
         w (set-out w id c (assoc o :inflight (sorted-map) :pending []))
         [w tok] (barrier w id {:k :handed :client c :cid cid})
+        ;; A copy a publish waits on (:hand-off-ms) has left memory once
+        ;; its hand-over has landed: the publish waits on that as well.
+        toks #(let [h (get-in (bs %1 id) [:hand-offs (:eid %2)])]
+                [tok (:tok h)])
+        let-go #(if-let [h (get-in (bs %1 id) [:hand-offs (:eid %2)])]
+                  (-> (bu %1 id update :hand-offs dissoc (:eid %2)) (release-barrier id (:tok h)))
+                  %1)
         w (reduce (fn [w [pid e]]
-                    (if (:released? e)
-                      (enqueue w id c (or (:release-key e) (str (or (:key e) (:cluster-key e)) "-rel"))
-                               {:m (:m e) :pid pid :released? true} tok "PUBREL handed over")
-                      (enqueue w id c (or (:key e) (:cluster-key e)) {:m (:m e) :pid pid}
-                               tok "handed over in flight")))
+                    (-> (if (:released? e)
+                          (enqueue w id c (or (:release-key e) (str (or (:key e) (:cluster-key e)) "-rel"))
+                                   {:m (:m e) :pid pid :released? true} (toks w e) "PUBREL handed over")
+                          (enqueue w id c (or (:key e) (:cluster-key e)) {:m (:m e) :pid pid}
+                                   (toks w e) "handed over in flight"))
+                        (let-go e)))
                   w inflight)
         w (reduce (fn [w e]
                     (if (:cluster-key e)
-                      (t w e id "left on the queue at the hand-over")
-                      (enqueue w id c (:key e) {:m (:m e)} tok "handed over waiting")))
+                      (-> (t w e id "left on the queue at the hand-over") (let-go e))
+                      (-> (enqueue w id c (:key e) {:m (:m e)} (toks w e) "handed over waiting")
+                          (let-go e))))
                   w pending)]
     (release-barrier w id tok)))
 
@@ -830,11 +895,12 @@
       :puback
       (if e
         (-> (set-out w id c (update o :inflight dissoc pid)) (t e id "PUBACK from" c)
-            (settled id c e) (drain id c))
+            (release-copy id e) (settled id c e) (drain id c))
         w)
 
       :pubrec
       (let [k (when e (eo-key w e))
+            w (if e (release-copy w id e) w)
             w (if (and e (not (:released? e)))
                 (set-out w id c (update-in o [:inflight pid]
                                            #(cond-> (assoc % :released? true)
@@ -1009,8 +1075,38 @@
                           (-> (set-out w id c (assoc o :gate :landed)) (read-soon id c conn 0))
                           (sim/timer w id 250 ev)))))
 
+      ;; A copy still in memory after :hand-off-ms: put on the cluster's
+      ;; queue, under its identifier if it is in flight, and its publish
+      ;; acknowledged once that has landed. Taken off there once it is
+      ;; done with here (settled), as a copy read from there is.
+      :hand-off-due
+      (let [eid (:eid ev)]
+        (if-let [{:keys [tok client]} (get-in (bs w id) [:hand-offs eid])]
+          (let [c  client
+                o  (out w id c)
+                [pid e] (or (first (filter #(= eid (:eid (val %))) (:inflight o)))
+                            [nil (first (filter #(= eid (:eid %)) (:pending o)))])
+                w  (bu w id update :hand-offs dissoc eid)]
+            (if-not e
+              (-> (update-in w [:ledger :hand-off-vanished] (fnil inc 0))
+                  (release-barrier id tok))
+              (let [k  (:key e)
+                    e2 (assoc e :cluster-key k)
+                    w  (set-out w id c
+                                (if pid
+                                  (assoc-in o [:inflight pid] e2)
+                                  (assoc o :pending (mapv #(if (= eid (:eid %)) e2 %) (:pending o)))))]
+                (-> (update-in w [:ledger :hand-off-written] (fnil inc 0))
+                    (t e id "still here after the hand-off wait, put on the queue for" c "as" k)
+                    (write id [:enqueue c k (cond-> {:m (:m e)} pid (assoc :pid pid))]
+                           (cfg w :hand-off-ack) {:k :none} tok)
+                    (release-barrier id tok)))))
+          w))
+
       :closed     (remove-client w id conn)
-      :landed     (-> (continue w id (:then ev)) (release-barrier id (:barrier ev)))
+      :landed     (let [b (:barrier ev)
+                        w (continue w id (:then ev))]
+                    (if (vector? b) (reduce #(release-barrier %1 id %2) w b) (release-barrier w id b)))
       :claim-read (claim-read w id ev)
       :read       (read-again w id (:client ev) (:cid ev) (:gaps ev))
       :read-result (read-result w id ev)
@@ -1049,7 +1145,9 @@
           ;; Taken, with forward-ack?, once what this broker did with it
           ;; has landed: in a window here, claimed, or on the queue; or,
           ;; :receipt, as soon as it is here.
-          :copy     (let [w (if (= :receipt ack)
+          :copy     (let [ack (if (and (= :receipt ack) (cfg w :hand-off-ms) (not (cfg w :hand-off-receipt?)))
+                                :full ack)
+                          w (if (= :receipt ack)
                               (sim/send-link w id (:from ev) {:type :taken :copy copy})
                               w)
                           [w tok] (if (= :full ack)

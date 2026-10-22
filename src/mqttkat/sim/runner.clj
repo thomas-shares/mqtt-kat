@@ -66,6 +66,13 @@
   [ms]
   {:model {:admission-lag-ms ms}})
 
+(defn hand-off
+  "A publish acknowledged only once each copy for a kept session has left
+   memory, sent (`until` :sent) or answered for (:acked), or after `ms`
+   been put on the cluster's queue (mqttkat.sim.current, :hand-off-ms)."
+  [ms until]
+  {:model {:hand-off-ms ms :hand-off-until until}})
+
 (def harsh
   "Brokers killed every 2 to 5 s, connections dropped every 0.5 to 2 s,
    Rama up to 5 s behind."

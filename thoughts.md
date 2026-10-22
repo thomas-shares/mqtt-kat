@@ -2,6 +2,102 @@
 
 In this file will go my thoughts and ramblings about this project and what I have done and what I might do next.
 
+## 20261022
+
+### A publish acknowledged once its copies have left memory, in the simulation
+
+Chaos runs 211254, 132513 and 133535 (broker-kill, QoS 2) lost 0.2 to 0.4%
+of what was owed. Every loss was next to a broker kill, and every one went
+to a kept session on `+`. The chaos client now records a new message under
+an identifier it still holds (`:identifier-reused`), and none of these runs
+had one, so this is not the leases. The broker trace with
+`MQTTKAT_TRACE` gave the cause: `pending: window full` was the last step
+for each lost message, on the broker that was killed. With
+`wait-on-cluster?` off, a copy for a kept session with a full window waits
+in that broker's memory. Its publisher already has its PUBCOMP, so the
+broker dies with the copy and nobody sends it again. 500 of the 826 lost in
+133535 were resent by the publisher and acknowledged after the kill. The
+broker that took the resent PUBREL no longer held the message, and only
+answered PUBCOMP.
+
+That is the crash window R1 left open. Of the three ways to close it, the
+second was modelled first (`mqttkat.sim.current`, `:hand-off-ms`,
+`runner/hand-off`):
+
+1. `wait-on-cluster?` on: every waiting copy written to Rama. This broke the
+   load run before.
+2. **Hand-off:** the publish is acknowledged only once each copy for a kept
+   session has left this broker's memory. That means answered for by the
+   client (`:acked`) or sent to it (`:sent`). A copy still here after
+   `:hand-off-ms` is put on the cluster's queue, and the acknowledgement
+   waits only for the depot to have it (`:append-ack`). The copy stays in
+   memory as well and is dequeued once delivered.
+3. Accept the window and teach the checker its bound.
+
+Seeds 0 to 5, default faults unless named, with leases, race fixes and
+forward-ack on receipt:
+
+```clojure
+{:today            {:accepted 10432 :crash-window 1416 :enqueues 16525}
+ :wait-on-cluster  {:accepted  8410 :crash-window   28 :enqueues 15462}
+ :acked-0          {:accepted  6728 :crash-window    0 :enqueues 15838}
+ :acked-50         {:accepted  7832 :crash-window    0 :enqueues 14888}
+ :acked-100        {:accepted  5736 :crash-window    0 :enqueues 10034}
+ :acked-250        {:accepted  4601 :crash-window    0 :enqueues  7258}
+ :sent-50          {:accepted  7864 :crash-window    1 :enqueues 14206}
+ :calm-today       {:accepted 20240 :crash-window    0 :enqueues 15148}
+ :calm-acked-50    {:accepted 20231 :crash-window    0 :enqueues 20445}
+ :harsh-today      {:accepted  2876 :crash-window  688}
+ :harsh-acked-100  {:accepted  1541 :crash-window    0}}
+```
+
+And publisher acknowledgement latency in ms, seeds 0 to 3:
+
+```clojure
+{:today                    {:p50 28 :p90  42 :p99 1935 :crash-window 612}
+ :acked-50                 {:p50 31 :p90 221 :p99 2973 :crash-window   0}
+ :acked-50-copies-receipt  {:p50 29 :p90  76 :p99 2794 :crash-window 240}
+ :today-no-lag             {:accepted 12194 :p99 533 :crash-window 270}
+ :acked-50-no-lag          {:accepted 11514 :p99 944 :crash-window   0}
+ :calm-today               {:p50 27 :p90  40 :p99   51}
+ :calm-acked-50            {:p50 31 :p90  71 :p99   89}}
+```
+
+**What that says:**
+
+- **It closes the window,** on every config including harsh, and breaks no
+  other rule. `:sent` leaves one copy, which was still on the wire when the
+  broker died (the simulation drops those, while TCP mostly would not).
+- **With nothing failing, it costs nothing in throughput** and about 40 ms
+  at p99, with a third more queue writes for the slow subscriber.
+- **The cost is Rama lag.** Without lag it keeps 94% of today's throughput.
+  With lag up to 3 s it keeps 70 to 75%. The publishers in the simulation
+  allow 10 in flight, so every slow acknowledgement costs throughput.
+  Real clients allow far more.
+- **A short wait is better than a long one.** At 250 ms and above, copies
+  for the slow subscriber hold up the publisher for the whole wait. 50 ms
+  did best. 0 ms writes every copy that waits, and is slower again.
+- **A bridged copy has to wait as well.** Taken on receipt, it reopens 40%
+  of the window: the copy is then in the other broker's memory alone.
+  Taken once it has left that broker's memory, it is the larger part of
+  the latency added under faults.
+- **Waiting for the write to be processed costs more** (5,032 accepted
+  against 5,736 at 100 ms). The depot having it is enough.
+
+The two older sweeps, leases and leases with forward-ack, fail on
+exactly-once losses with or without this change. They predate the race
+fixes, which close those.
+
+**Next, if this is the choice:** in the code, PUBACK and PUBCOMP wait on
+each copy for a kept session the way they wait on writes now (`hand-off!`):
+
+- a copy in the window until its PUBACK or PUBREC;
+- a copy in pending until it is sent;
+- after 50 ms either way, an `enqueue!` with its key that waits only for
+  the depot;
+- a bridged copy acknowledged once the same holds on the other broker,
+  not on receipt.
+
 ## 20261021
 
 ### Leases held up the fastest subscribers, so the next is leased ahead
